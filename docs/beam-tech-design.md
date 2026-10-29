@@ -272,8 +272,9 @@ sequenceDiagram
 - Android:buildType debug/release;flavor `store`/`internal`;`:feature-perf` 只在 debug;cargo-ndk 构建 arm64-v8a(+ x86_64 给模拟器)。
 - CI(GitHub Actions):fmt/clippy/test(Linux 跑纯逻辑 crate,Windows runner 跑平台 crate 编译);Android assemble + 单测;release 产物检查无 perf 符号;cargo-deny 许可证检查。
 - release 无 perf 符号的可执行校验(替代"检查"这类口头约定):
-  - Rust 侧:`cargo build --release` 后执行 `nm -C target/release/beam-perf* 2>/dev/null | grep -i "perf_span\|perf::" && exit 1 || exit 0`,或用 `cargo bloat --release` 对比 debug/release 体积差;亦可在 CI 用 `cargo tree -e features` 断言 `perf-stats` 未进入 release 解析结果。
-  - Android 侧:`./gradlew :app:assembleRelease` 后对 APK 执行 `unzip -l app/build/outputs/apk/release/*.apk | grep -i "feature-perf\|perfstats" && exit 1 || exit 0`,并检查 R8 映射表中无 perf 相关类名。
+  - Rust 侧:判据必须选**只有 feature 开启才可能产生**的符号。`grep "perf_span\|perf::"` 是错的——`perf_span` 是 `macro_rules!`,feature 关闭时也存在空实现并照样导出;反混淆后的 `beam_perf::Perf` 是常驻 stub,两者都恒命中。实测可用判据是 `beam_perf::collect`(legacy mangling 形如 `_ZN9beam_perf7collect6recordE`),feature 关 0 处、开 41 处;`beam_perf::Span` 关 0 处、开 3 处。落地脚本:`tools/ci/check-no-perf/rust_no_perf.py`(字节级扫描跨平台可用,`nm -C` 通道仅 Linux 有 `nm` 时可用)。亦可用 `cargo tree -e features` 断言 `perf-stats` 未进入 release 解析结果。
+  - Android 侧:`unzip -l` 列出的是 APK 的 **zip 条目名**(`classes.dex`、`lib/**/*.so`、`res/**`),**类名不在条目名里**,因此 `unzip -l | grep "feature-perf\|perfstats"` 恒不命中、门禁恒通过。正确做法是解压后对 `classes*.dex` 做字符串扫描,匹配 `dev/beam/feature/perf`、`dev/beam/core/data/perf`、`dev/beam/core/net/Perf` 三个命名空间。落地脚本:`tools/ci/check-no-perf/apk_no_perf.py`。R8 映射表交叉验证:注意 release APK 中 `:core-data`/`:core-net` 的 perf 模型会被 R8 **混淆保留**(而非被移除),须按混淆名回查 dex,不能按原名判缺失。
+- FFmpeg 版本约束:`ffmpeg-next 8.1.0` 只兼容 **FFmpeg 6.x**(libavcodec 60.x);链 7.x/8.x 会因 `AVCodec::sample_fmts`、`AVCodec::ch_layouts` 已移除而编译失败。构建需 `FFMPEG_DIR` 指向 LGPL 构建的根目录(其下有 `include/` 与 `lib/`),且 bindgen 需要 `LIBCLANG_PATH` 指向 `libclang.dll`。换用不同 FFmpeg 后必须 `cargo clean -p ffmpeg-sys-next -p ffmpeg-next`,否则 cargo 会复用旧 bindings。
 - 签名:Windows 安装包与驱动代码签名;Android release keystore 放 CI secret。
 - FFmpeg:只用 LGPL 构建(不开 `--enable-gpl` 与 nonfree),以 DLL 动态链接,随包附许可证与源码获取说明。
 - 许可证:自有代码 MIT/Apache-2.0;禁止复制、翻译或让 AI 改写 Sunshine/Moonlight 的 GPL 代码;NVENC/AMF/QSV SDK 头文件分发前逐个核对;不使用 NVIDIA 商标作产品名。
