@@ -1,0 +1,28 @@
+[package]
+name = "beam-decode"
+description = "Beam 解码层:Windows 客户端 D3D11VA 硬解 HEVC/H.264(/AV1 v2)(§3.10)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# 真实硬解实现（依赖 ffmpeg-next 的 LGPL 动态库）。
+ffmpeg = ["dep:ffmpeg-next"]
+# §7：AV1 是 v2 能力，默认关闭。
+av1 = []
+
+[dependencies]
+beam-proto = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+ffmpeg-next = { workspace = true, optional = true }
+
+[lints]
+workspace = true

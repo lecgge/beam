@@ -1,0 +1,29 @@
+[package]
+name = "beam-host"
+description = "Beam 主机编排层:组装 capture/encode/audio/input/discovery 与会话(§3.9)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+beam-proto = { workspace = true }
+beam-session = { workspace = true }
+beam-capture = { workspace = true }
+beam-encode = { workspace = true }
+beam-audio = { workspace = true }
+beam-input = { workspace = true }
+beam-discovery = { workspace = true }
+beam-net = { workspace = true }
+beam-config = { workspace = true }
+beam-log = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+bytes = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,29 @@
+[package]
+name = "beam-ffi"
+description = "Beam FFI 层:uniffi 导出给 Android(core-net)(§3.12)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# uniffi 导出面。默认关闭，保证 crate 本身始终可编译（§3.12）。
+uniffi = ["dep:uniffi"]
+
+[dependencies]
+beam-proto = { workspace = true }
+beam-session = { workspace = true }
+beam-net = { workspace = true }
+beam-pair = { workspace = true }
+beam-discovery = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uniffi = { workspace = true, optional = true }
+
+[lints]
+workspace = true

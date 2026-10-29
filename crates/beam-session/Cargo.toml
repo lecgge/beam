@@ -1,0 +1,19 @@
+[package]
+name = "beam-session"
+description = "Beam 会话层:主/客会话状态机、能力协商、重连、统计汇总(§3.9)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+beam-proto = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

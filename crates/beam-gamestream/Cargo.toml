@@ -1,0 +1,22 @@
+[package]
+name = "beam-gamestream"
+description = "Beam GameStream 兼容层:v1 新增,仅按公开协议行为实现(§2/§5)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# §7：`gamestream` 为 v1 feature。
+gamestream = []
+
+[dependencies]
+beam-proto = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

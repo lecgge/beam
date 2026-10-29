@@ -1,0 +1,33 @@
+[package]
+name = "beam-encode"
+description = "Beam 编码层:GPU 颜色转换 + NVENC/AMF/QSV 硬编(§3.6,Windows only)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# 真实硬编实现（依赖 ffmpeg-next 的 LGPL 动态库）。
+# 本机没有原生 ffmpeg，因此该 feature 默认关闭（§3.6 / §7）。
+ffmpeg = ["dep:ffmpeg-next"]
+# §7：AV1 是 v2 能力，默认关闭。
+av1 = []
+
+[dependencies]
+beam-proto = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Direct3D",
+    "Win32_Foundation",
+] }
+ffmpeg-next = { workspace = true, optional = true }
+
+[lints]
+workspace = true

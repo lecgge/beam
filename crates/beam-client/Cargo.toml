@@ -1,0 +1,29 @@
+[package]
+name = "beam-client"
+description = "Beam 客户端编排层:组装 decode/render 与会话(§3.9/§3.10)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+beam-proto = { workspace = true }
+beam-session = { workspace = true }
+beam-decode = { workspace = true }
+beam-render = { workspace = true }
+beam-net = { workspace = true }
+# §4「只允许上层依赖下层」：client(L3) 需要 pair(L1) 的 PeerVerifier 来校验主机证书。
+beam-pair = { workspace = true }
+beam-discovery = { workspace = true }
+beam-config = { workspace = true }
+futures = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+bytes = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,30 @@
+[package]
+name = "beam-input"
+description = "Beam 输入层:SendInput 键鼠注入、ViGEm 虚拟手柄、震动回传(§3.8,Windows only)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[features]
+default = ["vigem"]
+# §7：`vigem` 默认开。关闭后手柄挂载返回 E8001（ViGEmBus 未安装）。
+vigem = ["dep:vigem-client"]
+
+[dependencies]
+beam-proto = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Foundation",
+] }
+vigem-client = { workspace = true, optional = true }
+
+[lints]
+workspace = true

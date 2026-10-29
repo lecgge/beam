@@ -1,0 +1,30 @@
+[package]
+name = "beam-capture"
+description = "Beam 抓屏层:WGC / DXGI 抓屏,输出 D3D11 纹理(§3.5,Windows only)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# 真实 WGC 抓屏实现（依赖 windows-capture）。
+wgc = ["dep:windows-capture"]
+
+[dependencies]
+beam-proto = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Direct3D",
+    "Win32_Foundation",
+] }
+windows-capture = { workspace = true, optional = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,31 @@
+[package]
+name = "beam-audio"
+description = "Beam 音频层:WASAPI loopback 采集 + Opus 编解码(§3.7)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# 真实 Opus 编解码（依赖 opus 的原生库）。
+opus = ["dep:opus"]
+
+[dependencies]
+beam-proto = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Media_Audio",
+    "Win32_Media_KernelStreaming",
+    "Win32_System_Com",
+] }
+opus = { workspace = true, optional = true }
+
+[lints]
+workspace = true

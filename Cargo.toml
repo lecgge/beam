@@ -1,0 +1,105 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+# apps/desktop/src-tauri 由桌面端同事做成独立工作区，必须排除，
+# 否则 workspace 成员缺失会在 cargo 元数据阶段直接报错（§4 分层、简报要求）。
+exclude = ["apps/desktop"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.86"
+license = "MIT OR Apache-2.0"
+authors = ["Beam Contributors"]
+repository = "https://github.com/beam-project/beam"
+homepage = "https://github.com/beam-project/beam"
+
+[workspace.dependencies]
+# ---- Beam 内部 crate（§2 工程结构、§4 依赖与分层）----
+beam-proto = { path = "crates/beam-proto", version = "0.1.0" }
+beam-net = { path = "crates/beam-net", version = "0.1.0" }
+beam-pair = { path = "crates/beam-pair", version = "0.1.0" }
+beam-discovery = { path = "crates/beam-discovery", version = "0.1.0" }
+beam-session = { path = "crates/beam-session", version = "0.1.0" }
+beam-capture = { path = "crates/beam-capture", version = "0.1.0" }
+beam-encode = { path = "crates/beam-encode", version = "0.1.0" }
+beam-audio = { path = "crates/beam-audio", version = "0.1.0" }
+beam-input = { path = "crates/beam-input", version = "0.1.0" }
+beam-decode = { path = "crates/beam-decode", version = "0.1.0" }
+beam-render = { path = "crates/beam-render", version = "0.1.0" }
+beam-config = { path = "crates/beam-config", version = "0.1.0" }
+beam-log = { path = "crates/beam-log", version = "0.1.0" }
+beam-perf = { path = "crates/beam-perf", version = "0.1.0" }
+beam-host = { path = "crates/beam-host", version = "0.1.0" }
+beam-client = { path = "crates/beam-client", version = "0.1.0" }
+beam-ffi = { path = "crates/beam-ffi", version = "0.1.0" }
+beam-gamestream = { path = "crates/beam-gamestream", version = "0.1.0" }
+
+# ---- 第三方依赖（§7 库选型；版本为 crates.io 真实发布版本）----
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+postcard = { version = "1.1", features = ["use-std"] }
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+tokio = { version = "1", features = [
+    "rt",
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "io-util",
+    "time",
+    "sync",
+] }
+quinn = { version = "0.11", default-features = false, features = [
+    "runtime-tokio",
+    "rustls-ring",
+    "log",
+] }
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "logging",
+    "std",
+    "tls12",
+] }
+rustls-pki-types = "1"
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }
+bytes = "1"
+rand = "0.9"
+# proptest 1.12 起要求 rustc 1.88，本机为 1.86.0（§4 简报要求 rust-version 1.86）。
+proptest = "=1.11.0"
+mdns-sd = "0.21"
+spake2 = "0.4"
+reed-solomon-erasure = { version = "6.0", features = ["std"] }
+toml = "0.8"
+async-trait = "0.1"
+futures = "0.3"
+sha2 = "0.10"
+hmac = "0.12"
+# time 0.3.46 起要求 rustc 1.88；rcgen 依赖 time，此处钉住 MSRV 兼容版本。
+time = "=0.3.45"
+
+# ---- 可选 / 平台相关依赖：默认不参与编译（§3.5/§3.6/§3.8、§7）----
+# 这些依赖在成员 crate 里以 `optional = true` + feature 门控引用。
+uniffi = "0.29"
+windows = "0.62"
+# windows-capture 2.x 使用 let-chains，需要 rustc ≥ 1.88；本仓库 rust-version = 1.86
+# （简报要求），因此锁定 1.5.x。升级 rustc 后可回到 2.x（§3.5）。
+windows-capture = "1.5"
+vigem-client = "0.1"
+ffmpeg-next = "8.1"
+opus = "0.4"
+
+[workspace.lints.rust]
+missing_docs = "warn"
+unsafe_op_in_unsafe_fn = "warn"
+
+[workspace.lints.clippy]
+# 禁止用 todo!/unimplemented! 糊弄未实现的平台路径（简报第 6 条）。
+todo = "warn"
+unimplemented = "warn"
+dbg_macro = "warn"
+
+[profile.release]
+lto = "thin"
+panic = "abort"

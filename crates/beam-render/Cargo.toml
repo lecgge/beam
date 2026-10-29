@@ -1,0 +1,31 @@
+[package]
+name = "beam-render"
+description = "Beam 渲染层:Windows 客户端 D3D11 flip-model 交换链上屏(§3.10)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# 真实 D3D11 渲染实现。
+d3d11 = []
+
+[dependencies]
+beam-proto = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Foundation",
+] }
+
+[lints]
+workspace = true
