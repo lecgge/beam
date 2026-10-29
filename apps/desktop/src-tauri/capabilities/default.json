@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Beam 桌面端默认权限。仅开放 core:default(窗口/事件/菜单/托盘/图片),不开放文件系统、Shell 与任意路径读写;§3.11 规定桌面端只通过 commands/events 与 Rust 交互。",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

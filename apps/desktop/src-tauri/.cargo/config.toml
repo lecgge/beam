@@ -1,0 +1,12 @@
+# src-tauri 独立工作区的 Cargo 配置。
+#
+# 本机工具链为 Rust 1.86.0,而 tauri 2.12+ / tauri-utils 2.10+ / tauri-codegen 2.7+
+# 的 MSRV 是 1.90。开启 MSRV 感知解析后,cargo 会优先挑选 MSRV <= 1.86 的版本,
+# 避免 `cargo check` 直接失败在 "requires Rust 1.90" 上。
+#
+# 本文件只在 apps/desktop/src-tauri 内生效,不影响仓库根工作区。
+[resolver]
+incompatible-rust-versions = "fallback"
+
+[net]
+retry = 3

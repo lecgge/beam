@@ -1,0 +1,71 @@
+[package]
+name = "beam-desktop"
+version = "0.1.0"
+description = "Beam 串流 Windows 桌面端(Tauri 2 外壳)"
+authors = ["Beam Contributors"]
+license = "MIT OR Apache-2.0"
+edition = "2021"
+rust-version = "1.86"
+publish = false
+
+# §2 / 任务简报:src-tauri 自成独立工作区,避免与仓库根 workspace 的成员关系冲突。
+# 根 Cargo.toml 也已 exclude = ["apps/desktop"],两边互不干扰。
+[workspace]
+
+[features]
+# beam-crates:打开 crates/beam-host、beam-client、beam-session、beam-config、beam-log 的真实接线。
+# 默认开启:crates/ 已就位,桌面端默认走真实实现。
+# 用 --no-default-features 可以退回 service.rs 里的本地桩实现,保证本仓库可独立构建。
+default = ["beam-crates"]
+beam-crates = [
+    "dep:beam-host",
+    "dep:beam-client",
+    "dep:beam-session",
+    "dep:beam-config",
+    "dep:beam-log",
+    "dep:beam-discovery",
+    "dep:beam-pair",
+    "dep:beam-net",
+    "dep:beam-proto",
+]
+
+[build-dependencies]
+tauri-build = { version = "~2.6.3", features = [] }
+
+[dependencies]
+tauri = { version = "~2.11.6", features = ["tray-icon", "image-png"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# 与 tauri 2.11 内部运行时共用同一个 tokio 1.x,供后台定时器做 sleep。
+tokio = { version = "1", features = ["time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# ---------------------------------------------------------------------------
+# 与 crates/ 的接线(§2 / §4 分层:apps/desktop → beam-host / beam-client)
+#
+# crates/beam-host、beam-client、beam-session、beam-config、beam-log 由 Rust 侧
+# 同事并行创建。接线接缝见 src/service.rs 的 `BeamService` trait:
+# feature 关闭时走本地桩实现,打开时走 crates 适配器。
+#
+#   cargo check                      # 本地桩(默认)
+#   cargo check --features beam-crates # 真实接线
+#
+# 路径说明:本 manifest 位于 apps/desktop/src-tauri/,仓库根在三级之上,
+# 所以 crates/ 的相对路径是 ../../../crates/beam-x。
+# ---------------------------------------------------------------------------
+beam-host = { path = "../../../crates/beam-host", optional = true }
+beam-client = { path = "../../../crates/beam-client", optional = true }
+beam-session = { path = "../../../crates/beam-session", optional = true }
+beam-config = { path = "../../../crates/beam-config", optional = true }
+beam-log = { path = "../../../crates/beam-log", optional = true }
+# §3.11 的命令要用到 mDNS 发现、配对信任库与 QUIC 传输,
+# 这三个 crate 是 host/client 的下游依赖,桌面端要直接调用它们的公开 API。
+beam-discovery = { path = "../../../crates/beam-discovery", optional = true }
+beam-pair = { path = "../../../crates/beam-pair", optional = true }
+beam-net = { path = "../../../crates/beam-net", optional = true }
+# §3.1 的协议类型(编解码器枚举等)在 host/client 的公开 API 上直接出现,
+# 桌面端要按名字映射它们,因此需要一个直接依赖。
+beam-proto = { path = "../../../crates/beam-proto", optional = true }
+# mDNS 浏览流是 futures::Stream,需要 StreamExt。
+futures = "0.3"
