@@ -6,11 +6,30 @@
 //!
 //! 实现使用 `reed-solomon-erasure`（GF(2^8) 擦除码）：
 //! 缺失片以 `None` 表示，恢复时按 `k` 片数据即可重建任意 `m` 片冗余。
+//!
+//! ## feature 门控：`fec`
+//!
+//! | 构建 | feature | 行为 |
+//! |---|---|---|
+//! | MVP | 默认（`default = []`） | **不产生冗余分片**：`m` 恒为 0，帧头 `fec_shards` 恒为 0；接收端不做 FEC 恢复 |
+//! | v1 | `--features fec` | 按 `ratio` 生成 `m = ceil(k×ratio)` 片冗余，接收端用冗余恢复丢片 |
+//!
+//! - feature 关闭时 `reed-solomon-erasure` 整个依赖都不参与编译（`optional = true` + `dep:` 语法），
+//!   因此 MVP 构建里没有 RS 编解码代码，也没有那 20% 的冗余带宽；
+//! - [`parity_shard_count`] 是**纯数学函数**（`m = ceil(k×ratio)`），两种构建下都可算、可测；
+//!   真正决定「发不发冗余片」的是 [`effective_parity_shard_count`]；
+//! - [`FEC_ENABLED`] 是当前构建的编译期常量，运行期不可切换。
+//!
+//! 两端必须同时打开或同时关闭 `fec`：feature 关闭的接收端拿到带冗余的帧也恢复不了丢片。
 
+#[cfg(feature = "fec")]
 use std::collections::HashMap;
+#[cfg(feature = "fec")]
 use std::sync::Arc;
 
+#[cfg(feature = "fec")]
 use reed_solomon_erasure::galois_8::Field;
+#[cfg(feature = "fec")]
 use reed_solomon_erasure::ReedSolomon;
 
 use crate::error::NetError;
@@ -21,13 +40,36 @@ pub const MAX_DATA_SHARDS: usize = 200;
 /// §5：单组总分片上限（`k + m ≤ 255`，因为帧头字段是 8 位）。
 pub const MAX_SHARDS_PER_GROUP: usize = 255;
 
+/// 当前构建是否启用 FEC 冗余（编译期常量）。
+///
+/// - `false`：MVP 构建（默认），不产生冗余分片；
+/// - `true`：v1 构建（`--features fec`）。
+pub const FEC_ENABLED: bool = cfg!(feature = "fec");
+
 /// 计算冗余片数量 `m = ceil(k × ratio)`，并保证 `k + m ≤ 255`。
+///
+/// 这是**纯数学函数**，不受 `fec` feature 影响：
+/// 即使 MVP 构建（不产生冗余片），也能算出「若开启 FEC 会有几片冗余」。
+/// 真正决定发不发冗余片的是 [`effective_parity_shard_count`]。
 pub fn parity_shard_count(k: usize, ratio: f32) -> usize {
     if k == 0 {
         return 0;
     }
     let m = (k as f32 * ratio).ceil() as usize;
     m.min(MAX_SHARDS_PER_GROUP.saturating_sub(k))
+}
+
+/// 当前构建下真正生效的冗余片数量。
+///
+/// - `fec` feature 打开：等价于 [`parity_shard_count`]；
+/// - `fec` feature 关闭（MVP）：恒为 `0` —— 发送端不产生任何冗余分片，
+///   §5 默认 `ratio = 0.2` 的那 20% 带宽在 MVP 阶段被省掉。
+pub fn effective_parity_shard_count(k: usize, ratio: f32) -> usize {
+    if FEC_ENABLED {
+        parity_shard_count(k, ratio)
+    } else {
+        0
+    }
 }
 
 /// 一个 FEC 组（同一帧的若干数据片 + 冗余片）。
@@ -55,6 +97,9 @@ impl FecGroup {
     }
 
     /// 用数据片建组并生成 `m` 片冗余（`ratio` 决定 `m`）。
+    ///
+    /// 冗余片数量取 [`effective_parity_shard_count`]：
+    /// `fec` feature 关闭时 `m = 0`，本方法只登记数据片，不做任何 RS 编码。
     pub fn encode(data: &[Vec<u8>], ratio: f32) -> Result<Self, NetError> {
         if data.is_empty() {
             return Err(NetError::ReassemblyFailed {
@@ -67,7 +112,7 @@ impl FecGroup {
                 reason: format!("FEC 组数据片 {k} 超过上限 {MAX_DATA_SHARDS}"),
             });
         }
-        let m = parity_shard_count(k, ratio);
+        let m = effective_parity_shard_count(k, ratio);
         let shard_len = data[0].len();
         if data.iter().any(|d| d.len() != shard_len) {
             return Err(NetError::ReassemblyFailed {
@@ -134,8 +179,11 @@ impl FecGroup {
 }
 
 /// FEC 编解码器，缓存 RS 矩阵，避免每帧重建（§3.2 性能预算）。
+///
+/// `fec` feature 关闭时内部不持有任何 RS 矩阵，编解码方法直接返回错误。
 #[derive(Debug, Default)]
 pub struct FecCodec {
+    #[cfg(feature = "fec")]
     codecs: HashMap<(usize, usize), Arc<ReedSolomon<Field>>>,
 }
 
@@ -145,23 +193,33 @@ impl FecCodec {
         Self::default()
     }
 
-    fn codec(&mut self, k: usize, m: usize) -> Result<Arc<ReedSolomon<Field>>, NetError> {
-        if let Some(codec) = self.codecs.get(&(k, m)) {
-            return Ok(Arc::clone(codec));
-        }
-        let codec = ReedSolomon::<Field>::new(k, m).map_err(|e| NetError::ReassemblyFailed {
-            reason: format!("创建 RS 编解码器失败(k={k}, m={m}): {e}"),
-        })?;
-        let codec = Arc::new(codec);
-        self.codecs.insert((k, m), Arc::clone(&codec));
-        Ok(codec)
-    }
-
     /// 为组生成冗余片。
+    ///
+    /// `m = 0`（feature 关闭，或 `ratio = 0`）时什么都不做。
     pub fn encode_group(&mut self, group: &mut FecGroup) -> Result<(), NetError> {
         if group.m == 0 {
             return Ok(());
         }
+        self.encode_group_rs(group)
+    }
+
+    /// 恢复缺失片；不可恢复时返回 `E2006`。
+    pub fn reconstruct_group(&mut self, group: &mut FecGroup) -> Result<(), NetError> {
+        if group.is_complete() {
+            return Ok(());
+        }
+        if !group.is_recoverable() {
+            return Err(NetError::FecUnrecoverable {
+                missing: group.missing(),
+                parity: group.present().saturating_sub(group.k),
+            });
+        }
+        self.reconstruct_group_rs(group)
+    }
+
+    /// 真正的 RS 编码（仅 `fec` feature 打开时存在）。
+    #[cfg(feature = "fec")]
+    fn encode_group_rs(&mut self, group: &mut FecGroup) -> Result<(), NetError> {
         let codec = self.codec(group.k, group.m)?;
         let mut flat: Vec<Vec<u8>> = Vec::with_capacity(group.k + group.m);
         for i in 0..group.k {
@@ -187,17 +245,17 @@ impl FecCodec {
         Ok(())
     }
 
-    /// 恢复缺失片；不可恢复时返回 `E2006`。
-    pub fn reconstruct_group(&mut self, group: &mut FecGroup) -> Result<(), NetError> {
-        if group.is_complete() {
-            return Ok(());
-        }
-        if !group.is_recoverable() {
-            return Err(NetError::FecUnrecoverable {
-                missing: group.missing(),
-                parity: group.present().saturating_sub(group.k),
-            });
-        }
+    /// `fec` feature 关闭时的占位：无法生成冗余片。
+    #[cfg(not(feature = "fec"))]
+    fn encode_group_rs(&mut self, group: &mut FecGroup) -> Result<(), NetError> {
+        Err(NetError::ReassemblyFailed {
+            reason: format!("当前构建未启用 `fec` feature,无法生成 {} 片冗余", group.m),
+        })
+    }
+
+    /// 真正的 RS 恢复（仅 `fec` feature 打开时存在）。
+    #[cfg(feature = "fec")]
+    fn reconstruct_group_rs(&mut self, group: &mut FecGroup) -> Result<(), NetError> {
         let codec = self.codec(group.k, group.m)?;
         let mut flat: Vec<Option<Vec<u8>>> = group.shards.clone();
         codec
@@ -207,6 +265,29 @@ impl FecCodec {
             })?;
         group.shards = flat;
         Ok(())
+    }
+
+    /// `fec` feature 关闭时的占位：无法恢复丢片。
+    #[cfg(not(feature = "fec"))]
+    fn reconstruct_group_rs(&mut self, group: &mut FecGroup) -> Result<(), NetError> {
+        Err(NetError::FecUnrecoverable {
+            missing: group.missing(),
+            parity: group.m,
+        })
+    }
+
+    /// 取（并缓存）`k + m` 的 RS 编解码器。
+    #[cfg(feature = "fec")]
+    fn codec(&mut self, k: usize, m: usize) -> Result<Arc<ReedSolomon<Field>>, NetError> {
+        if let Some(codec) = self.codecs.get(&(k, m)) {
+            return Ok(Arc::clone(codec));
+        }
+        let codec = ReedSolomon::<Field>::new(k, m).map_err(|e| NetError::ReassemblyFailed {
+            reason: format!("创建 RS 编解码器失败(k={k}, m={m}): {e}"),
+        })?;
+        let codec = Arc::new(codec);
+        self.codecs.insert((k, m), Arc::clone(&codec));
+        Ok(codec)
     }
 }
 
@@ -245,6 +326,30 @@ mod tests {
     }
 
     #[test]
+    fn effective_parity_follows_the_fec_feature() {
+        if FEC_ENABLED {
+            assert_eq!(effective_parity_shard_count(10, 0.2), 2);
+        } else {
+            // MVP：配置项保留但不生效，不产生任何冗余片。
+            assert_eq!(effective_parity_shard_count(10, 0.2), 0);
+            assert_eq!(effective_parity_shard_count(200, 0.2), 0);
+        }
+    }
+
+    #[test]
+    fn group_encodes_without_redundancy_when_feature_is_off() {
+        let data = shards(4, 32, 7);
+        let group = FecGroup::encode(&data, 0.2).expect("应当能建组");
+        assert_eq!(group.k, 4);
+        assert_eq!(group.m, effective_parity_shard_count(4, 0.2));
+        if !FEC_ENABLED {
+            assert_eq!(group.m, 0, "MVP 构建不应产生冗余片");
+            assert_eq!(group.shards().len(), 4);
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "fec")]
     fn can_recover_one_lost_shard() {
         let data = shards(10, 64, 1);
         let mut codec = FecCodec::new();
@@ -272,6 +377,20 @@ mod tests {
         let err = codec
             .reconstruct_group(&mut group)
             .expect_err("没有冗余时不可恢复");
+        assert_eq!(err.code(), 2006);
+    }
+
+    #[test]
+    #[cfg(not(feature = "fec"))]
+    fn feature_off_cannot_reconstruct() {
+        // MVP 构建：即使收到了足够多的片，也没有 RS 代码可用，必须报 E2006。
+        let data = shards(4, 32, 5);
+        let mut codec = FecCodec::new();
+        let mut group = FecGroup::encode(&data, 0.2).expect("应当能建组");
+        group.shards[0] = None;
+        let err = codec
+            .reconstruct_group(&mut group)
+            .expect_err("未启用 FEC 时不可恢复");
         assert_eq!(err.code(), 2006);
     }
 

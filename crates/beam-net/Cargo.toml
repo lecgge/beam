@@ -1,3 +1,11 @@
+[features]
+# §3.2 里程碑：「MVP(无 FEC)/v1(FEC+码率控制+抖动缓冲)」。
+# MVP 默认不带 FEC（默认 feature 为空），发送端不产生任何冗余分片；
+# v1 用 `--features fec` 打开 FEC 冗余。
+default = []
+# 打开 Reed-Solomon FEC 编解码（依赖 reed-solomon-erasure）。
+fec = ["dep:reed-solomon-erasure"]
+
 [package]
 name = "beam-net"
 description = "Beam 网络层:quinn 端点、datagram 分包与重组、Reed-Solomon FEC、码率控制(§3.2)"
@@ -14,7 +22,7 @@ beam-pair = { workspace = true }
 quinn = { workspace = true }
 rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
-reed-solomon-erasure = { workspace = true }
+reed-solomon-erasure = { workspace = true, optional = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

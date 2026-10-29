@@ -2,6 +2,10 @@
 //!
 //! 这一层只做「类型 ↔ Kotlin」的映射与回调桥接，不含业务逻辑。
 
+// crate 级 lint 在 `uniffi` feature 打开时放宽为 `allow`（uniffi scaffolding 含 unsafe impl），
+// 这里用模块级 `deny` 把业务代码重新收紧。
+#![deny(unsafe_code)]
+
 use beam_discovery::{DiscoveredHost, DiscoveryEvent};
 use beam_pair::{Fingerprint, PairPayload, TrustStore};
 use beam_proto::StreamConfig;

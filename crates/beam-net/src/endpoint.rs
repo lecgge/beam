@@ -6,6 +6,7 @@
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::task::Poll;
 
 use bytes::Bytes;
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
@@ -18,6 +19,7 @@ use beam_proto::{AssembledFrame, EncodedFrame};
 use crate::config::NetConfig;
 use crate::datagram::{packetize, Reassembler};
 use crate::error::NetError;
+use crate::jitter::JitterBuffer;
 
 /// 视频发送器（§3.2）。
 pub trait VideoSender {
@@ -199,6 +201,21 @@ impl Conn {
         Ok((send, recv))
     }
 
+    /// 接受一条单向流（输入通道，§5 输入 stream 客户端 → 主机）。
+    ///
+    /// 与 [`Conn::accept_bi`] 对称：QUIC 的单向流只有在收到对端数据后才对本端可见，
+    /// 因此本函数会等到客户端在输入流上写入第一条数据才返回。
+    pub async fn accept_uni(&self) -> Result<quinn::RecvStream, NetError> {
+        let recv = self
+            .connection
+            .accept_uni()
+            .await
+            .map_err(|e| NetError::Io {
+                reason: format!("接受单向流失败: {e}"),
+            })?;
+        Ok(recv)
+    }
+
     /// 发送一个数据报。
     pub fn send_datagram(&self, data: &[u8]) -> Result<(), NetError> {
         self.connection
@@ -226,11 +243,32 @@ impl Conn {
             })
     }
 
-    /// 生成视频接收流（携带重组器）。
+    /// 非阻塞地读取一个数据报；暂时没有数据时返回 `Ok(None)`。
+    ///
+    /// 与 [`Conn::read_datagram`] 的区别是**不等待网络**：
+    /// 只把已经到达并缓存在 QUIC 接收缓冲里的数据报取走，
+    /// 取不到就立刻返回 `Ok(None)`，供轮询式取帧使用。
+    pub fn try_read_datagram(&self) -> Result<Option<Vec<u8>>, NetError> {
+        let mut fut = Box::pin(self.connection.read_datagram());
+        let waker = std::task::Waker::noop();
+        let mut cx = std::task::Context::from_waker(waker);
+        match fut.as_mut().poll(&mut cx) {
+            Poll::Ready(Ok(bytes)) => Ok(Some(bytes.to_vec())),
+            Poll::Ready(Err(e)) => Err(NetError::Io {
+                reason: format!("读取数据报失败: {e}"),
+            }),
+            // 还没有数据报到达；quinn 的数据报缓存在连接状态里，不会丢。
+            Poll::Pending => Ok(None),
+        }
+    }
+
+    /// 生成视频接收流（携带重组器与抖动缓冲）。
     pub fn video_stream(&self) -> VideoStream {
         VideoStream {
             conn: self.clone(),
             reassembler: Reassembler::new(),
+            jitter: JitterBuffer::new(self.cfg.jitter_depth()),
+            expired: Vec::new(),
         }
     }
 
@@ -252,7 +290,13 @@ impl Conn {
 
 impl VideoSender for Conn {
     fn send_frame(&self, f: EncodedFrame) -> Result<(), NetError> {
-        let packets = packetize(&f, self.cfg.fec_ratio, self.cfg.max_datagram, false)?;
+        // `effective_fec_ratio`：`fec` feature 关闭（MVP）时恒为 0，不产生冗余分片。
+        let packets = packetize(
+            &f,
+            self.cfg.effective_fec_ratio(),
+            self.cfg.max_datagram,
+            false,
+        )?;
         for p in packets {
             self.send_datagram(&p.to_datagram())?;
         }
@@ -265,6 +309,9 @@ impl VideoSender for Conn {
 pub struct VideoStream {
     conn: Conn,
     reassembler: Reassembler,
+    jitter: JitterBuffer,
+    /// 因超时被丢弃的帧（每个对应一条 `E2004`）。
+    expired: Vec<NetError>,
 }
 
 impl VideoStream {
@@ -272,16 +319,66 @@ impl VideoStream {
     pub fn reassembler(&self) -> &Reassembler {
         &self.reassembler
     }
+
+    /// 抖动缓冲（§3.2 `jitter_frames`）。
+    pub fn jitter(&self) -> &JitterBuffer {
+        &self.jitter
+    }
+
+    /// 非阻塞地取下一帧画面；暂无完整帧时返回 `Ok(None)`。
+    ///
+    /// 语义：
+    ///
+    /// 1. **不完整帧会被保留**：收到的分片先进入重组器，等后续分片补齐；
+    ///    `try_next_frame` 返回 `Ok(None)` 只表示「此刻还没有完整帧」，
+    ///    不表示数据丢了。
+    /// 2. **过期帧会被丢弃**：每次调用先清理超过 `frame_timeout_us`
+    ///    仍未补齐的帧（超时从第一片到达起算，见 [`Reassembler::expire`]），
+    ///    被丢弃的帧号通过 [`VideoStream::take_expired`] 取出，
+    ///    调用方按 §3.2 记为 **`E2004`**（`NetError::FrameExpired`）。
+    /// 3. 完整帧先过抖动缓冲（§3.2 `jitter_frames`）再交出去；
+    ///    深度为 0 时不增加延迟。
+    ///
+    /// 本方法只消费**已经到达**的数据报，不会等待网络。
+    pub fn try_next_frame(&mut self) -> Result<Option<AssembledFrame>, NetError> {
+        // 1) 清理超时帧（本地单调时钟口径），丢弃的帧记为 E2004。
+        for frame_id in self.reassembler.expire_stale() {
+            self.expired.push(NetError::FrameExpired { frame_id });
+        }
+        // 2) 非阻塞地读走已经到达的数据报并喂给重组器。
+        while let Some(datagram) = self.conn.try_read_datagram()? {
+            if let Some(frame) = self.reassembler.push_datagram(&datagram)? {
+                self.jitter.push(frame, crate::now_us());
+            }
+        }
+        // 3) 经抖动缓冲放行一帧。
+        Ok(self.jitter.pop(crate::now_us()))
+    }
+
+    /// 取走因超时被丢弃的帧（每条都是 `E2004`：`NetError::FrameExpired`）。
+    pub fn take_expired(&mut self) -> Vec<NetError> {
+        std::mem::take(&mut self.expired)
+    }
 }
 
 impl VideoReceiver for VideoStream {
-    fn next_frame(&mut self) -> impl Future<Output = Result<AssembledFrame, NetError>> + Send {
-        async move {
-            loop {
-                let datagram = self.conn.read_datagram().await?;
-                if let Some(frame) = self.reassembler.push_datagram(&datagram)? {
-                    return Ok(frame);
-                }
+    async fn next_frame(&mut self) -> Result<AssembledFrame, NetError> {
+        loop {
+            // 抖动缓冲里已经有可以放行的帧就先放行。
+            if let Some(frame) = self.jitter.pop(crate::now_us()) {
+                return Ok(frame);
+            }
+            let datagram = match self.jitter.next_release_in(crate::now_us()) {
+                // 缓冲里没有待释放的帧：阻塞等下一个数据报。
+                None => self.conn.read_datagram().await?,
+                // 有帧被压着：最多等到它可以释放的时刻。
+                Some(wait) => match tokio::time::timeout(wait, self.conn.read_datagram()).await {
+                    Ok(result) => result?,
+                    Err(_) => continue,
+                },
+            };
+            if let Some(frame) = self.reassembler.push_datagram(&datagram)? {
+                self.jitter.push(frame, crate::now_us());
             }
         }
     }
@@ -290,7 +387,9 @@ impl VideoReceiver for VideoStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use beam_pair::{Identity, MemoryKeyStore, TrustStore};
+    use std::time::Duration;
+
+    use beam_pair::{Identity, MemoryKeyStore, TrustStore, TrustedPeer};
 
     fn identity() -> crate::config::TlsIdentity {
         let id = Identity::load_or_create(&MemoryKeyStore::new()).expect("应当能生成身份");
@@ -321,13 +420,128 @@ mod tests {
 
     #[tokio::test]
     async fn listen_binds_local_address() {
-        let mut cfg = NetConfig::default();
-        cfg.identity = Some(identity());
-        cfg.listen_addr = "127.0.0.1:0".parse().expect("合法地址");
+        let cfg = NetConfig {
+            identity: Some(identity()),
+            listen_addr: "127.0.0.1:0".parse().expect("合法地址"),
+            ..NetConfig::default()
+        };
         let endpoint = NetEndpoint::listen(cfg, Arc::new(TrustStore::new()))
             .await
             .expect("应当能监听");
         let addr = endpoint.local_addr().expect("应当能读到地址");
         assert!(addr.port() > 0);
+    }
+
+    // ---- 本机回环：真实 QUIC 端点 + 自签证书 + 互相信任库 ----
+
+    /// 起一对真实连接，返回（客户端, 主机端）。
+    async fn connected_pair() -> (Conn, Conn) {
+        let server_id = Identity::generate().expect("应当能生成服务端身份");
+        let client_id = Identity::generate().expect("应当能生成客户端身份");
+
+        let server_cfg = NetConfig {
+            identity: Some(crate::config::TlsIdentity {
+                cert_chain: server_id.certificate_chain(),
+                key: server_id.private_key(),
+            }),
+            listen_addr: "127.0.0.1:0".parse().expect("合法回环地址"),
+            ..NetConfig::default()
+        };
+
+        let mut server_store = TrustStore::new();
+        server_store.upsert(TrustedPeer::new(
+            client_id.fingerprint(),
+            "client",
+            "windows",
+            0,
+        ));
+
+        let server = NetEndpoint::listen(server_cfg, Arc::new(server_store))
+            .await
+            .expect("应当能监听");
+        let addr = server.local_addr().expect("应当能读到地址");
+
+        let client_cfg = NetConfig {
+            identity: Some(crate::config::TlsIdentity {
+                cert_chain: client_id.certificate_chain(),
+                key: client_id.private_key(),
+            }),
+            bind_addr: "127.0.0.1:0".parse().expect("合法回环地址"),
+            ..NetConfig::default()
+        };
+
+        let mut client_store = TrustStore::new();
+        client_store.upsert(TrustedPeer::new(
+            server_id.fingerprint(),
+            "server",
+            "windows",
+            0,
+        ));
+
+        // 主机侧的 accept 与客户端的 connect 必须并发进行：
+        // QUIC 的服务端握手要靠 accept 被轮询才能推进。
+        let (server_conn, client) = tokio::join!(
+            server.accept(),
+            NetEndpoint::connect(addr, client_cfg, Arc::new(client_store))
+        );
+        let server_conn = server_conn.expect("应当能接受连接");
+        let client = client.expect("应当能连上");
+        (client, server_conn)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn accept_uni_receives_host_side_input_stream() {
+        let (client, server) = connected_pair().await;
+
+        // 客户端开一条单向流（§5 输入 stream），写完就关闭发送方向。
+        let mut send = client.open_uni().await.expect("应当能打开单向流");
+        send.write_all(b"beam-input")
+            .await
+            .expect("应当能写入单向流");
+        send.finish().expect("应当能关闭发送方向");
+
+        // 主机侧用 accept_uni 收。
+        let mut recv = server.accept_uni().await.expect("应当能接受单向流");
+        let payload = recv.read_to_end(4096).await.expect("应当能读完单向流");
+        assert_eq!(payload, b"beam-input");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn try_next_frame_returns_frame_without_blocking() {
+        let (client, server) = connected_pair().await;
+
+        let frame = EncodedFrame {
+            frame_id: 7,
+            pts_us: 100,
+            capture_ts_us: 200,
+            is_key: true,
+            slices: vec![Bytes::from_static(b"encoded-picture")],
+        };
+        client.send_frame(frame).expect("应当能发出画面");
+
+        let mut stream = server.video_stream();
+        let mut got = None;
+        for _ in 0..200 {
+            if let Some(f) = stream.try_next_frame().expect("取帧不应报错") {
+                got = Some(f);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let got = got.expect("应当取到完整帧");
+        assert_eq!(got.frame_id, 7);
+        assert_eq!(got.capture_ts_us, 200);
+        assert!(got.is_key);
+        assert_eq!(got.payload.as_ref(), b"encoded-picture");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn try_next_frame_returns_none_when_nothing_arrived() {
+        let (_client, server) = connected_pair().await;
+        let mut stream = server.video_stream();
+        assert!(
+            stream.try_next_frame().expect("取帧不应报错").is_none(),
+            "没有数据时应当返回 Ok(None)"
+        );
     }
 }

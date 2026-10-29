@@ -129,7 +129,7 @@ impl RateController {
         }
 
         let rtt_grown = baseline > Duration::ZERO
-            && self.rtt_ewma > baseline + baseline / 4 * (RTT_GROWTH_LIMIT_PCT as u32 / 100);
+            && self.rtt_ewma > baseline + baseline / 4 * (RTT_GROWTH_LIMIT_PCT / 100);
         if self.loss_ewma < LOSS_UP_PPM && !rtt_grown {
             let next = ((self.current_bps as u64 * UP_NUM) / UP_DEN) as u32;
             let next = next.clamp(self.min_bps, self.max_bps);

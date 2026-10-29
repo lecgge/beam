@@ -99,6 +99,28 @@ impl NetConfig {
         self.max_datagram
             .saturating_sub(beam_proto::FRAME_HEADER_LEN)
     }
+
+    /// 当前构建下真正生效的 FEC 比例。
+    ///
+    /// - `fec` feature 打开（v1）：等于 [`NetConfig::fec_ratio`]；
+    /// - `fec` feature 关闭（MVP）：恒为 `0.0`。
+    ///
+    /// 也就是说 **`fec_ratio` 配置项被保留但不生效**：
+    /// 它仍然会被读取、显示、存档，但发送端不会因此产生任何冗余分片，
+    /// §5 默认 0.2 对应的 20% 带宽在 MVP 阶段被省掉。
+    /// 详见 [`crate::fec::FEC_ENABLED`]。
+    pub fn effective_fec_ratio(&self) -> f32 {
+        if crate::fec::FEC_ENABLED {
+            self.fec_ratio
+        } else {
+            0.0
+        }
+    }
+
+    /// 抖动缓冲深度（§3.2 `jitter_frames`），已按 §3.2「Wi-Fi 自适应 0–1」截断到 0–1。
+    pub fn jitter_depth(&self) -> usize {
+        (self.jitter_frames as usize).min(crate::jitter::MAX_JITTER_DEPTH)
+    }
 }
 
 /// §5 FEC 比例自适应规则。
@@ -138,5 +160,37 @@ mod tests {
         assert_eq!(adaptive_fec_ratio(0.2, 40_000_000, 500), 0.3);
         // 高码率 + 高丢包时，丢包优先。
         assert_eq!(adaptive_fec_ratio(0.2, 200_000_000, 500), 0.3);
+    }
+
+    #[test]
+    fn effective_fec_ratio_follows_the_fec_feature() {
+        let mut cfg = NetConfig::default();
+        assert_eq!(cfg.fec_ratio, 0.2, "配置项本身始终保留");
+        if crate::fec::FEC_ENABLED {
+            assert_eq!(cfg.effective_fec_ratio(), 0.2);
+        } else {
+            assert_eq!(
+                cfg.effective_fec_ratio(),
+                0.0,
+                "MVP 关闭 FEC 时配置项不生效"
+            );
+        }
+        // 配置项被改成别的值时结论不变。
+        cfg.fec_ratio = 0.5;
+        if crate::fec::FEC_ENABLED {
+            assert_eq!(cfg.effective_fec_ratio(), 0.5);
+        } else {
+            assert_eq!(cfg.effective_fec_ratio(), 0.0);
+        }
+    }
+
+    #[test]
+    fn jitter_depth_is_clamped_to_zero_or_one() {
+        let mut cfg = NetConfig::default();
+        assert_eq!(cfg.jitter_depth(), 0);
+        cfg.jitter_frames = 1;
+        assert_eq!(cfg.jitter_depth(), 1);
+        cfg.jitter_frames = 8;
+        assert_eq!(cfg.jitter_depth(), 1, "§3.2 规定取值范围是 0–1");
     }
 }

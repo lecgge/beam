@@ -8,6 +8,11 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[lib]
+# cdylib 供 Android 侧 `System.loadLibrary("beam_ffi")` 加载（§3.12），
+# 产物为 `libbeam_ffi.so`；rlib 供宿主进程（桌面端 / 单测）链接。
+crate-type = ["cdylib", "rlib"]
+
 [features]
 default = []
 # uniffi 导出面。默认关闭，保证 crate 本身始终可编译（§3.12）。

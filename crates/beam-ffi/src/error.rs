@@ -3,6 +3,10 @@
 //! §3.12：Android 侧按 `code` 显示文案；这里沿用 §6 的 `E` 码约定，
 //! 使用 `E14xxx` 段（`E11xxx` 已被配置层占用，`E12xxx` 被日志层占用）。
 
+// crate 级 lint 在 `uniffi` feature 打开时放宽为 `allow`（uniffi scaffolding 含 unsafe impl），
+// 这里用模块级 `deny` 把业务代码重新收紧。
+#![deny(unsafe_code)]
+
 /// FFI 层错误码编号段 `E14xxx`。
 pub mod code {
     /// `E14001`：配对载荷非法。
