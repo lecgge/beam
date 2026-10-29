@@ -249,7 +249,7 @@ sequenceDiagram
 |---|---|---|
 | ver | 4 | 当前 1 |
 | type | 4 | 0 视频 1 音频 2 FEC 冗余 |
-| flags | 8 | bit0 关键帧,bit1 帧末片,bit2 切片边界 |
+| flags | 8 | bit0 关键帧,bit1 帧末片,bit2 切片边界,bit3..bit7 FEC 组号 |
 | frame_id | 32 | 递增 |
 | shard_idx | 16 | 组内分片号 |
 | data_shards | 8 | k |
