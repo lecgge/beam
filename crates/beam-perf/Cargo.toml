@@ -21,5 +21,12 @@ thiserror = { workspace = true }
 [dev-dependencies]
 tempfile = "3"
 
+# §3.13 性能预算（采集开销 < 1% CPU，单点 < 200 ns）的实测基准。
+# 自带计时循环，不引入第三方基准框架，避免牵动工作区依赖树。
+[[bench]]
+name = "record_overhead"
+path = "benches/record_overhead.rs"
+harness = false
+
 [lints]
 workspace = true

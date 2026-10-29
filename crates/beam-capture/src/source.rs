@@ -1,6 +1,14 @@
 //! 抓屏源契约与默认实现（§3.5）。
 
+use beam_config::ResolvedConfig;
+
 use crate::error::CapError;
+
+/// 抓屏后端（§3.5 `backend=auto|wgc|dxgi`）。
+///
+/// **单一真值来源**：枚举本体定义在 beam-config（配置模型、校验与持久化的归属地），
+/// 本 crate 直接重新导出，不再自带一份平行定义。
+pub use beam_config::CaptureBackend;
 
 /// GPU 纹理句柄。
 ///
@@ -21,24 +29,11 @@ pub struct Texture {
     pub height: u32,
 }
 
-/// 抓屏后端（§3.5 `backend=auto|wgc|dxgi`）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CaptureBackend {
-    /// 自动选择（优先 WGC，失败回退 DXGI）。
-    Auto,
-    /// Windows Graphics Capture。
-    Wgc,
-    /// DXGI 桌面复制（v1 回退）。
-    Dxgi,
-}
-
-impl Default for CaptureBackend {
-    fn default() -> Self {
-        CaptureBackend::Auto
-    }
-}
-
 /// 抓屏配置（§3.5）。
+///
+/// **单一真值来源**：`backend` / `display_id` / `min_update_interval` 三项
+/// 由 beam-config 的 [`ResolvedConfig`] 派生（见 `From<&ResolvedConfig>`），
+/// 本 crate 不再独立定义这些配置项。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaptureConfig {
     /// 抓屏后端。
@@ -51,6 +46,21 @@ pub struct CaptureConfig {
     pub min_update_interval: Option<u32>,
     /// 目标帧率（抓屏节拍）。
     pub target_fps: u32,
+}
+
+impl From<&ResolvedConfig> for CaptureConfig {
+    /// 从配置层（§3.14 合并后的结果）派生抓屏配置。
+    ///
+    /// `backend` 取强类型枚举（非法值由 beam-config 的 `validate` 拦下，
+    /// 这里兜底回退到 `auto`）；`target_fps` 复用视频层的目标帧率。
+    fn from(cfg: &ResolvedConfig) -> Self {
+        Self {
+            backend: cfg.capture.backend_kind(),
+            display_id: cfg.capture.display_id,
+            min_update_interval: cfg.capture.min_update_interval,
+            target_fps: cfg.video.fps,
+        }
+    }
 }
 
 impl Default for CaptureConfig {
@@ -184,5 +194,39 @@ mod tests {
         src.stop();
         assert!(src.is_stopped());
         assert!(src.config().is_none());
+    }
+
+    #[test]
+    fn capture_config_is_derived_from_resolved_config() {
+        let mut cfg = ResolvedConfig::default();
+        cfg.capture.backend = "wgc".to_string();
+        cfg.capture.display_id = Some(2);
+        cfg.capture.min_update_interval = Some(8);
+        cfg.video.fps = 120;
+
+        let cap = CaptureConfig::from(&cfg);
+        assert_eq!(cap.backend, CaptureBackend::Wgc);
+        assert_eq!(cap.display_id, Some(2));
+        assert_eq!(cap.min_update_interval, Some(8));
+        // 抓屏节拍跟随视频层的目标帧率。
+        assert_eq!(cap.target_fps, 120);
+    }
+
+    #[test]
+    fn capture_config_from_default_resolved_uses_builtin_defaults() {
+        let cap = CaptureConfig::from(&ResolvedConfig::default());
+        assert_eq!(cap.backend, CaptureBackend::Auto);
+        assert_eq!(cap.display_id, None);
+        assert_eq!(cap.min_update_interval, None);
+        assert_eq!(cap.target_fps, 60);
+    }
+
+    #[test]
+    fn capture_config_derivation_falls_back_to_auto_on_bad_backend() {
+        // 非法后端应当已被 beam-config 的 validate 拦下；
+        // 这里验证派生侧的兜底不会 panic。
+        let mut cfg = ResolvedConfig::default();
+        cfg.capture.backend = "miracast".to_string();
+        assert_eq!(CaptureConfig::from(&cfg).backend, CaptureBackend::Auto);
     }
 }

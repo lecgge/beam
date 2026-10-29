@@ -6,6 +6,15 @@
 #   - release 产物检查无 perf 符号（perf-stats feature 默认关闭）
 #   - cargo-deny 许可证检查
 #
+# release 无 perf 符号的可执行校验实现在 tools/ci/check-no-perf/（详见该目录 README）：
+#   - Android：扫 APK 内 classes*.dex 的类名字符串 + R8 映射表交叉验证。
+#     旧的 `unzip -l "$APK" | grep -i "feature-perf|perfstats"` 扫的是 **zip 条目名**，
+#     类名不在条目名里 → 恒通过、门禁空转，已废弃。
+#   - Rust：扫 release 产物里的 perf 采集符号；Linux 额外叠加文档 §7:275 的 `nm -C` 口径。
+#
+# 每条 perf 门禁都配了一个**负样本自检**步骤：门禁必须能证明自己抓得到东西，
+# 否则视为失效（这正是本批要修的「门禁恒通过」问题）。
+#
 # 说明：CI 不做代码签名（Windows 安装包与 Android release keystore 走 CI secret）。
 
 name: CI
@@ -34,20 +43,41 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: fmt
+        shell: bash
         run: cargo fmt --all --check
       - name: clippy
+        shell: bash
         run: cargo clippy --workspace --all-targets -- -D warnings
       # Linux 只跑与平台无关的 crate：capture/encode/decode/render/input 是 windows only，
       # 其余 crate 的纯逻辑部分在 Linux 上必须全绿。
       - name: test
+        shell: bash
         run: cargo test --workspace --exclude beam-capture --exclude beam-encode --exclude beam-decode --exclude beam-render --exclude beam-input
       - name: perf-stats 不得进入默认依赖解析
+        shell: bash
         run: |
           if cargo tree -e features | grep -q "beam-perf.*perf-stats"; then
             echo "::error::perf-stats 进入了默认特性解析结果"
             exit 1
           fi
+      # §7:275：release 产物不得含 perf 符号。Linux 上按文档口径用 `nm -C` 反混淆扫描
+      # （beam-perf 是唯一持有 perf 采集实现的 crate，workspace 内没有 crate 依赖它）。
+      - name: release 产物无 perf 符号（nm -C）
+        shell: bash
+        run: |
+          cargo build --release -p beam-perf
+          python3 tools/ci/check-no-perf/rust_no_perf.py --target-dir target/release --require-nm
+      # 负样本自检：perf-stats 开启时必须被 **nm 通道** 检出，
+      # 否则说明上面那道门禁已经空转。
+      - name: 门禁自检（perf-stats 开启的产物必须被检出）
+        shell: bash
+        run: |
+          CARGO_TARGET_DIR="$RUNNER_TEMP/beam-perf-perf-on" cargo build --release -p beam-perf --features perf-stats
+          python3 tools/ci/check-no-perf/rust_no_perf.py --target-dir "$RUNNER_TEMP/beam-perf-perf-on/release" --require-nm --expect nm-perf
 
   rust-windows:
     name: Rust · 全量含平台 crate (Windows)
@@ -58,20 +88,33 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: fmt
+        shell: pwsh
         run: cargo fmt --all --check
       - name: check（含 windows only crate）
+        shell: pwsh
         run: cargo check --workspace --all-targets
       - name: test
+        shell: pwsh
         run: cargo test --workspace
-      # §7：release 产物不得含 perf 符号
+      # §7:275：release 产物不得含 perf 符号。
+      # Windows runner 没有 nm（`nm -C` 不可用），改用跨平台的字节级扫描 ——
+      # 等价于 `grep -a` 直接扫二进制，能认出 legacy mangling 的 `_ZN9beam_perf7collect…`。
       - name: release 产物无 perf 符号
         shell: pwsh
         run: |
           cargo build --release --workspace
-          $hits = Get-ChildItem target\release -Recurse -Include *.dll,*.exe -ErrorAction SilentlyContinue |
-            Select-String -Pattern 'perf_span|perf::' -List -ErrorAction SilentlyContinue
-          if ($hits) { Write-Error "release 产物中出现 perf 符号：$($hits.Path)"; exit 1 }
+          python tools/ci/check-no-perf/rust_no_perf.py --target-dir target/release
+      # 负样本自检：perf-stats 开启时必须被检出，否则说明上面那道门禁已经空转。
+      - name: 门禁自检（perf-stats 开启的产物必须被检出）
+        shell: pwsh
+        run: |
+          $env:CARGO_TARGET_DIR = "${{ runner.temp }}\beam-perf-perf-on"
+          cargo build --release -p beam-perf --features perf-stats
+          python tools/ci/check-no-perf/rust_no_perf.py --target-dir "$env:CARGO_TARGET_DIR/release" --expect perf
       - name: cargo-deny 许可证检查
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
@@ -86,24 +129,37 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - uses: android-actions/setup-android@v3
       - uses: gradle/actions/setup-gradle@v4
       - name: 单元测试
         working-directory: android
+        shell: bash
         run: ./gradlew test
       - name: debug 构建
         working-directory: android
+        shell: bash
         run: ./gradlew :app:assembleDebug
-      # §7：release APK 内不得出现 perf 相关类
+      # §7:276：release APK 内不得出现 perf 相关类。
+      # 检查对象是 **classes*.dex 里的类名字符串**（流式读进内存，不落盘），
+      # 并用 R8 映射表交叉验证「类是否被混淆保留在包里」。
       - name: release APK 无 perf 类
         working-directory: android
+        shell: bash
         run: |
           ./gradlew :app:assembleRelease
-          APK=$(ls app/build/outputs/apk/release/*.apk | head -1)
-          if unzip -l "$APK" | grep -qi "feature-perf\|perfstats"; then
-            echo "::error::release APK 中出现 perf 相关类"
-            exit 1
-          fi
+          python3 ../tools/ci/check-no-perf/apk_no_perf.py \
+            --apk 'app/build/outputs/apk/release/*.apk' \
+            --mapping 'app/build/outputs/mapping/release/mapping.txt'
+      # 负样本自检：debug APK 里含 :feature-perf 的类（debugImplementation），
+      # 必须被抓到，否则说明上面那道门禁已经空转。
+      - name: 门禁自检（debug APK 必须被检出）
+        working-directory: android
+        shell: bash
+        run: |
+          python3 ../tools/ci/check-no-perf/apk_no_perf.py --apk 'app/build/outputs/apk/debug/*.apk' --expect perf
 
   desktop:
     name: 桌面端 · 前端构建 + Rust 检查
@@ -120,9 +176,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: npm ci
-      - run: npm run build
+      - name: npm ci
+        shell: pwsh
+        run: npm ci
+      - name: npm run build
+        shell: pwsh
+        run: npm run build
       - name: src-tauri 检查
-        working-directory: apps/desktop/src-tauri
+        shell: pwsh
         run: cargo check
-

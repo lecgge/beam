@@ -7,6 +7,7 @@
 //! 这里定义与 beam-capture 同形的 [`CapturedFrame`]（同样的字段名与语义），
 //! 由 beam-host 做一次性转换；两者字段一一对应，转换零成本。
 
+use beam_config::ResolvedConfig;
 use beam_proto::{CodecKind, EncodedFrame};
 
 use crate::error::EncError;
@@ -104,6 +105,10 @@ pub struct EncoderCaps {
 }
 
 /// 编码配置（§3.6）。
+///
+/// **单一真值来源**：`slices` / `sfe`（以及 `encoder` / `codec` / `bitrate_bps` / `fps`）
+/// 由 beam-config 的 [`ResolvedConfig`] 派生（见 `From<&ResolvedConfig>`），
+/// 本 crate 不再独立定义这些配置项。
 #[derive(Debug, Clone, PartialEq)]
 pub struct EncodeConfig {
     /// 编码器。
@@ -120,6 +125,35 @@ pub struct EncodeConfig {
     pub sfe: bool,
     /// 强制 IDR 的间隔（帧数）；`0` 表示只按需请求。
     pub idr_interval: u32,
+}
+
+impl From<&ResolvedConfig> for EncodeConfig {
+    /// 从配置层（§3.14 合并后的结果）派生编码配置。
+    ///
+    /// `slices` 在配置层是 `Option<u32>`：`None` 表示不切片（落成 `0`），
+    /// 显式设置的值必须是 1..=`MAX_SLICES` 的正整数（由 beam-config 的 `validate` 保证）。
+    fn from(cfg: &ResolvedConfig) -> Self {
+        Self {
+            encoder: EncoderKind::from_name(&cfg.video.encoder).unwrap_or_default(),
+            codec: codec_kind_from_name(&cfg.video.codec),
+            bitrate_bps: cfg.video.bitrate_bps,
+            fps: cfg.video.fps,
+            slices: cfg.video.slices.unwrap_or(0),
+            sfe: cfg.video.sfe,
+            ..EncodeConfig::default()
+        }
+    }
+}
+
+/// 由配置名解析编解码器（§3.6 `codec=hevc|h264|av1`）。
+///
+/// 非法取值由 beam-config 的 `validate` 拦下，这里兜底回退到 HEVC。
+fn codec_kind_from_name(name: &str) -> CodecKind {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "h264" => CodecKind::H264,
+        "av1" => CodecKind::Av1,
+        _ => CodecKind::Hevc,
+    }
 }
 
 impl Default for EncodeConfig {
@@ -299,5 +333,47 @@ mod tests {
         );
         assert!(supports_codec(CodecKind::H264));
         assert!(supports_codec(CodecKind::Hevc));
+    }
+
+    #[test]
+    fn encode_config_is_derived_from_resolved_config() {
+        let mut cfg = ResolvedConfig::default();
+        cfg.video.encoder = "nvenc".to_string();
+        cfg.video.codec = "h264".to_string();
+        cfg.video.bitrate_bps = 30_000_000;
+        cfg.video.fps = 120;
+        cfg.video.slices = Some(2);
+        cfg.video.sfe = true;
+
+        let enc = EncodeConfig::from(&cfg);
+        assert_eq!(enc.encoder, EncoderKind::Nvenc);
+        assert_eq!(enc.codec, CodecKind::H264);
+        assert_eq!(enc.bitrate_bps, 30_000_000);
+        assert_eq!(enc.fps, 120);
+        assert_eq!(enc.slices, 2);
+        assert!(enc.sfe);
+    }
+
+    #[test]
+    fn encode_config_from_default_resolved_uses_builtin_defaults() {
+        let enc = EncodeConfig::from(&ResolvedConfig::default());
+        assert_eq!(enc.encoder, EncoderKind::Auto);
+        assert_eq!(enc.codec, CodecKind::Hevc);
+        assert_eq!(enc.bitrate_bps, 20_000_000);
+        assert_eq!(enc.fps, 60);
+        // 未设置切片 = 不切片（§3.6 的切片与 SFE 都是 v1 能力，默认关闭）。
+        assert_eq!(enc.slices, 0);
+        assert!(!enc.sfe);
+    }
+
+    #[test]
+    fn encode_config_derivation_falls_back_on_bad_names() {
+        // 非法取值应当已被 beam-config 的 validate 拦下；这里验证派生侧不 panic。
+        let mut cfg = ResolvedConfig::default();
+        cfg.video.encoder = "h264-encoder".to_string();
+        cfg.video.codec = "vp9".to_string();
+        let enc = EncodeConfig::from(&cfg);
+        assert_eq!(enc.encoder, EncoderKind::Auto);
+        assert_eq!(enc.codec, CodecKind::Hevc);
     }
 }

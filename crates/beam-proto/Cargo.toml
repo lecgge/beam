@@ -16,6 +16,13 @@ bytes = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+criterion = { workspace = true }
+
+# §3.1 性能预算：单消息编解码 < 2 µs。
+# criterion 自带 harness，必须关闭 libtest harness。
+[[bench]]
+name = "codec"
+harness = false
 
 [lints]
 workspace = true

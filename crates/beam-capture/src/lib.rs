@@ -11,7 +11,7 @@
 //!
 //! - **负责**：抓屏、纹理交付、帧节拍。
 //! - **不负责**：不做颜色转换和编码；不拷到 CPU。
-//! - **依赖**：windows-capture、windows crate。
+//! - **依赖**：windows-capture、windows crate、beam-config（配置模型）。
 //! - **被依赖**：beam-host。
 //! - **禁止**：依赖 net（§3.5）。
 //!
@@ -32,6 +32,10 @@
 //! ## 配置
 //!
 //! `backend=auto|wgc|dxgi`、`display_id`、`min_update_interval`。
+//!
+//! **单一真值来源**：这三项由 beam-config 承载（§3.14 的模型、校验与持久化），
+//! 本 crate 用 `CaptureConfig::from(&ResolvedConfig)` 派生，不再自带一份配置定义；
+//! [`CaptureBackend`] 同样是 beam-config 的枚举，本 crate 只做重新导出。
 //!
 //! ## 平台限制（§3.5 末尾）
 //!

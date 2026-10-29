@@ -5,12 +5,13 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use crate::histogram::Histogram;
 use crate::ring::{RingBuffer, Sample};
 use crate::stage::Stage;
+use crate::sysinfo::{SystemUsage, SystemUsageSource};
 use crate::{ExportFormat, Perf, PerfError, PerfSnapshot, StageSnapshot};
 
 /// 全局采集器。
@@ -21,6 +22,8 @@ pub struct Collector {
     bitrate_bps: u32,
     fps: u32,
     dropped_frames: u32,
+    /// 最近一次系统资源占用采样；未采样时为 `None`。
+    system: Option<SystemUsage>,
     start: Instant,
 }
 
@@ -32,6 +35,7 @@ impl Default for Collector {
             bitrate_bps: 0,
             fps: 0,
             dropped_frames: 0,
+            system: None,
             start: Instant::now(),
         }
     }
@@ -40,6 +44,38 @@ impl Default for Collector {
 fn collector() -> &'static Mutex<Collector> {
     static COLLECTOR: OnceLock<Mutex<Collector>> = OnceLock::new();
     COLLECTOR.get_or_init(|| Mutex::new(Collector::default()))
+}
+
+/// 已注册的系统资源占用采样源。
+///
+/// 未注册时采样入口返回 `None`（**不返回假数据**）。
+fn system_usage_source() -> &'static RwLock<Option<Arc<dyn SystemUsageSource>>> {
+    static SOURCE: OnceLock<RwLock<Option<Arc<dyn SystemUsageSource>>>> = OnceLock::new();
+    SOURCE.get_or_init(|| RwLock::new(None))
+}
+
+/// 注册系统资源占用采样源（后注册覆盖先注册）。
+pub fn set_system_usage_source(source: Arc<dyn SystemUsageSource>) {
+    let Ok(mut guard) = system_usage_source().write() else {
+        return;
+    };
+    *guard = Some(source);
+}
+
+/// 采样一次系统资源占用。
+///
+/// 没有注册采样源，或采样源报告不可用时返回 `None`。
+pub fn sample_system_usage() -> Option<SystemUsage> {
+    let source = {
+        let guard = system_usage_source().read().ok()?;
+        guard.clone()
+    }?;
+    let usage = source.sample()?;
+    let Ok(mut c) = collector().lock() else {
+        return Some(usage);
+    };
+    c.system = Some(usage.clone());
+    Some(usage)
 }
 
 /// 记录一次阶段耗时。
@@ -76,6 +112,7 @@ pub fn reset() {
     c.bitrate_bps = 0;
     c.fps = 0;
     c.dropped_frames = 0;
+    c.system = None;
     c.start = Instant::now();
 }
 
@@ -108,6 +145,7 @@ pub fn snapshot() -> PerfSnapshot {
         bitrate_bps: c.bitrate_bps,
         fps: c.fps,
         dropped_frames: c.dropped_frames,
+        system: c.system.clone(),
     }
 }
 
@@ -147,7 +185,34 @@ fn to_csv(snapshot: &PerfSnapshot) -> String {
         "# bitrate_bps={},fps={},dropped_frames={},samples={}\n",
         snapshot.bitrate_bps, snapshot.fps, snapshot.dropped_frames, snapshot.samples
     ));
+    out.push_str(&system_csv(snapshot.system.as_ref()));
     out
+}
+
+/// 系统资源占用的 CSV 片段（注释行）。
+///
+/// 采样不可用时写出 `unavailable`，**不写 0**（0 会被误读成「确实没有占用」）。
+fn system_csv(system: Option<&SystemUsage>) -> String {
+    match system {
+        None => String::from("# system=cpu:unavailable,gpu:unavailable,memory:unavailable\n"),
+        Some(u) => {
+            let cpu = u
+                .cpu_percent
+                .map(|v| format!("{v:.2}"))
+                .unwrap_or_else(|| "unavailable".to_string());
+            let gpu = u
+                .gpu_percent
+                .map(|v| format!("{v:.2}"))
+                .unwrap_or_else(|| "unavailable".to_string());
+            let mem = match (u.memory_used_bytes, u.memory_total_bytes) {
+                (Some(used), Some(total)) => format!("{used}/{total}"),
+                (Some(used), None) => format!("{used}/unavailable"),
+                (None, Some(total)) => format!("unavailable/{total}"),
+                (None, None) => "unavailable".to_string(),
+            };
+            format!("# system=cpu:{cpu},gpu:{gpu},memory:{mem}\n")
+        }
+    }
 }
 
 fn snapshot_json(snapshot: &PerfSnapshot) -> serde_json::Value {
@@ -156,6 +221,12 @@ fn snapshot_json(snapshot: &PerfSnapshot) -> serde_json::Value {
         "fps": snapshot.fps,
         "dropped_frames": snapshot.dropped_frames,
         "samples": snapshot.samples,
+        "system": snapshot.system.as_ref().map(|u| serde_json::json!({
+            "cpu_percent": u.cpu_percent,
+            "gpu_percent": u.gpu_percent,
+            "memory_used_bytes": u.memory_used_bytes,
+            "memory_total_bytes": u.memory_total_bytes,
+        })),
         "stages": snapshot.stages.iter().map(|(stage, s)| serde_json::json!({
             "stage": stage.as_str(),
             "count": s.count,
@@ -215,7 +286,74 @@ mod tests {
         let value: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&json).expect("应当能读"))
                 .expect("应当是 JSON");
-        assert!(value["stages"].as_array().expect("应当有阶段数组").len() >= 1);
+        assert!(!value["stages"]
+            .as_array()
+            .expect("应当有阶段数组")
+            .is_empty());
+        reset();
+    }
+
+    /// 固定返回一份数据的采样源。
+    struct FixedSource(Option<SystemUsage>);
+
+    impl SystemUsageSource for FixedSource {
+        fn sample(&self) -> Option<SystemUsage> {
+            self.0.clone()
+        }
+    }
+
+    #[test]
+    fn sample_without_source_returns_none() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // 未注册采样源 → 采样不可用，返回 None 而不是假数据。
+        set_system_usage_source(Arc::new(FixedSource(None)));
+        assert_eq!(sample_system_usage(), None);
+        assert_eq!(snapshot().system, None);
+    }
+
+    #[test]
+    fn sampled_usage_reaches_snapshot() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+        let usage = SystemUsage {
+            cpu_percent: Some(12.5),
+            gpu_percent: Some(30.0),
+            memory_used_bytes: Some(1024),
+            memory_total_bytes: Some(2048),
+        };
+        set_system_usage_source(Arc::new(FixedSource(Some(usage.clone()))));
+        let got = sample_system_usage().expect("应当能采样");
+        assert_eq!(got, usage);
+        let s = snapshot();
+        assert_eq!(s.system, Some(usage));
+        reset();
+    }
+
+    #[test]
+    fn unavailable_source_does_not_fake_numbers() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+        set_system_usage_source(Arc::new(FixedSource(None)));
+        assert_eq!(sample_system_usage(), None);
+        let s = snapshot();
+        assert_eq!(s.system, None);
+        // 快照里不应出现 0 之类的占位数字。
+        assert!(s.system.is_none());
+        reset();
+    }
+
+    #[test]
+    fn csv_marks_unavailable_system_metrics() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+        let dir = tempfile::tempdir().expect("应当能建临时目录");
+        let csv = dir.path().join("perf.csv");
+        export(ExportFormat::Csv, &csv).expect("应当能导出 CSV");
+        let text = std::fs::read_to_string(&csv).expect("应当能读");
+        assert!(
+            text.contains("cpu:unavailable"),
+            "采样不可用时应写 unavailable，实际：{text}"
+        );
         reset();
     }
 }

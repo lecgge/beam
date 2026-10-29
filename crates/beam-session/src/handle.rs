@@ -5,10 +5,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
-use beam_proto::StreamConfig;
+use beam_proto::{Agreed, StreamConfig};
 use futures::channel::mpsc;
 use futures::stream::Stream;
 
+use crate::clock::{Clock, SystemClock};
 use crate::error::SessionError;
 use crate::event::{SessionEvent, SessionInput};
 use crate::state::SessionState;
@@ -37,13 +38,25 @@ pub(crate) trait SessionRunner: Send {
     fn apply(&mut self, input: SessionInput);
     /// 推进一步（取帧 / 收帧）。
     fn pump(&mut self);
+    /// 配置被更新（§3.9 `SessionHandle::update`）。
+    ///
+    /// 默认实现什么都不做；客户端据此把新配置下发给主机。
+    fn on_update(&mut self, _config: &StreamConfig) {}
+    /// 会话被主动结束（§3.9 `SessionHandle::stop`）。
+    ///
+    /// 默认实现什么都不做；据此发送 `Bye` 并释放传输。
+    fn on_stop(&mut self) {}
 }
 
 /// 会话内部状态（句柄与驱动方共享）。
 pub(crate) struct SessionInner {
     pub(crate) state: Mutex<SessionState>,
     pub(crate) config: Mutex<StreamConfig>,
+    /// 能力协商结果（§3.1 `Agreed`），协商成功后写入。
+    pub(crate) agreed: Mutex<Option<Agreed>>,
     pub(crate) timeouts: Mutex<SessionTimeouts>,
+    /// 会话时钟（可注入，单测用假时钟推进时间）。
+    pub(crate) clock: Mutex<Arc<dyn Clock>>,
     pub(crate) events_tx: mpsc::UnboundedSender<SessionEvent>,
     pub(crate) events_rx: Mutex<Option<mpsc::UnboundedReceiver<SessionEvent>>>,
     pub(crate) stopped: AtomicBool,
@@ -64,6 +77,43 @@ impl SessionInner {
     pub(crate) fn emit(&self, event: SessionEvent) {
         let _ = self.events_tx.unbounded_send(event);
     }
+
+    /// 当前时钟毫秒数。
+    pub(crate) fn now_ms(&self) -> u64 {
+        self.clock.lock().map(|g| g.now_ms()).unwrap_or_default()
+    }
+
+    /// 当前超时参数。
+    pub(crate) fn timeouts(&self) -> SessionTimeouts {
+        self.timeouts.lock().map(|g| *g).unwrap_or_default()
+    }
+
+    /// 当前时钟（克隆一份给运行体）。
+    pub(crate) fn clock(&self) -> Arc<dyn Clock> {
+        self.clock
+            .lock()
+            .map(|g| Arc::clone(&g))
+            .unwrap_or_else(|_| Arc::new(SystemClock))
+    }
+
+    /// 当前串流配置。
+    pub(crate) fn config(&self) -> StreamConfig {
+        self.config.lock().map(|g| g.clone()).unwrap_or_default()
+    }
+
+    /// 覆盖串流配置。
+    pub(crate) fn set_config(&self, config: StreamConfig) {
+        if let Ok(mut guard) = self.config.lock() {
+            *guard = config;
+        }
+    }
+
+    /// 记录能力协商结果。
+    pub(crate) fn set_agreed(&self, agreed: Option<Agreed>) {
+        if let Ok(mut guard) = self.agreed.lock() {
+            *guard = agreed;
+        }
+    }
 }
 
 /// 会话句柄（§3.9）。
@@ -83,13 +133,35 @@ impl SessionHandle {
             inner: Arc::new(SessionInner {
                 state: Mutex::new(state),
                 config: Mutex::new(config),
+                agreed: Mutex::new(None),
                 timeouts: Mutex::new(SessionTimeouts::default()),
+                clock: Mutex::new(Arc::new(SystemClock)),
                 events_tx,
                 events_rx: Mutex::new(Some(events_rx)),
                 stopped: AtomicBool::new(false),
                 runner: Mutex::new(None),
             }),
         }
+    }
+
+    /// 注入时钟（§3.9：超时判定必须可用假时钟驱动）。
+    ///
+    /// 单测注入 [`crate::clock::ManualClock`] 后即可推进时间，
+    /// 覆盖「3 s 停滞 → Reconnecting」「30 s 超时 → Closed」两条判定。
+    pub fn set_clock(&self, clock: Arc<dyn Clock>) {
+        if let Ok(mut guard) = self.inner.clock.lock() {
+            *guard = clock;
+        }
+    }
+
+    /// 当前时钟毫秒数。
+    pub fn now_ms(&self) -> u64 {
+        self.inner.now_ms()
+    }
+
+    /// 能力协商结果（§3.1 `Agreed`）；尚未协商时为 `None`。
+    pub fn agreed(&self) -> Option<Agreed> {
+        self.inner.agreed.lock().ok().and_then(|g| g.clone())
     }
 
     /// 设置超时参数。
@@ -162,16 +234,30 @@ impl SessionHandle {
     }
 
     /// 更新串流配置（§3.9 `update(StreamConfig)`）。
+    ///
+    /// 配置写入后会通知运行体，由它把变更下发到对端
+    /// （客户端发 `ControlMsg::StreamConfig`），因此这条调用**真的生效**。
     pub fn update(&self, config: StreamConfig) -> Result<(), SessionError> {
         if self.inner.stopped.load(Ordering::Relaxed) {
             return Err(SessionError::SessionClosed);
         }
+        {
+            let mut guard = self
+                .inner
+                .config
+                .lock()
+                .map_err(|_| SessionError::SessionClosed)?;
+            *guard = config.clone();
+        }
+        // 注意：先释放 config 锁再进 runner，避免运行体回读配置时死锁。
         let mut guard = self
             .inner
-            .config
+            .runner
             .lock()
             .map_err(|_| SessionError::SessionClosed)?;
-        *guard = config;
+        if let Some(runner) = guard.as_mut() {
+            runner.on_update(&config);
+        }
         Ok(())
     }
 
@@ -194,9 +280,16 @@ impl SessionHandle {
     }
 
     /// 主动结束会话（§3.9 `stop()`）。
+    ///
+    /// 先通知运行体收尾（发 `Bye`、释放传输），再置终态并发事件。
     pub fn stop(&self) {
         if self.inner.stopped.swap(true, Ordering::SeqCst) {
             return;
+        }
+        if let Ok(mut guard) = self.inner.runner.lock() {
+            if let Some(runner) = guard.as_mut() {
+                runner.on_stop();
+            }
         }
         if let Ok(mut guard) = self.inner.state.lock() {
             *guard = SessionState::Closed;

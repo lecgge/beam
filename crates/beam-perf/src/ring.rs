@@ -114,7 +114,7 @@ mod tests {
             rb.push(Sample {
                 ts_us: i,
                 stage: Stage::Encode,
-                value_ns: i as u64,
+                value_ns: i,
             });
         }
         assert_eq!(rb.len(), 4);

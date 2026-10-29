@@ -18,11 +18,17 @@
 //! ## 错误码
 //!
 //! 编排层只做组装，错误沿用 `E10xxx`（decode / render）与 `E2xxx`（net）。
+//!
+//! ## 通道（§5）
+//!
+//! - 控制 stream 0（双向可靠）：[`NetTransport`] 的 `ControlChannel` 实现；
+//! - 输入 stream（单向可靠，客户端 → 主机）：`NetTransport::send_input`；
+//! - 视频 / 音频：QUIC datagram。
 
 #![forbid(unsafe_code)]
 
 pub mod adapters;
 pub mod runtime;
 
-pub use adapters::{DecodeRenderConsumer, NetTransport};
+pub use adapters::{DecodeRenderConsumer, NetRateController, NetTransport};
 pub use runtime::{ClientConfig, ClientError, ClientRuntime};

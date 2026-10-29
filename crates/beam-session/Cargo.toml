@@ -10,6 +10,9 @@ repository.workspace = true
 
 [dependencies]
 beam-proto = { workspace = true }
+# §3.3 配对流程（`PairRequest` / `PairChallenge` / `PairOk` / `PairFail`）由 beam-pair 提供；
+# beam-pair 的 crate 文档也写明「被依赖：net、session、ffi」。
+beam-pair = { workspace = true }
 bytes = { workspace = true }
 futures = { workspace = true }
 thiserror = { workspace = true }

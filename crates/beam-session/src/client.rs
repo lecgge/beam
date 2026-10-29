@@ -2,14 +2,27 @@
 //!
 //! 客户端侧串联：net → decode → render；并把输入事件回传主机。
 //! 与主机侧一样，全部依赖通过 trait 注入（§3.9 边界）。
+//!
+//! 控制通道（§5 控制 stream 0）由 [`Transport`] 承载：
+//! 连接建立后客户端按 §4.1 时序发 `PairRequest` / `PairChallenge`，
+//! 配对完成后发 [`ControlMsg::Hello`]，收到 [`ControlMsg::HelloAck`]
+//! 才真正进入串流态——能力协商**真的跑一次**，不再只是状态机跳步。
 
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use beam_proto::StreamConfig;
+use beam_proto::message::Hello;
+use beam_proto::{ControlMsg, Feedback, ProtocolVersion, StatsReport, StreamConfig};
 
+use crate::clock::duration_ms;
+use crate::control::{
+    caps_from_config, config_from_agreed, next_session_id, ControlContext, ControlOutcome,
+    ControlRole, PairingConfig, STATS_INTERVAL_MS,
+};
 use crate::error::SessionError;
-use crate::event::{FrameConsumer, SessionEvent, SessionInput, Transport, TransportFactory};
+use crate::event::{
+    FrameConsumer, RateControl, SessionEvent, SessionInput, Transport, TransportFactory,
+};
 use crate::handle::{SessionHandle, SessionInner, SessionRunner, SessionTimeouts};
 use crate::state::{SessionState, StateMachine};
 
@@ -87,6 +100,24 @@ impl std::fmt::Debug for ClientDeps {
     }
 }
 
+/// 客户端侧控制通道依赖（§4.1 时序）。
+#[derive(Default)]
+pub struct ClientControlDeps {
+    /// 配对配置（§3.3）。留空表示本次连接不需要配对。
+    pub pairing: PairingConfig,
+    /// 码率控制器（§3.2）。收到 `Feedback` 时喂给它。
+    pub rate: Option<Box<dyn RateControl>>,
+}
+
+impl std::fmt::Debug for ClientControlDeps {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientControlDeps")
+            .field("pairing", &self.pairing)
+            .field("rate", &self.rate.is_some())
+            .finish()
+    }
+}
+
 /// 客户端会话驱动。
 pub(crate) struct ClientRunner {
     machine: StateMachine,
@@ -94,6 +125,21 @@ pub(crate) struct ClientRunner {
     consumer: Option<Box<dyn FrameConsumer>>,
     transport: Option<Box<dyn Transport>>,
     inner: Weak<SessionInner>,
+    ctrl: ControlContext,
+    /// 会话号（§5 `Resume{session_id}`）。
+    session_id: u64,
+    /// 最后一次收到帧 / 控制消息的时间戳（§4.1「3 s 无数据」）。
+    last_data_ms: u64,
+    /// 进入 `Reconnecting` 的时间戳（§4.1「30 s 超时」）。
+    reconnect_since_ms: Option<u64>,
+    /// 是否已经发起过握手。
+    handshake_started: bool,
+    /// 是否已经发出 `Hello`。
+    hello_sent: bool,
+    /// 上一次统计上报时间戳。
+    last_stats_ms: u64,
+    /// 本端统计。
+    stats: StatsReport,
 }
 
 impl ClientRunner {
@@ -141,6 +187,264 @@ impl ClientRunner {
             });
         }
     }
+
+    fn now_ms(&self) -> u64 {
+        self.inner.upgrade().map(|i| i.now_ms()).unwrap_or(0)
+    }
+
+    fn timeouts(&self) -> SessionTimeouts {
+        self.inner
+            .upgrade()
+            .map(|i| i.timeouts())
+            .unwrap_or_default()
+    }
+
+    fn config(&self) -> StreamConfig {
+        self.inner.upgrade().map(|i| i.config()).unwrap_or_default()
+    }
+
+    /// 发送一条控制消息（§5 控制 stream 0）。
+    fn send_control(&mut self, msg: ControlMsg) {
+        let result = match self.transport.as_mut() {
+            Some(t) => t.send_control(msg),
+            None => return,
+        };
+        if let Err(e) = result {
+            self.fail(&e);
+        }
+    }
+
+    /// 把发送队列里没写完的字节冲出去（底层缓冲满时需要续写）。
+    fn flush_control(&mut self) {
+        let result = match self.transport.as_mut() {
+            Some(t) => t.flush(),
+            None => return,
+        };
+        if let Err(e) = result {
+            self.fail(&e);
+        }
+    }
+
+    /// 收到任何数据（帧或控制消息）时调用：刷新时间戳、必要时从重连恢复。
+    fn on_data(&mut self) {
+        self.last_data_ms = self.now_ms();
+        if self.machine.state() == SessionState::Reconnecting {
+            // §4.1：30 s 内恢复 → 回到 Streaming，并请求 IDR。
+            if self.goto(SessionState::Streaming).is_ok() {
+                self.request_idr();
+            }
+        }
+    }
+
+    /// 请求主机发 IDR（§4.1「重连后主机发 IDR」）。
+    fn request_idr(&mut self) {
+        self.send_control(ControlMsg::RequestIdr);
+    }
+
+    /// 发起握手：先配对，配对完成后发 `Hello`（§4.1）。
+    fn start_handshake(&mut self) {
+        if self.handshake_started {
+            return;
+        }
+        self.handshake_started = true;
+        match self.ctrl.start_pairing() {
+            // 有配对消息就等 `PairOk` 回来再发 `Hello`。
+            Some(msg) => self.send_control(msg),
+            None => self.send_hello(),
+        }
+    }
+
+    /// 发 `Hello{ver,caps}`（§5）。
+    fn send_hello(&mut self) {
+        if self.hello_sent {
+            return;
+        }
+        self.hello_sent = true;
+        let hello = ControlMsg::Hello(Hello {
+            ver: ProtocolVersion::CURRENT,
+            caps: self.ctrl.local_caps().clone(),
+        });
+        self.send_control(hello);
+    }
+
+    /// 处理一条控制消息（§4.1）。
+    fn handle_control(&mut self, msg: ControlMsg) {
+        let outcome: ControlOutcome = self.ctrl.handle(msg);
+        self.apply_outcome(outcome);
+    }
+
+    /// 把处理结果落到状态机上。
+    fn apply_outcome(&mut self, outcome: ControlOutcome) {
+        if let Some(err) = outcome.error {
+            self.fail(&err);
+            return;
+        }
+        for reply in outcome.replies {
+            self.send_control(reply);
+        }
+        if let Some(agreed) = outcome.negotiated {
+            let config = config_from_agreed(&agreed, &self.config());
+            if let Some(inner) = self.inner.upgrade() {
+                inner.set_agreed(Some(agreed));
+            }
+            if self.goto(SessionState::Streaming).is_ok() {
+                self.emit(SessionEvent::Negotiated { config });
+            }
+        }
+        if let Some(fingerprint) = outcome.paired {
+            self.emit(SessionEvent::Paired {
+                fingerprint: fingerprint.to_hex(),
+            });
+            // 配对完成 → 发 `Hello`（§4.1 时序）。
+            self.send_hello();
+        }
+        if let Some(stats) = outcome.stats {
+            self.stats = stats.clone();
+            self.emit(SessionEvent::Stats(stats));
+        }
+        if let Some(cfg) = outcome.peer_config {
+            if let Some(inner) = self.inner.upgrade() {
+                inner.set_config(cfg);
+            }
+        }
+        if let Some(bps) = outcome.bitrate_bps {
+            let mut cfg = self.config();
+            cfg.bitrate_bps = bps;
+            if let Some(inner) = self.inner.upgrade() {
+                inner.set_config(cfg);
+            }
+        }
+        if outcome.request_idr {
+            // 客户端不产生画面，忽略主机的 IDR 请求。
+        }
+        if let Some(session_id) = outcome.resumed {
+            self.session_id = session_id;
+        }
+        if outcome.close {
+            self.close_session();
+        }
+    }
+
+    /// 关闭会话（收到 `Bye` 或本地停止）。
+    fn close_session(&mut self) {
+        self.transport = None;
+        if self.goto(SessionState::Closed).is_ok() {
+            self.emit(SessionEvent::Closed);
+        }
+    }
+
+    /// 停滞 / 重连超时判定（§4.1、§3.9 `stall_threshold` / `reconnect_timeout`）。
+    fn check_deadlines(&mut self) {
+        let now = self.now_ms();
+        let timeouts = self.timeouts();
+        match self.machine.state() {
+            SessionState::Streaming => {
+                let threshold = duration_ms(timeouts.stall_threshold);
+                if threshold == 0 {
+                    return;
+                }
+                if now.saturating_sub(self.last_data_ms) >= threshold
+                    && self.goto(SessionState::Reconnecting).is_ok()
+                {
+                    self.reconnect_since_ms = Some(now);
+                }
+            }
+            SessionState::Reconnecting => {
+                let limit = duration_ms(timeouts.reconnect_timeout);
+                if limit == 0 {
+                    return;
+                }
+                let since = self.reconnect_since_ms.unwrap_or(now);
+                if now.saturating_sub(since) >= limit {
+                    let err = SessionError::SessionTimeout {
+                        secs: timeouts.reconnect_timeout.as_secs(),
+                    };
+                    self.emit(SessionEvent::Error {
+                        code: err.code(),
+                        retryable: err.retryable(),
+                    });
+                    self.transport = None;
+                    if self.goto(SessionState::Closed).is_ok() {
+                        self.emit(SessionEvent::Closed);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// 读控制消息（§4.1 控制面）。
+    fn drain_control(&mut self) {
+        if self.machine.state() == SessionState::Closed {
+            return;
+        }
+        loop {
+            let next = self.transport.as_mut().and_then(|t| t.recv_control());
+            let Some(item) = next else {
+                return;
+            };
+            match item {
+                Ok(msg) => {
+                    self.on_data();
+                    self.handle_control(msg);
+                    if self.machine.state() == SessionState::Closed {
+                        return;
+                    }
+                }
+                Err(e) => {
+                    self.fail(&e);
+                    return;
+                }
+            }
+        }
+    }
+
+    /// 读帧并交给解码 + 上屏。
+    fn pump_frames(&mut self) {
+        if self.machine.state() != SessionState::Streaming {
+            return;
+        }
+        loop {
+            let next = self.transport.as_mut().and_then(|t| t.recv_frame());
+            let Some(item) = next else {
+                return;
+            };
+            match item {
+                Ok(frame) => {
+                    self.on_data();
+                    let Some(consumer) = self.consumer.as_mut() else {
+                        continue;
+                    };
+                    if let Err(e) = consumer.consume(frame) {
+                        self.fail(&e);
+                        return;
+                    }
+                }
+                Err(e) => {
+                    self.fail(&e);
+                    return;
+                }
+            }
+        }
+    }
+
+    /// 定期回报 `Feedback`（§4.1「输入 stream / Feedback」）。
+    fn maybe_send_feedback(&mut self) {
+        if self.machine.state() != SessionState::Streaming {
+            return;
+        }
+        let now = self.now_ms();
+        if now.saturating_sub(self.last_stats_ms) < STATS_INTERVAL_MS {
+            return;
+        }
+        self.last_stats_ms = now;
+        let feedback = Feedback {
+            loss: self.stats.loss_ppm,
+            rtt: Duration::from_micros(u64::from(self.stats.rtt_us)),
+            recv_rate: self.stats.bitrate_bps,
+        };
+        self.send_control(ControlMsg::Feedback(feedback));
+    }
 }
 
 impl SessionRunner for ClientRunner {
@@ -161,6 +465,8 @@ impl SessionRunner for ClientRunner {
                 let _ = self.goto(SessionState::Connecting);
             }
             SessionInput::Connected => {
+                // §4.1：连接建立后先配对、再 `Hello` → 能力协商。
+                self.start_handshake();
                 let _ = self.goto(SessionState::Negotiating);
             }
             SessionInput::Negotiated(config) => {
@@ -172,13 +478,17 @@ impl SessionRunner for ClientRunner {
                 let _ = self.goto(SessionState::Streaming);
             }
             SessionInput::Stalled => {
-                if self.machine.state() == SessionState::Streaming {
-                    let _ = self.goto(SessionState::Reconnecting);
+                if self.machine.state() == SessionState::Streaming
+                    && self.goto(SessionState::Reconnecting).is_ok()
+                {
+                    self.reconnect_since_ms = Some(self.now_ms());
                 }
             }
             SessionInput::Reconnected => {
-                if self.machine.state() == SessionState::Reconnecting {
-                    let _ = self.goto(SessionState::Streaming);
+                if self.machine.state() == SessionState::Reconnecting
+                    && self.goto(SessionState::Streaming).is_ok()
+                {
+                    self.request_idr();
                 }
             }
             SessionInput::Failed(code) => {
@@ -188,36 +498,31 @@ impl SessionRunner for ClientRunner {
                 self.fail(&err);
             }
             SessionInput::Stop => {
-                self.transport = None;
+                // 发出 `Bye` 后**不立刻丢弃传输**：QUIC 连接的最后一个引用被释放时
+                // 会立即关闭连接，尚未发出的 `Bye` 会丢失。传输随句柄释放而回收。
+                self.send_control(ControlMsg::Bye);
                 let _ = self.goto(SessionState::Closed);
             }
         }
     }
 
     fn pump(&mut self) {
-        if self.machine.state() != SessionState::Streaming {
-            return;
-        }
-        let Some(transport) = self.transport.as_mut() else {
-            return;
-        };
-        loop {
-            match transport.recv_frame() {
-                Some(Ok(frame)) => {
-                    if let Some(consumer) = self.consumer.as_mut() {
-                        if let Err(e) = consumer.consume(frame) {
-                            self.fail(&e);
-                            return;
-                        }
-                    }
-                }
-                Some(Err(e)) => {
-                    self.fail(&e);
-                    return;
-                }
-                None => return,
-            }
-        }
+        self.check_deadlines();
+        self.drain_control();
+        self.pump_frames();
+        self.maybe_send_feedback();
+        self.flush_control();
+    }
+
+    fn on_update(&mut self, config: &StreamConfig) {
+        // §3.9 `update` 要真的生效：把新配置下发给主机。
+        self.send_control(ControlMsg::StreamConfig(config.clone()));
+    }
+
+    fn on_stop(&mut self) {
+        // 同 `SessionInput::Stop`：保留传输直到会话彻底释放，
+        // 否则 QUIC 连接会先于 `Bye` 关闭。
+        self.send_control(ControlMsg::Bye);
     }
 }
 
@@ -245,6 +550,19 @@ impl ClientSession {
         cfg: ClientSessionConfig,
         deps: ClientDeps,
     ) -> SessionHandle {
+        Self::connect_with_control(peer, cfg, deps, ClientControlDeps::default())
+    }
+
+    /// 连接主机并注入解码器、传输与控制通道依赖（§4.1 时序）。
+    ///
+    /// 会话在收到对端的 `HelloAck`（能力协商结果）之后才进入 `Streaming`，
+    /// 调用方通过 [`SessionHandle::events`] 观察状态与协商结果。
+    pub fn connect_with_control(
+        peer: PeerAddr,
+        cfg: ClientSessionConfig,
+        deps: ClientDeps,
+        ctrl_deps: ClientControlDeps,
+    ) -> SessionHandle {
         let (tx, rx) = futures::channel::mpsc::unbounded();
         let stream_config = cfg.stream.clone();
         let handle = SessionHandle::new(SessionState::Idle, stream_config, tx, rx);
@@ -264,6 +582,14 @@ impl ClientSession {
             }
         }
 
+        let ctrl = ControlContext::new(
+            ControlRole::Client,
+            caps_from_config(&cfg.stream),
+            ctrl_deps.pairing,
+            ctrl_deps.rate,
+            handle.inner().clock(),
+        );
+        let now = handle.now_ms();
         let connected = transport.is_some();
         let runner = ClientRunner {
             machine: StateMachine::new(),
@@ -271,17 +597,22 @@ impl ClientSession {
             consumer: deps.consumer,
             transport,
             inner: Arc::downgrade(handle.inner()),
+            ctrl,
+            session_id: next_session_id(),
+            last_data_ms: now,
+            reconnect_since_ms: None,
+            handshake_started: false,
+            hello_sent: false,
+            last_stats_ms: now,
+            stats: StatsReport::default(),
         };
         handle.set_runner(Box::new(runner));
 
         if connected {
-            // 客户端主链路：Idle → Connecting → Negotiating → Streaming。
+            // 客户端主链路：Idle → Connecting → Negotiating →（收到 HelloAck）→ Streaming。
             let _ = handle.apply(SessionInput::Connecting);
             if handle.state() == SessionState::Connecting {
                 let _ = handle.apply(SessionInput::Connected);
-            }
-            if handle.state() == SessionState::Negotiating {
-                let _ = handle.apply(SessionInput::Negotiated(cfg.stream));
             }
         } else {
             // 没有传输就无从连接：明确报 `E9002`，而不是静默停在 Idle。
@@ -305,26 +636,48 @@ impl ClientSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use beam_proto::{ControlMsg, EncodedFrame, InputEvent};
+    use crate::clock::ManualClock;
+    use crate::event::ControlChannel;
+    use beam_proto::{EncodedFrame, InputEvent};
     use futures::StreamExt;
 
+    /// 可脚本化的假传输：控制消息进队列，发出的控制消息进共享日志。
     struct FakeTransport {
+        inbound: std::collections::VecDeque<Result<ControlMsg, SessionError>>,
+        sent: std::sync::Arc<std::sync::Mutex<Vec<ControlMsg>>>,
         frames: Vec<EncodedFrame>,
     }
 
-    impl Transport for FakeTransport {
-        fn send_control(&mut self, _msg: ControlMsg) -> Result<(), SessionError> {
+    impl FakeTransport {
+        fn new() -> Self {
+            Self {
+                inbound: std::collections::VecDeque::new(),
+                sent: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                frames: Vec::new(),
+            }
+        }
+    }
+
+    impl ControlChannel for FakeTransport {
+        fn send_control(&mut self, msg: ControlMsg) -> Result<(), SessionError> {
+            self.sent.lock().expect("锁").push(msg);
             Ok(())
         }
+
+        fn recv_control(&mut self) -> Option<Result<ControlMsg, SessionError>> {
+            self.inbound.pop_front()
+        }
+    }
+
+    impl Transport for FakeTransport {
         fn send_frame(&mut self, _f: EncodedFrame) -> Result<(), SessionError> {
             Ok(())
         }
+
         fn send_input(&mut self, _ev: InputEvent) -> Result<(), SessionError> {
             Ok(())
         }
-        fn recv_control(&mut self) -> Option<Result<ControlMsg, SessionError>> {
-            None
-        }
+
         fn recv_frame(&mut self) -> Option<Result<EncodedFrame, SessionError>> {
             if self.frames.is_empty() {
                 None
@@ -335,16 +688,15 @@ mod tests {
     }
 
     struct FakeFactory {
-        transport: Option<FakeTransport>,
+        transport: Option<Box<dyn Transport>>,
     }
 
     impl TransportFactory for FakeFactory {
         fn connect(&mut self) -> Result<Box<dyn Transport>, SessionError> {
-            Ok(Box::new(
-                self.transport
-                    .take()
-                    .unwrap_or(FakeTransport { frames: Vec::new() }),
-            ))
+            Ok(self
+                .transport
+                .take()
+                .unwrap_or_else(|| Box::new(FakeTransport::new())))
         }
     }
 
@@ -367,15 +719,68 @@ mod tests {
         }
     }
 
-    #[test]
-    fn client_reaches_streaming_state() {
+    /// 造一个装着指定假传输的客户端会话，并返回 (handle, 假传输)。
+    fn session_with(
+        transport: FakeTransport,
+    ) -> (
+        SessionHandle,
+        std::sync::Arc<std::sync::Mutex<Vec<ControlMsg>>>,
+    ) {
+        let sent = std::sync::Arc::clone(&transport.sent);
         let cfg = ClientSessionConfig::default();
         let deps = ClientDeps {
             consumer: None,
-            transport: Some(Box::new(FakeFactory { transport: None })),
+            transport: Some(Box::new(FakeFactory {
+                transport: Some(Box::new(transport)),
+            })),
         };
         let handle = ClientSession::connect_with(peer(), cfg, deps);
+        (handle, sent)
+    }
+
+    /// 造一个带消费者、装着指定假传输的客户端会话。
+    fn session_with_consumer(
+        transport: FakeTransport,
+        consumer: Box<dyn FrameConsumer>,
+    ) -> SessionHandle {
+        let cfg = ClientSessionConfig::default();
+        let deps = ClientDeps {
+            consumer: Some(consumer),
+            transport: Some(Box::new(FakeFactory {
+                transport: Some(Box::new(transport)),
+            })),
+        };
+        ClientSession::connect_with(peer(), cfg, deps)
+    }
+
+    /// 一条标准的 `HelloAck`。
+    fn hello_ack() -> ControlMsg {
+        ControlMsg::HelloAck {
+            agreed: beam_proto::Agreed {
+                codec: beam_proto::CodecKind::H264,
+                width: 1920,
+                height: 1080,
+                fps: 60,
+                features: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn client_sends_hello_and_waits_for_hello_ack() {
+        let mut transport = FakeTransport::new();
+        transport.inbound.push_back(Ok(hello_ack()));
+        let (handle, sent) = session_with(transport);
+        assert_eq!(handle.state(), SessionState::Negotiating);
+        let log = sent.lock().expect("锁").clone();
+        assert!(
+            log.iter().any(|m| matches!(m, ControlMsg::Hello(_))),
+            "连接后必须发出 Hello"
+        );
+
+        handle.pump().expect("应当能收控制消息");
         assert_eq!(handle.state(), SessionState::Streaming);
+        assert!(handle.agreed().is_some());
     }
 
     #[test]
@@ -401,29 +806,111 @@ mod tests {
     #[test]
     fn client_consumes_frames() {
         let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let cfg = ClientSessionConfig::default();
-        let deps = ClientDeps {
-            consumer: Some(Box::new(FakeConsumer {
+        let mut transport = FakeTransport::new();
+        transport.inbound.push_back(Ok(hello_ack()));
+        transport.frames.push(EncodedFrame {
+            frame_id: 1,
+            pts_us: 0,
+            capture_ts_us: 0,
+            is_key: true,
+            slices: vec![bytes::Bytes::from_static(b"x")],
+        });
+        let handle = session_with_consumer(
+            transport,
+            Box::new(FakeConsumer {
                 seen: std::sync::Arc::clone(&seen),
-            })),
-            transport: Some(Box::new(FakeFactory {
-                transport: Some(FakeTransport {
-                    frames: vec![EncodedFrame {
-                        frame_id: 1,
-                        pts_us: 0,
-                        capture_ts_us: 0,
-                        is_key: true,
-                        slices: vec![bytes::Bytes::from_static(b"x")],
-                    }],
-                }),
-            })),
-        };
-        let handle = ClientSession::connect_with(peer(), cfg, deps);
+            }),
+        );
+        handle.pump().expect("应当能收控制消息");
         handle.pump().expect("应当能收帧");
         assert_eq!(
             seen.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "应当消费到一帧"
         );
+    }
+
+    #[test]
+    fn stall_threshold_triggers_reconnecting() {
+        let mut transport = FakeTransport::new();
+        transport.inbound.push_back(Ok(hello_ack()));
+        let (handle, _sent) = session_with(transport);
+        let clock = std::sync::Arc::new(ManualClock::new());
+        handle.set_clock(std::sync::Arc::clone(&clock) as std::sync::Arc<dyn crate::clock::Clock>);
+        handle.pump().expect("应当能收控制消息");
+        assert_eq!(handle.state(), SessionState::Streaming);
+
+        clock.advance(Duration::from_secs(4));
+        handle.pump().expect("应当能推进");
+        assert_eq!(
+            handle.state(),
+            SessionState::Reconnecting,
+            "超过 stall_threshold 必须进入重连"
+        );
+    }
+
+    #[test]
+    fn reconnect_timeout_closes_session() {
+        let mut transport = FakeTransport::new();
+        transport.inbound.push_back(Ok(hello_ack()));
+        let (handle, _sent) = session_with(transport);
+        let mut events = handle.events();
+        let clock = std::sync::Arc::new(ManualClock::new());
+        handle.set_clock(std::sync::Arc::clone(&clock) as std::sync::Arc<dyn crate::clock::Clock>);
+        handle.pump().expect("应当能收控制消息");
+
+        clock.advance(Duration::from_secs(4));
+        handle.pump().expect("应当能推进");
+        assert_eq!(handle.state(), SessionState::Reconnecting);
+        clock.advance(Duration::from_secs(31));
+        handle.pump().expect("应当能推进");
+        assert_eq!(
+            handle.state(),
+            SessionState::Closed,
+            "超过 reconnect_timeout 必须关闭"
+        );
+
+        let mut saw_timeout = false;
+        for _ in 0..8 {
+            match futures::executor::block_on(events.next()) {
+                Some(SessionEvent::Error { code, .. }) => {
+                    if code == 9003 {
+                        saw_timeout = true;
+                        break;
+                    }
+                }
+                Some(_) => continue,
+                None => break,
+            }
+        }
+        assert!(saw_timeout, "必须报 E9003 会话超时");
+    }
+
+    #[test]
+    fn update_sends_stream_config_to_peer() {
+        let (handle, sent) = session_with(FakeTransport::new());
+        let cfg = StreamConfig {
+            fps: 144,
+            ..StreamConfig::default()
+        };
+        handle.update(cfg).expect("应当能更新");
+        let log = sent.lock().expect("锁").clone();
+        assert!(
+            log.iter()
+                .any(|m| matches!(m, ControlMsg::StreamConfig(c) if c.fps == 144)),
+            "update 必须下发 StreamConfig"
+        );
+    }
+
+    #[test]
+    fn stop_sends_bye() {
+        let (handle, sent) = session_with(FakeTransport::new());
+        handle.stop();
+        let log = sent.lock().expect("锁").clone();
+        assert!(
+            log.iter().any(|m| matches!(m, ControlMsg::Bye)),
+            "stop 必须发 Bye"
+        );
+        assert_eq!(handle.state(), SessionState::Closed);
     }
 }

@@ -12,7 +12,7 @@
 //!
 //! - **负责**：颜色转换与编码。
 //! - **不负责**：不负责发包。
-//! - **依赖**：ffmpeg-next（LGPL 动态库）、windows。
+//! - **依赖**：ffmpeg-next（LGPL 动态库）、windows、beam-config（配置模型）。
 //! - **被依赖**：beam-host。
 //! - **禁止**：依赖 net / session（§3.6）。
 //!
@@ -38,6 +38,9 @@
 //! ## 配置
 //!
 //! `encoder=auto|nvenc|amf|qsv`、`codec=hevc|h264|av1`、`slices`、`sfe`。
+//!
+//! **单一真值来源**：这些配置项由 beam-config 承载（§3.14 的模型、校验与持久化），
+//! 本 crate 用 `EncodeConfig::from(&ResolvedConfig)` 派生，不再自带一份配置定义。
 //!
 //! ## 性能
 //!

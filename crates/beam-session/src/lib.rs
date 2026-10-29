@@ -15,14 +15,25 @@
 //! ## 接口
 //!
 //! - [`HostSession::start`]：主机会话。
+//! - [`HostSession::start_with_control`]：带控制通道的主机会话（§4.1 时序）。
 //! - [`ClientSession::connect`]：客户端会话。
-//! - [`SessionHandle`]：`events()` / `update()` / `stop()`。
+//! - [`ClientSession::connect_with_control`]：带配对 / 码率控制依赖的客户端会话。
+//! - [`SessionHandle`]：`events()` / `update()` / `stop()` / `set_clock()` / `agreed()`.
+//!
+//! ## 控制通道（§4.1 / §5）
+//!
+//! - 控制面走 [`ControlChannel`]（QUIC 双向可靠流，§5 控制 stream 0）。
+//! - 消息处理集中在 [`control::ControlContext`]：能力协商（`Hello` → `HelloAck`）、
+//!   配对（`PairRequest` / `PairChallenge` → `PairOk` / `PairFail`）、
+//!   `RequestIdr`、`Feedback`、`Resume`、`Bye`。
+//! - 超时判定用可注入的 [`Clock`]：单测注入 [`ManualClock`] 即可覆盖
+//!   「3 s 停滞 → Reconnecting」「30 s 超时 → Closed」两条判定。
 //!
 //! ## 边界
 //!
 //! - **不负责**：不直接调用平台 API，通过 trait（`FramePipeline` / `VideoSender` /
-//!   `FrameConsumer` / `InputSink` / `Transport`）注入，便于测试。
-//! - **依赖**：proto（数据与协议）、futures（事件流）。
+//!   `FrameConsumer` / `InputSink` / `ControlChannel` / `Transport`）注入，便于测试。
+//! - **依赖**：proto（数据与协议）、pair（§3.3 配对）、futures（事件流）。
 //! - **被依赖**：host、client、ffi。
 //! - **禁止**：依赖 capture / encode / decode / render 等平台 crate（§4）。
 //!
@@ -42,23 +53,32 @@
 //!
 //! ## 测试
 //!
-//! 状态机表驱动测试（全部合法与非法转移）+ 假实现集成测试。
+//! 状态机表驱动测试（全部合法与非法转移）+ 控制消息处理单测
+//! （能力协商 / 配对 / IDR / Feedback / Resume / Bye）
+//! + 假时钟驱动的停滞与重连超时判定测试。
 
 #![forbid(unsafe_code)]
 
 pub mod client;
+pub mod clock;
+pub mod control;
 pub mod error;
 pub mod event;
 pub mod handle;
 pub mod host;
 pub mod state;
 
-pub use client::{ClientDeps, ClientSession, ClientSessionConfig, PeerAddr};
+pub use client::{ClientControlDeps, ClientDeps, ClientSession, ClientSessionConfig, PeerAddr};
+pub use clock::{Clock, ManualClock, SystemClock};
+pub use control::{
+    caps_from_config, config_from_agreed, next_session_id, ControlContext, ControlOutcome,
+    ControlRole, PairingConfig, STATS_INTERVAL, STATS_INTERVAL_MS,
+};
 pub use error::{message, SessionError};
 pub use event::{
-    FrameConsumer, FramePipeline, InputSink, SessionEvent, SessionInput, Transport,
-    TransportFactory, VideoSender,
+    ControlChannel, FrameConsumer, FramePipeline, InputSink, RateControl, SessionEvent,
+    SessionInput, Transport, TransportFactory, VideoSender,
 };
 pub use handle::{SessionEventStream, SessionHandle, SessionTimeouts};
-pub use host::{HostDeps, HostSession, HostSessionConfig};
+pub use host::{HostControlDeps, HostDeps, HostSession, HostSessionConfig};
 pub use state::{SessionState, StateMachine, ALL_STATES};

@@ -3,7 +3,9 @@ resolver = "2"
 members = ["crates/*"]
 # apps/desktop/src-tauri 由桌面端同事做成独立工作区，必须排除，
 # 否则 workspace 成员缺失会在 cargo 元数据阶段直接报错（§4 分层、简报要求）。
-exclude = ["apps/desktop"]
+# fuzz/ 是 cargo-fuzz 的独立工作区（自带 [workspace]），同样排除在主工作区之外，
+# 避免 libfuzzer-sys 进入主工作区的依赖解析（§3.1 测试：模糊测试）。
+exclude = ["apps/desktop", "fuzz"]
 
 [workspace.package]
 version = "0.1.0"
@@ -68,6 +70,10 @@ bytes = "1"
 rand = "0.9"
 # proptest 1.12 起要求 rustc 1.88，本机为 1.86.0（§4 简报要求 rust-version 1.86）。
 proptest = "=1.11.0"
+# 编解码基准（§3.1 性能预算：单消息编解码 < 2 µs）。
+# criterion 0.8 的 MSRV 正好是 rustc 1.86，与本仓库 rust-version 一致；
+# 关闭默认特性（rayon / plotters）以压缩依赖面，只保留 cargo bench 集成。
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 mdns-sd = "0.21"
 spake2 = "0.4"
 reed-solomon-erasure = { version = "6.0", features = ["std"] }

@@ -181,6 +181,57 @@ mod tests {
     }
 
     #[test]
+    fn toml_round_trip_for_new_items() {
+        let mut layers = ConfigLayers::default();
+        layers.file.capture.backend = Some("wgc".to_string());
+        layers.file.capture.display_id = Some(1);
+        layers.file.capture.min_update_interval = Some(8);
+        layers.file.video.slices = Some(2);
+        layers.file.video.sfe = Some(true);
+
+        let text = to_toml(&layers).expect("应当能序列化");
+        assert!(
+            text.contains("[capture]"),
+            "抓屏配置应当落在 [capture] 段：{text}"
+        );
+
+        let back = parse_layers(&text).expect("应当能解析");
+        assert_eq!(back.file.capture.backend.as_deref(), Some("wgc"));
+        assert_eq!(back.file.capture.display_id, Some(1));
+        assert_eq!(back.file.capture.min_update_interval, Some(8));
+        assert_eq!(back.file.video.slices, Some(2));
+        assert_eq!(back.file.video.sfe, Some(true));
+    }
+
+    #[test]
+    fn toml_parses_capture_and_sections_by_hand() {
+        let text = r#"
+[video]
+slices = 4
+sfe = true
+
+[capture]
+backend = "dxgi"
+display_id = 2
+min_update_interval = 16
+"#;
+        let layers = parse_layers(text).expect("应当能解析");
+        assert_eq!(layers.file.video.slices, Some(4));
+        assert_eq!(layers.file.video.sfe, Some(true));
+        assert_eq!(layers.file.capture.backend.as_deref(), Some("dxgi"));
+        assert_eq!(layers.file.capture.display_id, Some(2));
+        assert_eq!(layers.file.capture.min_update_interval, Some(16));
+    }
+
+    #[test]
+    fn toml_rejects_wrong_type_for_new_items() {
+        let err = parse_layers("[capture]\nbackend = 1\n").expect_err("类型不符必须失败");
+        assert_eq!(err.code(), 11001);
+        let err = parse_layers("[video]\nsfe = \"maybe\"\n").expect_err("类型不符必须失败");
+        assert_eq!(err.code(), 11001);
+    }
+
+    #[test]
     fn memory_store_round_trip() {
         let store = MemoryStore::new();
         assert!(load_file_layer(&store)

@@ -4,7 +4,7 @@
 //! §4 分层：session 只依赖 trait，因此这里定义的是**会话侧**的 trait 镜像，
 //! 由 beam-host / beam-client 用平台实现适配。
 
-use beam_proto::{ControlMsg, EncodedFrame, InputEvent, StatsReport, StreamConfig};
+use beam_proto::{ControlMsg, EncodedFrame, Feedback, InputEvent, StatsReport, StreamConfig};
 
 use crate::error::SessionError;
 
@@ -114,17 +114,45 @@ pub trait InputSink: Send {
     fn apply(&mut self, ev: InputEvent) -> Result<(), SessionError>;
 }
 
-/// 会话传输（把网络细节挡在会话层之外）。
-pub trait Transport: Send {
-    /// 发送控制消息。
+/// 控制通道（§5 控制 stream 0，双向可靠）。
+///
+/// 会话层只认这个 trait，不认具体传输实现（§3.9 边界）：
+/// beam-client 用 QUIC 双向流实现它，测试里用假实现替换。
+pub trait ControlChannel: Send {
+    /// 发送一条控制消息。
     fn send_control(&mut self, msg: ControlMsg) -> Result<(), SessionError>;
+    /// 轮询下一条控制消息。
+    ///
+    /// 实现必须是**非阻塞**的：返回 `None` 表示当前没有新消息。
+    /// 连接结束同样返回 `None`——会话层靠停滞判定（§4.1「3 s 无数据」）
+    /// 感知断链，而不是靠阻塞在读上。
+    fn recv_control(&mut self) -> Option<Result<ControlMsg, SessionError>>;
+    /// 把尚未写完的字节冲出去。
+    ///
+    /// 底层发送缓冲满时，消息会留在发送队列里；
+    /// 会话层在每次 `pump` 时调用本方法续写。
+    /// 默认实现什么都不做（同步实现不需要）。
+    fn flush(&mut self) -> Result<(), SessionError> {
+        Ok(())
+    }
+}
+
+/// 码率控制器（§3.2 会话侧镜像）。
+///
+/// 实现由上层注入（beam-client 适配 `beam_net::RateController`），
+/// 会话层只负责把收到的 [`ControlMsg::Feedback`] 喂给它。
+pub trait RateControl: Send {
+    /// 处理一次网络反馈，返回目标码率（bit/s）。
+    fn on_feedback(&mut self, fb: &Feedback) -> u32;
+}
+
+/// 会话传输（把网络细节挡在会话层之外）。
+pub trait Transport: ControlChannel {
     /// 发送一帧画面。
     fn send_frame(&mut self, f: EncodedFrame) -> Result<(), SessionError>;
     /// 发送一个输入事件。
     fn send_input(&mut self, ev: InputEvent) -> Result<(), SessionError>;
-    /// 接收下一条控制消息；`None` 表示连接已结束。
-    fn recv_control(&mut self) -> Option<Result<ControlMsg, SessionError>>;
-    /// 接收下一帧画面；`None` 表示连接已结束。
+    /// 接收下一帧画面；`None` 表示当前没有新帧。
     fn recv_frame(&mut self) -> Option<Result<EncodedFrame, SessionError>>;
 }
 

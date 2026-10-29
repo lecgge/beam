@@ -135,6 +135,7 @@ dependencies = [
 name = "beam-capture"
 version = "0.1.0"
 dependencies = [
+ "beam-config",
  "beam-proto",
  "thiserror 2.0.21",
  "tracing",
@@ -153,8 +154,10 @@ dependencies = [
  "beam-proto",
  "beam-render",
  "beam-session",
+ "bytes",
  "futures",
  "thiserror 2.0.21",
+ "tokio",
  "tracing",
 ]
 
@@ -219,6 +222,7 @@ dependencies = [
 name = "beam-encode"
 version = "0.1.0"
 dependencies = [
+ "beam-config",
  "beam-proto",
  "thiserror 2.0.21",
  "tracing",
@@ -325,6 +329,7 @@ dependencies = [
 name = "beam-session"
 version = "0.1.0"
 dependencies = [
+ "beam-pair",
  "beam-proto",
  "bytes",
  "futures",

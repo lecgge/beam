@@ -1,0 +1,43 @@
+[package]
+name = "beam-proto-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+rust-version = "1.86"
+description = "beam-proto 解码器的 cargo-fuzz 模糊测试目标（§3.1 测试：模糊测试）"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.beam-proto]
+path = "../crates/beam-proto"
+
+# 每个 fuzz 目标一个 bin；cargo-fuzz 通过 `cargo fuzz run <name>` 调用。
+[[bin]]
+name = "decode_any"
+path = "fuzz_targets/decode_any.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_as_control"
+path = "fuzz_targets/decode_as_control.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "frame_header"
+path = "fuzz_targets/frame_header.rs"
+test = false
+doc = false
+bench = false
+
+# cargo-fuzz 的目标必须独立编译（需要 nightly 的 sanitizer 支持），
+# 因此自成工作区，不进入主工作区的依赖解析。
+# 主工作区的 `exclude = ["fuzz"]` 与此保持一致。
+[workspace]

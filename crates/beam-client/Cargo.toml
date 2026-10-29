@@ -18,7 +18,12 @@ beam-net = { workspace = true }
 beam-pair = { workspace = true }
 beam-discovery = { workspace = true }
 beam-config = { workspace = true }
+# `beam_proto::encode` 的输出缓冲类型（§5 线上格式）。
+bytes = { workspace = true }
 futures = { workspace = true }
+# §6「tokio 只用于网络与控制」：控制 / 输入流的读写原语
+# （`tokio::io::AsyncRead` / `AsyncWrite`，quinn 直接实现了这两个 trait）。
+tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 

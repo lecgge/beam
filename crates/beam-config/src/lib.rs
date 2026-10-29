@@ -25,6 +25,17 @@
 //!
 //! 命令行 / 环境变量 > 会话内临时覆盖 > 用户配置文件 > 设备能力推导默认值 > 内置默认。
 //!
+//! ## 配置项
+//!
+//! - 视频（`[video]`）：`width` / `height` / `fps` / `bitrate` / `codec` / `encoder` / `hdr` /
+//!   `slices`（§3.6）/ `sfe`（§3.6）；
+//! - 抓屏（`[capture]`）：`backend`（§3.5 `auto|wgc|dxgi`）/ `display_id`（§3.5）/
+//!   `min_update_interval`（§3.5）；
+//! - 网络（`[network]`）、输入（`[input]`）、音频（`[audio]`）。
+//!
+//! 命令行形如 `--backend=wgc --slices=4 --sfe=true`，
+//! 环境变量形如 `BEAM_BACKEND=wgc` / `BEAM_SLICES=4` / `BEAM_SFE=true`。
+//!
 //! ## 错误码
 //!
 //! `E11xxx`：`11001` 解析失败、`11002` 校验失败、`11003` 存储不可用。
@@ -41,9 +52,10 @@ pub mod store;
 
 pub use error::{message, ConfigError};
 pub use model::{
-    merge, validate, AudioMode, AudioOverrides, AudioSettings, ConfigLayers, InputOverrides,
-    InputSettings, NetworkOverrides, NetworkSettings, Overrides, ResolvedConfig, VideoOverrides,
-    VideoSettings,
+    merge, validate, AudioMode, AudioOverrides, AudioSettings, CaptureBackend, CaptureOverrides,
+    CaptureSettings, ConfigLayers, InputOverrides, InputSettings, NetworkOverrides,
+    NetworkSettings, Overrides, ResolvedConfig, VideoOverrides, VideoSettings,
+    MAX_MIN_UPDATE_INTERVAL_MS, MAX_SLICES,
 };
 pub use store::{
     default_config_path, default_trust_path, load_file_layer, parse_layers, save_file_layer,

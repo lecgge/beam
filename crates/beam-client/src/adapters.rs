@@ -1,9 +1,33 @@
 //! 平台实现 → 会话 trait 的适配器（§3.9「通过 trait 注入，便于测试」）。
+//!
+//! ## 通道分工（§5）
+//!
+//! | 通道 | 承载 | QUIC 原语 | 实现 |
+//! |---|---|---|---|
+//! | 控制 stream 0 | [`ControlMsg`] | 双向可靠流 | [`NetTransport`] 的 `ctrl_*` |
+//! | 输入 stream | [`InputEvent`] | 单向可靠流（客户端 → 主机） | [`NetTransport`] 的 `input*` |
+//! | 视频 / 音频 | 帧 | datagram | `beam_net::VideoSender` |
+//!
+//! 线上帧格式：**4 字节大端长度前缀 + postcard 负载**（负载自带 1 字节消息族标签，
+//! 由 `beam_proto::encode` 产生）。长度前缀是本层的实现约定，§5 未规定。
+
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 use beam_decode::VideoDecoder;
-use beam_proto::{ControlMsg, EncodedFrame, InputEvent};
+use beam_proto::{ControlMsg, EncodedFrame, Feedback, InputEvent, Message};
 use beam_render::Renderer;
-use beam_session::{FrameConsumer, SessionError, Transport, TransportFactory};
+use beam_session::{
+    ControlChannel, FrameConsumer, RateControl, SessionError, Transport, TransportFactory,
+};
+use bytes::BytesMut;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
+/// 线上帧的长度前缀长度（4 字节大端）。
+const FRAME_LEN_PREFIX: usize = 4;
+
+/// 单帧上限（防御性上限；控制消息与输入事件都很小）。
+const MAX_FRAME_LEN: usize = 64 * 1024;
 
 /// 解码 → 上屏适配器。
 #[derive(Debug)]
@@ -60,30 +84,314 @@ where
     }
 }
 
+/// 待发送字节缓冲（写侧）。
+///
+/// QUIC 流的写缓冲可能满，非阻塞写只写入一部分；
+/// 剩余字节留在这里，下次发送时继续。
+#[derive(Debug, Default)]
+struct OutBuf {
+    data: Vec<u8>,
+    pos: usize,
+}
+
+impl OutBuf {
+    fn push(&mut self, bytes: &[u8]) {
+        if self.pos >= self.data.len() {
+            self.data.clear();
+            self.pos = 0;
+        }
+        self.data.extend_from_slice(bytes);
+    }
+
+    fn pending(&self) -> &[u8] {
+        &self.data[self.pos..]
+    }
+
+    fn consume(&mut self, n: usize) {
+        self.pos = self.pos.saturating_add(n).min(self.data.len());
+        if self.pos >= self.data.len() {
+            self.data.clear();
+            self.pos = 0;
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.pos >= self.data.len()
+    }
+}
+
+/// 增量解码器：从字节流里切出完整帧。
+#[derive(Debug, Default)]
+struct FrameDecoder {
+    buf: Vec<u8>,
+}
+
+impl FrameDecoder {
+    fn push(&mut self, data: &[u8]) {
+        self.buf.extend_from_slice(data);
+    }
+
+    /// 取出一条完整帧；数据不够时返回 `Ok(None)`。
+    fn next_frame(&mut self) -> Result<Option<Vec<u8>>, SessionError> {
+        if self.buf.len() < FRAME_LEN_PREFIX {
+            return Ok(None);
+        }
+        let len = u32::from_be_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]]) as usize;
+        if len > MAX_FRAME_LEN {
+            return Err(SessionError::TransportFailed {
+                reason: format!("线上帧长度超限({len} 字节)"),
+            });
+        }
+        if self.buf.len() < FRAME_LEN_PREFIX + len {
+            return Ok(None);
+        }
+        let frame = self.buf[FRAME_LEN_PREFIX..FRAME_LEN_PREFIX + len].to_vec();
+        self.buf.drain(..FRAME_LEN_PREFIX + len);
+        Ok(Some(frame))
+    }
+}
+
+/// 把一条线上消息编码成「4 字节大端长度 + 负载」。
+fn encode_frame<M: Message>(msg: &M) -> Result<Vec<u8>, SessionError> {
+    let mut buf = BytesMut::new();
+    beam_proto::encode(msg, &mut buf).map_err(|e| SessionError::TransportFailed {
+        reason: format!("编码失败: {e}"),
+    })?;
+    let mut out = Vec::with_capacity(FRAME_LEN_PREFIX + buf.len());
+    out.extend_from_slice(&(buf.len() as u32).to_be_bytes());
+    out.extend_from_slice(&buf);
+    Ok(out)
+}
+
+/// 非阻塞写：把待发字节尽量写进流里。
+///
+/// 返回 `Pending`（发送缓冲满）时保留剩余字节，等待下一次调用继续写。
+fn flush_stream(
+    out: &mut OutBuf,
+    writer: &mut (dyn AsyncWrite + Unpin + Send),
+) -> Result<(), SessionError> {
+    let waker = futures::task::noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    loop {
+        if out.is_empty() {
+            break;
+        }
+        let written = {
+            let data = out.pending();
+            match Pin::new(&mut *writer).poll_write(&mut cx, data) {
+                Poll::Ready(Ok(n)) => n,
+                Poll::Ready(Err(e)) => {
+                    return Err(SessionError::TransportFailed {
+                        reason: format!("写流失败: {e}"),
+                    })
+                }
+                Poll::Pending => break,
+            }
+        };
+        if written == 0 {
+            break;
+        }
+        out.consume(written);
+    }
+    Ok(())
+}
+
 /// 基于 QUIC 连接的会话传输适配器。
-#[derive(Debug)]
+///
+/// - 控制通道：双向可靠流（§5 控制 stream 0），承载 [`ControlMsg`]；
+/// - 输入通道：单向可靠流（§5 输入 stream，客户端 → 主机），承载 [`InputEvent`]；
+/// - 画面：QUIC datagram（§5），走 `beam_net::VideoSender`。
+///
+/// 客户端用 [`NetTransport::connect`]（自己开流），主机用 [`NetTransport::accept`]（接受流）。
 pub struct NetTransport {
     conn: beam_net::Conn,
+    ctrl_send: Box<dyn AsyncWrite + Unpin + Send>,
+    ctrl_recv: Box<dyn AsyncRead + Unpin + Send>,
+    ctrl_out: OutBuf,
+    ctrl_in: FrameDecoder,
+    input: Option<Box<dyn AsyncWrite + Unpin + Send>>,
+    input_out: OutBuf,
+    /// 构造失败时的原因（首次使用时上报）。
+    init_error: Option<String>,
+}
+
+impl std::fmt::Debug for NetTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NetTransport")
+            .field("has_input_stream", &self.input.is_some())
+            .field("init_error", &self.init_error)
+            .finish()
+    }
 }
 
 impl NetTransport {
-    /// 包装一条 QUIC 连接。
+    /// 客户端侧：打开控制双向流（§5 控制 stream 0）与输入单向流（§5 输入 stream）。
+    pub async fn connect(conn: beam_net::Conn) -> Result<Self, SessionError> {
+        let (send, recv) = conn
+            .open_bi()
+            .await
+            .map_err(|e| SessionError::TransportFailed {
+                reason: format!("打开控制流失败 {}: {e}", e.code_str()),
+            })?;
+        let input = conn
+            .open_uni()
+            .await
+            .map_err(|e| SessionError::TransportFailed {
+                reason: format!("打开输入流失败 {}: {e}", e.code_str()),
+            })?;
+        Ok(Self {
+            conn,
+            ctrl_send: Box::new(send),
+            ctrl_recv: Box::new(recv),
+            ctrl_out: OutBuf::default(),
+            ctrl_in: FrameDecoder::default(),
+            input: Some(Box::new(input)),
+            input_out: OutBuf::default(),
+            init_error: None,
+        })
+    }
+
+    /// 主机侧：接受控制双向流（§5 控制 stream 0）。
+    ///
+    /// 注意：QUIC 的流只有在收到对端数据后才对本端可见，
+    /// 因此本函数会等到客户端在控制流上写入第一条数据才返回。
+    pub async fn accept(conn: beam_net::Conn) -> Result<Self, SessionError> {
+        let (send, recv) = conn
+            .accept_bi()
+            .await
+            .map_err(|e| SessionError::TransportFailed {
+                reason: format!("接受控制流失败 {}: {e}", e.code_str()),
+            })?;
+        Ok(Self {
+            conn,
+            ctrl_send: Box::new(send),
+            ctrl_recv: Box::new(recv),
+            ctrl_out: OutBuf::default(),
+            ctrl_in: FrameDecoder::default(),
+            input: None,
+            input_out: OutBuf::default(),
+            init_error: None,
+        })
+    }
+
+    /// 同步构造（兼容既有 API）：阻塞等待控制流建立。
+    ///
+    /// 需要在 tokio 运行时上下文里调用；异步上下文请改用 [`NetTransport::connect`]。
     pub fn new(conn: beam_net::Conn) -> Self {
-        Self { conn }
+        match futures::executor::block_on(Self::connect(conn.clone())) {
+            Ok(t) => t,
+            Err(e) => {
+                let reason = match e {
+                    SessionError::TransportFailed { reason } => reason,
+                    other => other.to_string(),
+                };
+                Self::failed(conn, reason)
+            }
+        }
+    }
+
+    /// 构造一个「一用就报错」的传输（用于把建流失败暴露给会话层）。
+    fn failed(conn: beam_net::Conn, reason: String) -> Self {
+        Self {
+            conn,
+            ctrl_send: Box::new(tokio::io::sink()),
+            ctrl_recv: Box::new(tokio::io::empty()),
+            ctrl_out: OutBuf::default(),
+            ctrl_in: FrameDecoder::default(),
+            input: None,
+            input_out: OutBuf::default(),
+            init_error: Some(reason),
+        }
     }
 
     /// 访问底层连接。
     pub fn conn(&self) -> &beam_net::Conn {
         &self.conn
     }
+
+    /// 取出一条已经完整的控制帧并解码。
+    fn take_control_frame(&mut self) -> Option<Result<ControlMsg, SessionError>> {
+        match self.ctrl_in.next_frame() {
+            Ok(Some(frame)) => Some(match beam_proto::decode_as::<ControlMsg>(&frame) {
+                Ok(msg) => Ok(msg),
+                Err(e) => Err(SessionError::TransportFailed {
+                    reason: format!("解码控制消息失败: {e}"),
+                }),
+            }),
+            Ok(None) => None,
+            Err(e) => Some(Err(e)),
+        }
+    }
+}
+
+impl ControlChannel for NetTransport {
+    /// 发一条控制消息（§5 控制 stream 0）。
+    fn send_control(&mut self, msg: ControlMsg) -> Result<(), SessionError> {
+        if let Some(reason) = &self.init_error {
+            return Err(SessionError::TransportFailed {
+                reason: reason.clone(),
+            });
+        }
+        let frame = encode_frame(&msg)?;
+        self.ctrl_out.push(&frame);
+        flush_stream(&mut self.ctrl_out, &mut *self.ctrl_send)
+    }
+
+    /// 轮询一条控制消息（不阻塞）。
+    ///
+    /// 返回 `None` 表示当前没有新消息（对端还没发，或流已结束）。
+    fn recv_control(&mut self) -> Option<Result<ControlMsg, SessionError>> {
+        if let Some(reason) = &self.init_error {
+            return Some(Err(SessionError::TransportFailed {
+                reason: reason.clone(),
+            }));
+        }
+        // 缓冲里已经有完整帧的话直接取。
+        if let Some(result) = self.take_control_frame() {
+            return Some(result);
+        }
+        let mut raw = [0u8; 4096];
+        let filled = {
+            let waker = futures::task::noop_waker();
+            let mut cx = Context::from_waker(&waker);
+            let mut buf = ReadBuf::new(&mut raw);
+            match Pin::new(&mut *self.ctrl_recv).poll_read(&mut cx, &mut buf) {
+                Poll::Ready(Ok(())) => buf.filled().len(),
+                Poll::Ready(Err(e)) => {
+                    return Some(Err(SessionError::TransportFailed {
+                        reason: format!("读控制流失败: {e}"),
+                    }))
+                }
+                Poll::Pending => 0,
+            }
+        };
+        if filled == 0 {
+            // 对端关闭了控制流（或暂时没数据）：不会再有消息了。
+            return None;
+        }
+        self.ctrl_in.push(&raw[..filled]);
+        self.take_control_frame()
+    }
+
+    /// 把发送队列里没写完的字节续写出去。
+    ///
+    /// QUIC 的发送缓冲满时消息会留在队列里，会话层每次 `pump` 调一次本方法。
+    fn flush(&mut self) -> Result<(), SessionError> {
+        if let Some(reason) = &self.init_error {
+            return Err(SessionError::TransportFailed {
+                reason: reason.clone(),
+            });
+        }
+        flush_stream(&mut self.ctrl_out, &mut *self.ctrl_send)?;
+        if let Some(input) = self.input.as_mut() {
+            flush_stream(&mut self.input_out, &mut **input)?;
+        }
+        Ok(())
+    }
 }
 
 impl Transport for NetTransport {
-    fn send_control(&mut self, _msg: ControlMsg) -> Result<(), SessionError> {
-        // 控制消息走 QUIC 可靠流；本轮只保留契约。
-        Ok(())
-    }
-
+    /// 发一帧画面（QUIC datagram，§5）。
     fn send_frame(&mut self, f: EncodedFrame) -> Result<(), SessionError> {
         use beam_net::VideoSender;
         self.conn
@@ -93,15 +401,28 @@ impl Transport for NetTransport {
             })
     }
 
-    fn send_input(&mut self, _ev: InputEvent) -> Result<(), SessionError> {
-        // 输入走独立的单向可靠流；本轮只保留契约。
-        Ok(())
+    /// 发一个输入事件（单向可靠流，§5 输入 stream，客户端 → 主机）。
+    fn send_input(&mut self, ev: InputEvent) -> Result<(), SessionError> {
+        if let Some(reason) = &self.init_error {
+            return Err(SessionError::TransportFailed {
+                reason: reason.clone(),
+            });
+        }
+        if self.input.is_none() {
+            return Err(SessionError::TransportFailed {
+                reason: "输入流未建立（主机侧不接受输入）".to_string(),
+            });
+        }
+        let frame = encode_frame(&ev)?;
+        self.input_out.push(&frame);
+        let writer = self.input.as_mut().expect("输入流已检查");
+        flush_stream(&mut self.input_out, &mut **writer)
     }
 
-    fn recv_control(&mut self) -> Option<Result<ControlMsg, SessionError>> {
-        None
-    }
-
+    /// 接收下一帧画面。
+    ///
+    /// 画面走 QUIC datagram（§5），其接收路径由帧通道那一路负责；
+    /// 本适配器暂不消费 datagram，因此恒返回 `None`。
     fn recv_frame(&mut self) -> Option<Result<EncodedFrame, SessionError>> {
         None
     }
@@ -134,15 +455,50 @@ impl NetTransportFactory {
 // 这里通过泛型避免额外的 crate 依赖。
 impl TransportFactory for NetTransportFactory {
     fn connect(&mut self) -> Result<Box<dyn Transport>, SessionError> {
-        let conn = futures::executor::block_on(beam_net::NetEndpoint::connect(
-            self.addr,
-            self.cfg.clone(),
-            self.verifier.clone(),
-        ))
-        .map_err(|e| SessionError::TransportFailed {
-            reason: format!("连接失败 {}: {e}", e.code_str()),
+        let transport = futures::executor::block_on(async {
+            let conn =
+                beam_net::NetEndpoint::connect(self.addr, self.cfg.clone(), self.verifier.clone())
+                    .await
+                    .map_err(|e| SessionError::TransportFailed {
+                        reason: format!("连接失败 {}: {e}", e.code_str()),
+                    })?;
+            NetTransport::connect(conn).await
         })?;
-        Ok(Box::new(NetTransport::new(conn)))
+        Ok(Box::new(transport))
+    }
+}
+
+/// 把 `beam_net::RateController` 适配成会话层的码率控制器（§3.2）。
+///
+/// 主机侧收到 `ControlMsg::Feedback` 时由会话层喂给它，
+/// 决策结果（目标码率）再回写到串流配置。
+#[derive(Debug)]
+pub struct NetRateController {
+    inner: beam_net::RateController,
+}
+
+impl NetRateController {
+    /// 用码率上下限构造（§3.2 `bitrate_min` / `bitrate_max`）。
+    pub fn new(min_bps: u32, max_bps: u32) -> Self {
+        Self {
+            inner: beam_net::RateController::new(min_bps, max_bps),
+        }
+    }
+
+    /// 当前码率。
+    pub fn current_bitrate(&self) -> u32 {
+        self.inner.current_bitrate()
+    }
+
+    /// 底层码率控制器。
+    pub fn inner(&self) -> &beam_net::RateController {
+        &self.inner
+    }
+}
+
+impl RateControl for NetRateController {
+    fn on_feedback(&mut self, fb: &Feedback) -> u32 {
+        self.inner.on_feedback(fb).target_bps
     }
 }
 
@@ -210,5 +566,41 @@ mod tests {
         };
         let err = consumer.consume(frame).expect_err("未启用后端必须失败");
         assert_eq!(err.code(), 9005);
+    }
+
+    #[test]
+    fn frame_round_trip_through_length_prefix() {
+        let msg = ControlMsg::Bye;
+        let frame = encode_frame(&msg).expect("编码应当成功");
+        assert_eq!(frame.len(), FRAME_LEN_PREFIX + 2, "帧头 + 族标签 + 负载");
+        let mut decoder = FrameDecoder::default();
+        decoder.push(&frame[..frame.len() - 1]);
+        assert!(decoder.next_frame().expect("解码不应当失败").is_none());
+        decoder.push(&frame[frame.len() - 1..]);
+        let out = decoder
+            .next_frame()
+            .expect("解码不应当失败")
+            .expect("应当有帧");
+        let back: ControlMsg = beam_proto::decode_as(&out).expect("解码应当成功");
+        assert_eq!(back, msg);
+    }
+
+    #[test]
+    fn oversized_frame_is_rejected() {
+        let mut decoder = FrameDecoder::default();
+        decoder.push(&(MAX_FRAME_LEN as u32 + 1).to_be_bytes());
+        let err = decoder.next_frame().expect_err("超长帧必须失败");
+        assert_eq!(err.code(), 9005);
+    }
+
+    #[test]
+    fn out_buf_tracks_pending_bytes() {
+        let mut out = OutBuf::default();
+        out.push(b"hello");
+        assert_eq!(out.pending(), b"hello");
+        out.consume(2);
+        assert_eq!(out.pending(), b"llo");
+        out.consume(3);
+        assert!(out.is_empty());
     }
 }
