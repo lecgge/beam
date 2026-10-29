@@ -141,6 +141,7 @@ dependencies = [
  "beam-proto",
  "thiserror",
  "tracing",
+ "windows 0.61.3",
  "windows 0.62.2",
  "windows-capture",
 ]
@@ -152,6 +153,7 @@ dependencies = [
  "beam-config",
  "beam-decode",
  "beam-discovery",
+ "beam-host",
  "beam-net",
  "beam-pair",
  "beam-proto",
@@ -186,6 +188,7 @@ dependencies = [
  "ffmpeg-next",
  "thiserror",
  "tracing",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -206,6 +209,7 @@ version = "0.1.0"
 dependencies = [
  "beam-config",
  "beam-proto",
+ "bytes",
  "ffmpeg-next",
  "thiserror",
  "tracing",
@@ -253,6 +257,7 @@ dependencies = [
  "beam-session",
  "bytes",
  "thiserror",
+ "tokio",
  "tracing",
 ]
 

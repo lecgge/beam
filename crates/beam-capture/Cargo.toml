@@ -21,9 +21,22 @@ tracing = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = [
-    "Win32_Graphics_Direct3D11",
+    "Foundation",
+    "Foundation_Metadata",
     "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
     "Win32_Foundation",
+] }
+# windows-capture 1.5 内部固定使用 windows 0.61（它自己的依赖树决定的），
+# 而本 crate 对外暴露的是 windows 0.62 的 ID3D11Texture2D（与 beam-encode 同型，
+# §6 的「capture→encode 同一设备零拷贝」要求两者是同一个类型）。
+# 这里显式引入 0.61 只用于把 windows-capture 交出的 COM 指针桥接回 0.62，
+# 不出现在任何对外 API 上。详见 src/wgc.rs 的「版本桥接」说明。
+windows_legacy = { package = "windows", version = "0.61.3", features = [
+    "Win32_Graphics_Direct3D11",
 ] }
 windows-capture = { workspace = true, optional = true }
 

@@ -11,7 +11,7 @@ pub mod code {
     pub const SWAPCHAIN_FAILED: u16 = 10012;
     /// `E10013`：帧被丢弃（超过上屏时限）。
     pub const FRAME_DROPPED: u16 = 10013;
-    /// `E10014`：后端未启用（§3.10 段内扩展）。
+    /// `E10014`：后端未启用（**非文档码位**，只表示后端没编译进来）。
     pub const BACKEND_DISABLED: u16 = 10014;
 }
 
@@ -48,6 +48,9 @@ pub enum RenderError {
     FrameDropped,
 
     /// `E10014`：后端未启用。
+    ///
+    /// **这不是 §3.10 定义的码位**：它只表示当前构建没有编译进真实渲染后端
+    /// （`d3d11` feature 未开启），与文档定义的 10011/10012/10013 无关。
     #[error("E10014: 渲染后端未启用(缺少 d3d11 feature)")]
     BackendDisabled,
 }

@@ -1,6 +1,9 @@
 //! 解码层错误码与文案映射（§3.10 错误码段 `E10xxx`）。
 //!
-//! §3.10 把 decode / render 归在同一段 `E10xxx`。
+//! §3.10 把 decode / render 归在同一段 `E10xxx`：
+//! `10001` 解码器不可用、`10002` 解码失败、`10003` 设备丢失。
+//! `10004` 是本 crate 的**段内扩展**，用来区分「本次构建没带后端」
+//! （`ffmpeg` feature 关闭）与「带了后端但本机没有可用硬解」——后者必须报 `E10001`。
 
 /// 解码 / 渲染层错误码编号段 `E10xxx`（§3.10）。
 pub mod code {
@@ -10,7 +13,7 @@ pub mod code {
     pub const DECODE_FAILED: u16 = 10002;
     /// `E10003`：图形设备丢失。
     pub const DEVICE_LOST: u16 = 10003;
-    /// `E10004`：后端未启用（§3.10 段内扩展）。
+    /// `E10004`：后端未启用（§3.10 段内扩展，非文档定义）。
     pub const BACKEND_DISABLED: u16 = 10004;
 }
 
@@ -95,5 +98,17 @@ mod tests {
         assert_eq!(DecError::BackendDisabled.code(), 10004);
         assert_eq!(message(10099), UNKNOWN_TEXT);
         assert!(is_decode_code(10001));
+    }
+
+    #[test]
+    fn every_code_has_a_message() {
+        for c in [
+            code::DECODER_UNAVAILABLE,
+            code::DECODE_FAILED,
+            code::DEVICE_LOST,
+            code::BACKEND_DISABLED,
+        ] {
+            assert_ne!(message(c), UNKNOWN_TEXT, "错误码 {c} 缺少文案");
+        }
     }
 }

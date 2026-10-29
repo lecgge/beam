@@ -11,7 +11,7 @@ repository.workspace = true
 [features]
 default = []
 # 真实硬编实现（依赖 ffmpeg-next 的 LGPL 动态库）。
-# 本机没有原生 ffmpeg，因此该 feature 默认关闭（§3.6 / §7）。
+# 需要 FFMPEG_DIR 指向 LGPL 构建的 ffmpeg（§7）。
 ffmpeg = ["dep:ffmpeg-next"]
 # §7：AV1 是 v2 能力，默认关闭。
 av1 = []
@@ -19,6 +19,8 @@ av1 = []
 [dependencies]
 beam-config = { workspace = true }
 beam-proto = { workspace = true }
+# EncodedFrame.slices 用 bytes::Bytes（协议层类型，零拷贝共享）。
+bytes = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
@@ -26,9 +28,17 @@ tracing = { workspace = true }
 windows = { workspace = true, features = [
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
     "Win32_Foundation",
 ] }
+# 本 crate 只用 libavcodec（编码器/解码器）与 libavutil 的 FFI 层。
 ffmpeg-next = { workspace = true, optional = true }
+
+# 真机 NVENC 出码流验证入口（§9 M-1 验证点②）：需要真实 ffmpeg 后端。
+[[example]]
+name = "nvenc_encode_smoke"
+required-features = ["ffmpeg"]
 
 [lints]
 workspace = true
