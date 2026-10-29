@@ -1,11 +1,11 @@
 //! 客户端运行时组装（§3.9 / §3.10）。
 
 use beam_config::ResolvedConfig;
-use beam_decode::VideoDecoder;
+use beam_decode::{D3D11VaDecoder, VideoDecoder};
 use beam_discovery::{Browser, DiscoveryEvent};
 use beam_net::PeerVerifier;
 use beam_proto::StreamConfig;
-use beam_render::Renderer;
+use beam_render::{D3D11Renderer, Renderer};
 use beam_session::{
     ClientDeps, ClientSession, ClientSessionConfig, PeerAddr, SessionHandle, SessionTimeouts,
     TransportFactory,
@@ -25,21 +25,12 @@ pub enum ClientError {
 }
 
 /// 客户端配置。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ClientConfig {
     /// 串流配置。
     pub stream: StreamConfig,
     /// 要连接的主机（为空表示由调用方在连接时指定）。
     pub peer: Option<PeerAddr>,
-}
-
-impl Default for ClientConfig {
-    fn default() -> Self {
-        Self {
-            stream: StreamConfig::default(),
-            peer: None,
-        }
-    }
 }
 
 impl ClientConfig {
@@ -118,6 +109,22 @@ impl ClientRuntime {
             transport: None,
         };
         ClientSession::connect_with(peer, session_cfg, deps)
+    }
+
+    /// 用**默认的解码 + 上屏组合**建立客户端会话（§3.9 / §3.10）。
+    ///
+    /// §4 规定平台 crate（decode / render）只能被 host / client 引用，
+    /// 因此桌面端（§4 的 L4 外壳）不应直接依赖 `beam-decode` / `beam-render`；
+    /// 默认组合由本 crate 提供，桌面端只调用这一个入口。
+    ///
+    /// 平台后端（`d3d11` feature）未启用时，解码会返回 `E10005`，
+    /// 错误原样透传到会话事件，不会被伪装成成功。
+    pub fn connect_default(
+        &self,
+        peer: PeerAddr,
+        transport: Option<Box<dyn TransportFactory>>,
+    ) -> SessionHandle {
+        self.connect(peer, D3D11VaDecoder::new(), D3D11Renderer::new(), transport)
     }
 
     /// 用给定的校验器建立传输工厂。

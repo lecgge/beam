@@ -19,6 +19,10 @@ beam-discovery = { workspace = true }
 beam-net = { workspace = true }
 beam-config = { workspace = true }
 beam-log = { workspace = true }
+# §5 控制流 / 输入流的读写原语（quinn 直接实现了 tokio 的 AsyncRead / AsyncWrite）。
+tokio = { workspace = true }
+# `beam_proto::encode` 的输出缓冲类型（§5 线上格式）。
+bytes = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 

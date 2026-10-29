@@ -29,6 +29,8 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 bytes = { workspace = true }
+# 回环测试需要主机侧的 QUIC 接受端（已下沉到 beam-host）。
+beam-host = { workspace = true }
 
 [lints]
 workspace = true

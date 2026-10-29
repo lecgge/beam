@@ -23,12 +23,18 @@
 //!
 //! - 控制 stream 0（双向可靠）：[`NetTransport`] 的 `ControlChannel` 实现；
 //! - 输入 stream（单向可靠，客户端 → 主机）：`NetTransport::send_input`；
-//! - 视频 / 音频：QUIC datagram。
+//! - 视频 / 音频：QUIC datagram；接收侧由 [`NetTransport`] 持久持有的
+//!   `beam_net::VideoStream` 轮询取帧，过期帧按 §3.2 记为 **E2004**。
+//!
+//! 主机侧的对称实现（QUIC 接受端 / 主机侧控制循环）在 `beam-host`。
 
 #![forbid(unsafe_code)]
 
 pub mod adapters;
 pub mod runtime;
 
-pub use adapters::{DecodeRenderConsumer, NetRateController, NetTransport};
+pub use adapters::{
+    DecodeRenderConsumer, FrameChannelStats, FrameStatsHandle, NetRateController, NetTransport,
+    ReadyTransportFactory,
+};
 pub use runtime::{ClientConfig, ClientError, ClientRuntime};

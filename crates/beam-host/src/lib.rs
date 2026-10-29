@@ -22,6 +22,13 @@
 //! - [`NetVideoSender`]：网络发送 → `beam_session::VideoSender`；
 //! - [`InputAdapter`]：输入注入 → `beam_session::InputSink`。
 //!
+//! ## 主机侧 QUIC 接受端（§5）
+//!
+//! [`HostTransport`] 与 [`HostInput`] 是主机侧的 QUIC 适配器：
+//! 接受控制双向流（§5 控制 stream 0）、接收输入单向流（§5 输入 stream），
+//! 画面走 QUIC datagram。它们原本寄居在 `beam-client`（职责倒挂），
+//! 本 crate 才是它们的 rightful 归属。
+//!
 //! ## 错误码
 //!
 //! 编排层自身只做组装，错误沿用各平台 crate 的 `E5xxx` / `E6xxx` / `E8xxx` / `E2xxx`。
@@ -29,7 +36,9 @@
 #![forbid(unsafe_code)]
 
 pub mod adapters;
+pub mod net;
 pub mod runtime;
 
 pub use adapters::{CaptureEncodePipeline, InputAdapter, NetVideoSender};
+pub use net::{HostInput, HostTransport};
 pub use runtime::{HostConfig, HostError, HostRuntime};

@@ -1,11 +1,69 @@
 //! 平台实现 → 会话 trait 的适配器（§3.9「通过 trait 注入，便于测试」）。
+//!
+//! ## D3D11 设备契约（§3.10 / §6「capture→encode 同一设备零拷贝」）
+//!
+//! D3D11 **不允许跨设备拷贝**：抓屏纹理必须和编码器的硬件帧上下文
+//! 建在**同一个 `ID3D11Device`** 上，否则 `CopyResource` 无从谈起。
+//!
+//! 这条不变量在本 crate 的成立方式是：
+//!
+//! - 抓屏层把 D3D11 纹理（`beam_capture::Texture`）原样交给编码层，
+//!   本 crate **不复制、不重建**纹理；
+//! - 编码层建原生上下文时用 `ID3D11Texture2D::GetDevice()` 取**这张纹理自己的**
+//!   设备（`beam-encode` 的 `open_native`），因此编码器与抓屏天然同设备；
+//! - 客户端侧则是另一条链：解码纹理必须建在渲染层交换链的设备上
+//!   （`beam-client` 的 `open_decoder_on_renderer_device`）。
+//!
+//! 主机与客户端是**两台机器**，两条链各自成立，不存在「主机设备 = 客户端设备」。
+//!
+//! > **待补接口**：目前 `beam-capture` / `beam-encode` 都没有公开的
+//! > `device()` 访问器，因此本 crate **无法**在运行期断言
+//! > 「抓屏设备 == 编码设备」。精确签名见批注与交付报告。
 
-use beam_capture::{CaptureConfig, CaptureSource, CapturedFrame as CaptureCapturedFrame};
+use std::sync::{Arc, Mutex};
+
+use beam_capture::{CaptureConfig, CaptureSource};
 use beam_encode::{CapturedFrame as EncodeCapturedFrame, VideoEncoder};
 use beam_input::InputSink as PlatformInputSink;
 use beam_net::VideoSender as NetVideoSenderTrait;
 use beam_proto::{ControlMsg, EncodedFrame, InputEvent};
 use beam_session::{FramePipeline, InputSink, SessionError, VideoSender};
+
+/// 主机侧流水线的错误槽（§3.9）。
+///
+/// `beam-session` 的 [`FramePipeline::poll`] 没有错误返回通道，
+/// 因此**真实**的编码错误（例如 `E6001` 没有可用硬编）由本 crate 记在这里，
+/// 由调用方通过 [`crate::runtime::HostSessionHandle::take_error`] /
+/// [`crate::runtime::HostSessionHandle::pump`] 取走并让会话进入错误态。
+///
+/// 注意：**「本轮暂无输出」（`E6005`）不是错误**，不进这个槽。
+#[derive(Debug, Clone, Default)]
+pub struct PipelineErrors {
+    inner: Arc<Mutex<Option<SessionError>>>,
+}
+
+impl PipelineErrors {
+    /// 记一个错误（保留最早的一个，避免后来的覆盖掉根因）。
+    pub fn record(&self, err: SessionError) {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_none() {
+            *guard = Some(err);
+        }
+    }
+
+    /// 取走最近一次错误。
+    pub fn take(&self) -> Option<SessionError> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+
+    /// 是否有待取走的错误。
+    pub fn has_error(&self) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+    }
+}
 
 /// 抓屏 → 编码流水线适配器。
 ///
@@ -20,6 +78,15 @@ where
     capture: C,
     encoder: E,
     capture_cfg: CaptureConfig,
+    /// 编码器输出帧的尺寸（宽, 高）。
+    ///
+    /// 抓屏纹理自己的真实尺寸需要 `ID3D11Texture2D::GetDesc`（unsafe），
+    /// 而本 crate 是 `#![forbid(unsafe_code)]`；`beam_capture::CapturedFrame`
+    /// 目前也不带宽高。因此这里用**配置的串流分辨率**，
+    /// 等 `beam-capture` 补上宽高字段后再换成纹理真值。
+    frame_size: (u32, u32),
+    /// 真实错误的去处（`E6005` 之类的「暂无输出」不进这里）。
+    errors: PipelineErrors,
 }
 
 impl<C, E> CaptureEncodePipeline<C, E>
@@ -27,12 +94,27 @@ where
     C: CaptureSource,
     E: VideoEncoder,
 {
-    /// 组装适配器。
+    /// 组装适配器（输出尺寸取 1920×1080）。
     pub fn new(capture: C, encoder: E, capture_cfg: CaptureConfig) -> Self {
+        Self::with_frame_size(capture, encoder, capture_cfg, (1920, 1080))
+    }
+
+    /// 组装适配器并指定输出尺寸（宽, 高）。
+    ///
+    /// 尺寸取自串流配置（§3.14 → §3.9）；抓屏纹理的真实尺寸需要
+    /// `beam-capture` 把宽高带出来（见模块文档的「待补接口」）。
+    pub fn with_frame_size(
+        capture: C,
+        encoder: E,
+        capture_cfg: CaptureConfig,
+        frame_size: (u32, u32),
+    ) -> Self {
         Self {
             capture,
             encoder,
             capture_cfg,
+            frame_size,
+            errors: PipelineErrors::default(),
         }
     }
 
@@ -44,6 +126,11 @@ where
     /// 访问底层编码器。
     pub fn encoder(&self) -> &E {
         &self.encoder
+    }
+
+    /// 错误槽：真实编码错误从这里冒泡到调用方。
+    pub fn errors(&self) -> PipelineErrors {
+        self.errors.clone()
     }
 }
 
@@ -62,15 +149,36 @@ where
 
     fn poll(&mut self) -> Option<EncodedFrame> {
         let frame = self.capture.latest()?;
-        let (width, height) = texture_size(&frame);
         let input = EncodeCapturedFrame {
             tex: frame.tex,
             ts_us: frame.ts_us,
             dirty: frame.dirty,
-            width,
-            height,
+            width: self.frame_size.0,
+            height: self.frame_size.1,
         };
-        self.encoder.encode(&input).ok()
+        match self.encoder.encode(&input) {
+            Ok(encoded) => Some(encoded),
+            // §3.6 `E6005`：硬件编码器有**一帧延迟**——第一次 `encode()` 时
+            // 缓冲里还没有码流。这是**正常状态**，不是故障：
+            // 显式容忍它，当作「本轮暂无输出」，而不是把它当成失败。
+            //
+            // 取舍：这里**不**在主机侧再缓存一帧来抹平延迟。
+            // 抹平延迟会让主机比真实画面多持有一帧，反而把延迟做大；
+            // 而 §4.1 的时序允许首帧晚一点到（客户端会等到 IDR）。
+            Err(e) if e.code() == beam_encode::error::code::NO_OUTPUT_YET => {
+                tracing::trace!(code = %e.code_str(), "编码器尚未产出帧(有一帧延迟)");
+                None
+            }
+            // 其它错误是真故障：记进错误槽，由上层取走并让会话进入错误态。
+            // **不静默吞掉**——调用方必须能区分「还没产出」与「真出错」。
+            Err(e) => {
+                tracing::error!(code = %e.code_str(), "编码失败");
+                self.errors.record(SessionError::TransportFailed {
+                    reason: format!("编码失败 {}: {e}", e.code_str()),
+                });
+                None
+            }
+        }
     }
 
     fn request_idr(&mut self) {
@@ -80,19 +188,6 @@ where
     fn stop(&mut self) {
         self.capture.stop();
     }
-}
-
-#[cfg(windows)]
-fn texture_size(frame: &CaptureCapturedFrame) -> (u32, u32) {
-    // 真实实现从 D3D11 资源描述里取宽高。
-    let _ = frame;
-    (1920, 1080)
-}
-
-#[cfg(not(windows))]
-fn texture_size(frame: &CaptureCapturedFrame) -> (u32, u32) {
-    let _ = frame;
-    (1920, 1080)
 }
 
 /// 网络发送适配器。
@@ -164,20 +259,20 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use beam_capture::{CapError, CaptureBackend};
+    use beam_capture::{CapError, CaptureBackend, CapturedFrame};
     use beam_input::{InputError, SendInputSink};
     use beam_proto::{KeyAction, StatsReport};
     use bytes::Bytes;
 
     struct FakeCapture {
-        frames: Vec<Option<CaptureCapturedFrame>>,
+        frames: Vec<Option<CapturedFrame>>,
     }
 
     impl CaptureSource for FakeCapture {
         fn start(&mut self, _cfg: CaptureConfig) -> Result<(), CapError> {
             Ok(())
         }
-        fn latest(&mut self) -> Option<CaptureCapturedFrame> {
+        fn latest(&mut self) -> Option<CapturedFrame> {
             if self.frames.is_empty() {
                 None
             } else {

@@ -6,12 +6,24 @@
 //! |---|---|---|---|
 //! | 控制 stream 0 | [`ControlMsg`] | 双向可靠流 | [`NetTransport`] 的 `ctrl_*` |
 //! | 输入 stream | [`InputEvent`] | 单向可靠流（客户端 → 主机） | [`NetTransport`] 的 `input*` |
-//! | 视频 / 音频 | 帧 | datagram | `beam_net::VideoSender` |
+//! | 视频 / 音频 | 帧 | datagram | `beam_net::VideoSender` / `VideoStream` |
 //!
 //! 线上帧格式：**4 字节大端长度前缀 + postcard 负载**（负载自带 1 字节消息族标签，
 //! 由 `beam_proto::encode` 产生）。长度前缀是本层的实现约定，§5 未规定。
+//!
+//! 主机侧的对称实现（接受控制流 / 接收输入流）在 `beam-host`：
+//! [`NetTransport`] 只负责客户端侧，主机侧适配器不寄居在本 crate。
+//!
+//! ## 帧通道（§5 画面走 datagram）
+//!
+//! - 画面用 QUIC **datagram** 承载，接收侧是 [`beam_net::VideoStream`]；
+//! - [`NetTransport`] **持久持有**一个 `VideoStream`：`Conn::video_stream()` 每次调用
+//!   都会新建重组器，轮询时新建会丢掉「已收到但尚未重组完」的分片；
+//! - 过期帧（重组超时）按 §3.2 记为 **E2004**：写日志 + 计入
+//!   [`FrameChannelStats`]，不静默丢弃。
 
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use beam_decode::VideoDecoder;
@@ -196,13 +208,44 @@ fn flush_stream(
     Ok(())
 }
 
-/// 基于 QUIC 连接的会话传输适配器。
+/// 帧通道统计（§3.2）。
+///
+/// 过期帧（重组超时）按 §3.2 记为 **E2004**，通过本结构暴露给上层，
+/// 不做静默丢弃。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FrameChannelStats {
+    /// 已交付给上层的完整帧数。
+    pub frames_delivered: u64,
+    /// 因超时被丢弃的帧数（E2004）。
+    pub frames_expired: u64,
+    /// 最近一次被丢弃的帧号。
+    pub last_expired_frame_id: Option<u32>,
+}
+
+/// 帧通道统计的共享句柄。
+///
+/// 会话层把传输装箱成 `dyn Transport` 后上层拿不到具体类型，
+/// 上层（如桌面端）持有本句柄即可读到 E2004 计数。
+#[derive(Debug, Clone, Default)]
+pub struct FrameStatsHandle {
+    inner: Arc<Mutex<FrameChannelStats>>,
+}
+
+impl FrameStatsHandle {
+    /// 当前统计快照。
+    pub fn snapshot(&self) -> FrameChannelStats {
+        *self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// 基于 QUIC 连接的会话传输适配器（客户端侧）。
 ///
 /// - 控制通道：双向可靠流（§5 控制 stream 0），承载 [`ControlMsg`]；
 /// - 输入通道：单向可靠流（§5 输入 stream，客户端 → 主机），承载 [`InputEvent`]；
-/// - 画面：QUIC datagram（§5），走 `beam_net::VideoSender`。
+/// - 画面：QUIC datagram（§5），发送走 `beam_net::VideoSender`，
+///   接收走本 crate 持有的 [`beam_net::VideoStream`]。
 ///
-/// 客户端用 [`NetTransport::connect`]（自己开流），主机用 [`NetTransport::accept`]（接受流）。
+/// 主机侧的对称实现（接受控制流 / 接收输入流）在 `beam-host`。
 pub struct NetTransport {
     conn: beam_net::Conn,
     ctrl_send: Box<dyn AsyncWrite + Unpin + Send>,
@@ -211,6 +254,13 @@ pub struct NetTransport {
     ctrl_in: FrameDecoder,
     input: Option<Box<dyn AsyncWrite + Unpin + Send>>,
     input_out: OutBuf,
+    /// 帧通道：持久持有的视频接收流。
+    ///
+    /// **必须是持久实例**：`Conn::video_stream()` 每次调用都会新建一个重组器，
+    /// 轮询时新建会把「已收到但还没重组完」的分片丢掉，表现为随机丢帧。
+    video: beam_net::VideoStream,
+    /// 帧通道统计（共享句柄）。
+    stats: Arc<Mutex<FrameChannelStats>>,
     /// 构造失败时的原因（首次使用时上报）。
     init_error: Option<String>,
 }
@@ -219,6 +269,7 @@ impl std::fmt::Debug for NetTransport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NetTransport")
             .field("has_input_stream", &self.input.is_some())
+            .field("frame_stats", &self.frame_stats())
             .field("init_error", &self.init_error)
             .finish()
     }
@@ -239,6 +290,8 @@ impl NetTransport {
             .map_err(|e| SessionError::TransportFailed {
                 reason: format!("打开输入流失败 {}: {e}", e.code_str()),
             })?;
+        // 帧通道的接收流只创建一次（`Conn::video_stream()` 每次调用都是新重组器）。
+        let video = conn.video_stream();
         Ok(Self {
             conn,
             ctrl_send: Box::new(send),
@@ -247,29 +300,8 @@ impl NetTransport {
             ctrl_in: FrameDecoder::default(),
             input: Some(Box::new(input)),
             input_out: OutBuf::default(),
-            init_error: None,
-        })
-    }
-
-    /// 主机侧：接受控制双向流（§5 控制 stream 0）。
-    ///
-    /// 注意：QUIC 的流只有在收到对端数据后才对本端可见，
-    /// 因此本函数会等到客户端在控制流上写入第一条数据才返回。
-    pub async fn accept(conn: beam_net::Conn) -> Result<Self, SessionError> {
-        let (send, recv) = conn
-            .accept_bi()
-            .await
-            .map_err(|e| SessionError::TransportFailed {
-                reason: format!("接受控制流失败 {}: {e}", e.code_str()),
-            })?;
-        Ok(Self {
-            conn,
-            ctrl_send: Box::new(send),
-            ctrl_recv: Box::new(recv),
-            ctrl_out: OutBuf::default(),
-            ctrl_in: FrameDecoder::default(),
-            input: None,
-            input_out: OutBuf::default(),
+            video,
+            stats: Arc::new(Mutex::new(FrameChannelStats::default())),
             init_error: None,
         })
     }
@@ -292,6 +324,7 @@ impl NetTransport {
 
     /// 构造一个「一用就报错」的传输（用于把建流失败暴露给会话层）。
     fn failed(conn: beam_net::Conn, reason: String) -> Self {
+        let video = conn.video_stream();
         Self {
             conn,
             ctrl_send: Box::new(tokio::io::sink()),
@@ -300,6 +333,8 @@ impl NetTransport {
             ctrl_in: FrameDecoder::default(),
             input: None,
             input_out: OutBuf::default(),
+            video,
+            stats: Arc::new(Mutex::new(FrameChannelStats::default())),
             init_error: Some(reason),
         }
     }
@@ -307,6 +342,42 @@ impl NetTransport {
     /// 访问底层连接。
     pub fn conn(&self) -> &beam_net::Conn {
         &self.conn
+    }
+
+    /// 帧通道统计快照（§3.2）。
+    pub fn frame_stats(&self) -> FrameChannelStats {
+        *self.stats.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// 帧通道统计的共享句柄：上层在传输被装箱后仍能读到 E2004 计数。
+    pub fn frame_stats_handle(&self) -> FrameStatsHandle {
+        FrameStatsHandle {
+            inner: Arc::clone(&self.stats),
+        }
+    }
+
+    /// 把超时丢弃的帧取出来上报（§3.2 **E2004**）。
+    ///
+    /// 每条过期帧都会写一条 `warn` 日志并累加计数——**不静默丢弃**。
+    fn drain_expired(&mut self) {
+        let expired = self.video.take_expired();
+        if expired.is_empty() {
+            return;
+        }
+        let mut guard = self.stats.lock().unwrap_or_else(|e| e.into_inner());
+        for err in expired {
+            guard.frames_expired += 1;
+            if let beam_net::NetError::FrameExpired { frame_id } = err {
+                guard.last_expired_frame_id = Some(frame_id);
+                tracing::warn!(
+                    code = %err.code_str(),
+                    frame_id,
+                    "画面帧重组超时并被丢弃(E2004)"
+                );
+            } else {
+                tracing::warn!(code = %err.code_str(), "画面帧通道异常");
+            }
+        }
     }
 
     /// 取出一条已经完整的控制帧并解码。
@@ -419,12 +490,42 @@ impl Transport for NetTransport {
         flush_stream(&mut self.input_out, &mut **writer)
     }
 
-    /// 接收下一帧画面。
+    /// 接收下一帧画面（QUIC datagram，§5）。
     ///
-    /// 画面走 QUIC datagram（§5），其接收路径由帧通道那一路负责；
-    /// 本适配器暂不消费 datagram，因此恒返回 `None`。
+    /// 语义与 [`beam_net::VideoStream::try_next_frame`] 一致：
+    ///
+    /// - **不阻塞**：只消费已经到达的数据报；
+    /// - **不完整帧会被保留**：`None` 只表示「此刻还没有完整帧」，
+    ///   分片留在重组器里等后续分片补齐；
+    /// - **过期帧不会被静默丢弃**：重组超时的帧按 §3.2 记为 **E2004**，
+    ///   写日志并计入 [`FrameChannelStats`]。
     fn recv_frame(&mut self) -> Option<Result<EncodedFrame, SessionError>> {
-        None
+        if let Some(reason) = &self.init_error {
+            return Some(Err(SessionError::TransportFailed {
+                reason: reason.clone(),
+            }));
+        }
+        // 先把超时丢弃的帧取出来上报（E2004）。
+        self.drain_expired();
+        match self.video.try_next_frame() {
+            Ok(Some(frame)) => {
+                self.stats
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .frames_delivered += 1;
+                Some(Ok(EncodedFrame {
+                    frame_id: frame.frame_id,
+                    pts_us: frame.pts_us,
+                    capture_ts_us: frame.capture_ts_us,
+                    is_key: frame.is_key,
+                    slices: vec![frame.payload],
+                }))
+            }
+            Ok(None) => None,
+            Err(e) => Some(Err(SessionError::TransportFailed {
+                reason: format!("接收画面失败 {}: {e}", e.code_str()),
+            })),
+        }
     }
 }
 
@@ -465,6 +566,43 @@ impl TransportFactory for NetTransportFactory {
             NetTransport::connect(conn).await
         })?;
         Ok(Box::new(transport))
+    }
+}
+
+/// 已就绪的传输工厂：把**已经建立好**的传输直接交给会话层。
+///
+/// 会话层的 [`TransportFactory::connect`] 是同步接口，而 QUIC 建链必须 `await`；
+/// 调用方（例如桌面端）先在自己的异步任务里建好 [`NetTransport`]，
+/// 再用本工厂注入 [`beam_session::ClientSession`]，
+/// 避免在 tokio 运行时里用 `block_on` 阻塞工作线程。
+pub struct ReadyTransportFactory {
+    transport: Option<Box<dyn Transport>>,
+}
+
+impl std::fmt::Debug for ReadyTransportFactory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReadyTransportFactory")
+            .field("has_transport", &self.transport.is_some())
+            .finish()
+    }
+}
+
+impl ReadyTransportFactory {
+    /// 用已建立的传输组装工厂。
+    pub fn new(transport: Box<dyn Transport>) -> Self {
+        Self {
+            transport: Some(transport),
+        }
+    }
+}
+
+impl TransportFactory for ReadyTransportFactory {
+    fn connect(&mut self) -> Result<Box<dyn Transport>, SessionError> {
+        self.transport
+            .take()
+            .ok_or_else(|| SessionError::MissingDependency {
+                what: "transport".to_string(),
+            })
     }
 }
 
