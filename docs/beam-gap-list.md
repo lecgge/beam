@@ -47,15 +47,15 @@
 
 | 审计判定 | 条数 | 已完成 | 进行中 | 已排期 | 未开始 |
 |---|---|---|---|---|---|
-| 已实现 | 349 | 5 | 0 | 0 | 344 |
-| 占位 | 41 | 8 | 15 | 0 | 18 |
-| 缺失 | 110 | 27 | 7 | 0 | 63 |
-| 偏差 | 73 | 11 | 2 | 0 | 60 |
+| 已实现 | 349 | 8 | 0 | 0 | 341 |
+| 占位 | 41 | 21 | 1 | 0 | 18 |
+| 缺失 | 110 | 35 | 0 | 0 | 62 |
+| 偏差 | 73 | 16 | 1 | 0 | 56 |
 | 超出 | 1 | 0 | 0 | 0 | 1 |
-| **合计** | **574** | **51** | **24** | **0** | **486** |
+| **合计** | **574** | **80** | **2** | **0** | **478** |
 
 - 审计判定为**未达成**（占位+缺失+偏差）：**224** 条
-- 其中**已落地**：**83** 条；**仍未排期**：**141** 条
+- 其中**已落地**：**88** 条；**仍未排期**：**136** 条
 
 > 「未开始」不代表这一条没人管，而是**还没排进任何一批**。排期后的条目会出现在「落地进度台账」一节，带批次号与验收方式。
 
@@ -156,10 +156,11 @@
 | 状态 | 条目数 |
 |---|---|
 | 未开始 | 2 |
-| 进行中 | 24 |
-| 已完成 | 52 |
+| 进行中 | 2 |
+| 已完成 | 81 |
 | 已阻塞 | 12 |
 | 暂不做 | 1 |
+| 偏差 | 1 |
 
 ### 批次记录
 
@@ -199,7 +200,7 @@
 | 控制流分帧格式是实现约定 | 4 字节大端长度 + postcard + 1 字节族标签，§5 未规定 | 下一批 |
 | Bye 会被提前丢弃 | QUIC 最后一个连接引用被释放会立即关连接并丢掉未发出的 Bye；现改为 Bye 后保留传输至句柄释放 | 下一批 |
 
-| B3 | 2026-10-29 | 第三批：平台层真实后端 + 帧语义 + JNI 导出面 | M-1 三个高风险验证点 + beam-net 帧语义 + beam-ffi uniffi | 进行中 | cargo fmt --all --check exit 0；cargo check --workspace --all-targets exit 0 / 0 warning；cargo test --workspace exit 0；--all-features 路径编译通过（ffmpeg / wgc / d3d11 / uniffi 四个 feature） |
+| B3 | 2026-10-29 | 第三批：平台层真实后端 + 帧语义 + JNI 导出面 | M-1 三个高风险验证点 + beam-net 帧语义 + beam-ffi uniffi | 已完成 | cargo fmt --all --check exit 0；cargo check --workspace --all-targets exit 0 / 0 warning；cargo test --workspace exit 0（328 passed / 0 failed，40 套件）；真机验证：WGC 抓帧 / DXGI 复制 / flip-model Present / NVENC 出码流 PASS / D3D11VA 硬解 PASS |
 
 - **B3-A 抓屏与渲染** — 写入范围：`crates/beam-capture/**`、`crates/beam-render/**`；覆盖条目 C-01, C-02, C-03, C-04, C-10, C-11, C-12, C-13, C-14, C-24, C-25, V-03, V-04, V-08
 - **B3-B beam-net 帧语义与门控** — 写入范围：`crates/beam-net/**`；覆盖条目 P5-25, P5-35, N-28, N-22, P5-03, T-20
@@ -221,6 +222,34 @@
 | SessionEvent.Stats 形状不匹配 | B3-C 导出的是嵌套 stats 记录，NativeBeamBridge.mapStats 期望统计字段平铺在变体上 → 统计流会读到 0 值（B3-C） | B4-A |
 | connect 内部仍丢弃 cfg/sink | crates/beam-ffi/src/client.rs:196 的 let _ = (cfg, sink); 未动，会话停在 Idle、FrameSink 永不回调（B3-C） | 下一批 |
 | uniffi 生成物包名是 uniffi.beam_ffi | NativeBeamBridge 用 Class.forName + 候选名列表找类，需在 Android 侧对齐（B3-C） | B4-A |
+| 链接 avcodec 的二进制必须能找到 ffmpeg 的第三方 DLL | conda 版 LGPL ffmpeg 只带自己的 DLL，缺 zlib/dav1d/opus/libxml2/liblzma/iconv/harfbuzz/fontconfig/expat/libpng/pcre2/glib；缺任一即启动 0xC0000135。B3-D 已把它们补进 %TEMP%eam-tools\ffmpeg-lgpl-conda\root\Library\bin。**复现与 CI 必须把 $FFMPEG_DIR\bin 加进 PATH** | 必须跟进 |
+| FFmpeg 设备上下文的三个坑（实测） | ①av_hwdevice_ctx_alloc(D3D11VA) 已分配 AVD3D11VADeviceContext，只能填 device 字段、不能覆盖 hwctx 指针（覆盖会让 ffmpeg 用 av_free 释放 Rust 内存→堆破坏）；②free 回调为空→设备引用由我们负责释放；③av_hwdevice_ctx_init 直接解引用 hwctx->device，为 NULL 必崩 | 已写入代码注释 |
+| windows-rs 0.62 的 D3D11_VIDEO_PROCESSOR_CAPS 缺字段 | 该结构体少一个 OutputFormatCaps u32，调用 GetVideoProcessorCaps 会越界写栈。**不要调用 GetVideoProcessorCaps** | 已记录 |
+| NVENC 有一帧流水线延迟 | 第一次 encode() 拿不到输出。B3-D 新增段内扩展码 E6005（NoOutputYet）表达该状态；但 beam-host 的 poll() 用 .ok() 会静默丢首帧 → 已注入 B4-B 要求显式容忍 E6005 | B4-B |
+| D3D11 硬件帧路径的进程退出崩溃 | main 返回后 NVIDIA 驱动侧的第三方 atexit 回调访问已释放对象 → 0xC0000005。示例用 std::process::exit(0) 规避；**库在真实应用退出时仍会遇到**，需排关闭顺序或向驱动侧报 | 下一批 |
+| 遗留垃圾目录 C:\Users\Wisdplat_ZC_0044\Documents\beam | B3-D 写错路径建的（1 个文件 crates/beam-encode/src/ffmpeg/mod.rs）。在仓库外不影响构建，但本机回收站通道拒绝工作区外的目标，无法自动清理，需手工删除 | 需手工清理 |
+| AMF / QSV 路径无法在本机验证 | 本机 conda LGPL ffmpeg 只编了 NVENC（已扫 avcodec-60.dll 确认无 *_amf / *_qsv）。代码按 §3.6 基线实现完毕，等有对应驱动的机器 | 需对应硬件 |
+| 桌面端作为主机未起 QUIC 监听 | beam-host 的 start_quic_session 已就绪，但桌面端 start_hosting 只起 mDNS；因此「主机端人工确认后写信任库」那一侧尚未接通（本批接通的是客户端侧确认） | 下一批 |
+| 帧头没有独立 pts 字段 | §5 的 16 字节帧头只有 capture_ts(48 位)，接收端 pts_us = capture_ts_us。若文档要求两者不同，须改 beam-proto/beam-net | 待裁决 |
+| 分帧编解码两端各存一份 | §4 不允许 L3 横向依赖（host↔client 同层），所以「4 字节大端长度前缀 + postcard」在 beam-client 与 beam-host 各有一份实现，格式必须保持一致 | 下一批 |
+| beam-session 的 HostDeps.input 没有消费方 | runner 从不调用；主机侧输入事件由 beam-host 自己的输入泵驱动。若以后 beam-session 接管会重复注入，需裁决归属 | 待裁决 |
+| E2004 缺 SessionEvent 变体 | 目前只能到「日志 + 统计句柄 + 桌面端 dropped_frames」；用 Error 变体会把会话打进 Error 态（丢帧不该致命） | 下一批 |
+| 配对链路依赖对端在跑 QUIC | mDNS 只广播指纹前 8 位，信任库需要完整 64 位，故用一次「故意失败」的握手采集证书指纹并与 mDNS 前缀交叉校验；对方只广播不跑 QUIC 时采不到指纹 | 已记录 |
+| platform 字段缺失 | §3.4 mDNS TXT 不带平台字段，§5 协议也无设备信息消息 → 信任库里的设备平台恒为「未知平台」。需 beam-discovery 的 TXT 加 plat 或 §5 加一条 DeviceInfo 控制消息 | 待裁决 |
+
+| B4 | 2026-10-29 | 第四批：Android 串流接线 + 帧通道与配置贯通 | android/ uniffi 落地与输入接线；beam-client/beam-host 帧通道与配置；桌面端真实客户端会话 | 已完成 | cargo fmt --all --check exit 0；cargo check --workspace --all-targets exit 0 / 0 warning；cargo test --workspace exit 0（328 passed）；桌面端 fmt/check exit 0；gradlew assembleDebug BUILD SUCCESSFUL；gradlew test exit 0（22 套件 / 156 次 / 0 失败） |
+
+- **B4-A Android** — 写入范围：`android/**`；覆盖条目 AU-01, AB-04, AU-10, PP-03, AN-19, X2-07, F-11
+- **B4-B 帧通道与配置** — 写入范围：`crates/beam-client/**`、`crates/beam-host/**`、`apps/desktop/**`；覆盖条目 P5-03, T-20, E-19, E-20
+
+**B4 追加项（审计中顺带发现，不在原 551 条内）**
+
+| 项 | 说明 | 归属 |
+|---|---|---|
+| 桌面端作为主机未接 QUIC 监听 | 同上，客户端侧已通、主机侧未通 | 下一批 |
+| platform 字段缺失 | 需 beam-discovery TXT 加 plat 或 §5 加 DeviceInfo 控制消息（两者都不在下一批写入范围） | 待裁决 |
+| AMF / QSV 路径无法在本机验证 | 本机 conda LGPL ffmpeg 只编了 NVENC（已扫 avcodec-60.dll 确认无 *_amf / *_qsv），代码按 §3.6 基线实现完毕 | 需对应硬件 |
+| GPU RGB→NV12（VideoProcessor）未通过 | 本机 CreateVideoProcessorInputView/OutputView 返回 E_INVALIDARG；已验证的替代路径是「NV12 纹理 → D3D11 硬件帧 → NVENC」；文档允许的 compute shader 方案未实现 | 下一批 |
 
 ### 已裁决事项
 
@@ -229,13 +258,18 @@
 | D1 | 是否放开 #![forbid(unsafe_code)] | **只放开平台层** | 2026-10-29 | 平台 crate 内改 #![deny(unsafe_code)] 并在确实需要的模块/函数局部 #[allow(unsafe_code)]，其余 12 个 crate 保持 forbid | §3.5, §3.6, §3.7, §3.8, §3.10 |
 | D2 | FEC 在 MVP 阶段关还是开 | **按文档：MVP 关闭** | 2026-10-29 | 给 beam-net 加 fec feature（默认关），v1 再开 | §3.2 |
 | D3 | shard_idx 语义以文档还是实现为准 | **按文档：改为组内分片号** | 2026-10-29 | 需同步改 net 层分包/重组与测试，并保证接收端在丢包/乱序/重复下仍能无歧义确定组边界 | §5 |
+| D4 | windows crate 版本分叉（0.61 / 0.62） | **保留现状：beam-capture 内以别名引入 windows 0.61.3 做 COM 指针桥接，对外 Texture 仍用 windows 0.62** | 2026-10-29 | 文档 §2 只写「依赖 windows-capture、windows crate」，§7 未规定版本 → 属实现细节而非文档语义，故按「只改实现方式不改语义」裁决为保留现状。理由：①windows-capture 2.x 需 rustc >= 1.88，与仓库 MSRV 1.86 冲突，升不动；②D3D11 的 IID/vtable 由操作系统定义，两版 ABI 相同，桥接安全；③对外的 Texture 必须与 beam-encode 的 D3D11 纹理同型才能零拷贝。副作用：依赖树里同时存在 windows 0.61/0.62 两套 windows_result。**未改文档语义。** |  |
+| D5 | 跨 crate 的 D3D11 设备契约由谁保证 | **设备由串流编排层 beam-host（L3）统一创建，并注入 capture / encode / decode / render；平台 crate 之间不横向依赖** | 2026-10-29 | 文档 §4 规定 L1 之间不可横向依赖（唯一例外 net→pair），§6 规定「D3D11 纹理用引用计数 COM 指针，capture→encode 同一设备上零拷贝」。用平台类型 ID3D11Device 作契约参数、由 L3 注入，是唯一同时满足这两条的形状。B3-D 已落地 D3D11VaDecoder::open_with_device(cfg, &ID3D11Device)；B3-A 的 D3D11Renderer::device() 已做运行期设备校验（不匹配则该帧清屏并告警，不静默拷错）。**未改文档语义。** |  |
+| D6 | NVENC 一帧流水线延迟在 host 侧如何处理 | **host 侧显式容忍 E6005（视作「本轮暂无输出」），且不在 host 侧再缓存一帧** | 2026-10-29 | 文档 §3.6 未规定 NVENC 延迟；§4.1 时序允许首帧晚一点到（客户端会等到 IDR）。在 host 侧缓存一帧会让主机比真实画面多持有一帧，把延迟做大，与 §4.1「上屏等待含 vsync 整帧量化、目标须留 1 帧余量」相悖。E6005 是段内扩展码，不进错误槽；真错误继续冒泡，不静默吞掉。**未改文档语义。** 仍缺：桌面端主机侧尚未消费该错误通道（start_hosting 未起 QUIC 监听）。 |  |
 
-### 待决策（阻塞后续批次）
+### 本轮修复与提交记录
 
-| # | 议题 | 影响 | 阻塞范围 |
+| 日期 | 事项 | 说明 | 结果 |
 |---|---|---|---|
-| D4 | windows crate 版本分叉如何收口 | windows-capture 1.5 内部锁 windows 0.61.3，而对外的 Texture 类型必须是 windows 0.62（否则与 beam-encode 的 D3D11 纹理不同型、零拷贝无从谈起）。当前解法是在 beam-capture 里以别名引入 windows 0.61.3 做 COM 指针桥接（D3D11 ABI 由操作系统定义，两版 IID/vtable 相同）。副作用是依赖树里同时存在 windows 0.61/0.62 两套 windows_result。长期解法：升 windows-capture 到 2.x（需 rustc >= 1.88，与 MSRV 1.86 冲突）或统一 windows 版本 —— 两者都要动根 manifest，需裁决。 | §3.5 |
-| D5 | 跨 crate 的 D3D11 设备契约由谁保证 | D3D11 不允许跨设备拷贝。beam-render 的 D3D11Renderer::device() 返回渲染层自己的设备，解码纹理必须创建在同一个设备上，否则帧链路是断的。beam-render 已加运行期设备校验（不匹配则该帧清屏并告警，不静默拷错）。需确认 beam-decode 复用同一设备。 | §3.10 |
+| 2026-10-29 | 修复 beam-host 三处断点 | B4-B 在接 E6005 改造时被 Token 配额掐断，留下：(1) adapters.rs:265/272 测试模块用了不存在的 CaptureCapturedFrame（应为 beam_capture::CapturedFrame），(2) runtime.rs:323 HostSessionHandle 初始化缺新增的 errors: PipelineErrors 字段，(3) runtime.rs:377 缺 state() 方法。已逐处修复并补 import。 | cargo check -p beam-host --all-targets exit 0 |
+| 2026-10-29 | cargo fmt --all 归位 | B4-B 遗留的 beam-host/src/{adapters,runtime}.rs 格式偏差导致 fmt exit 1；执行 cargo fmt --all 只重排了这 2 个文件。 | root 与 desktop 两处 cargo fmt --check 均 exit 0 |
+| 2026-10-29 | 裁决 D4 / D5 / D6 | 三项均按「只改实现方式、不改文档语义」裁决，理由与影响已记入「已裁决事项」表，并在 beam-capture / beam-host / beam-encode 的模块文档里各加一段「决策备注」。 | 文档语义未变 |
+| 2026-10-29 | 拆分提交 86 项悬空改动 | ① d1393e0 平台层（capture/render/decode/encode + Cargo.lock + 技术设计文档）；② 95d5378 协议与网络（net/ffi）；③ 9e7632b 编排与主机（session/client/host）；④ f9c20ef Android 与桌面端。E6005 半成品的产生侧在 ①、消费侧在 ③，按 hunk 无法拆成独立提交（会留下编译不过的中间提交），故在 ③ 的提交信息里明确标注了完成度与未接通点。 | git status 干净，工作区无残留 |
 
 ---
 
@@ -296,7 +330,7 @@
 |---|---|---|---|---|---|
 | P5-01 | ALPN `beam/1` | `crates/beam-proto/src/message.rs:17` | 已实现 | `pub const ALPN: &[u8] = b"beam/1";`，并在 TLS 配置里实际使用（`crates/beam-net/src/endpoint.rs:61`、`crates/beam-net/src/endpoint.rs:92`）。 | 未开始 |
 | P5-02 | 控制 stream 0(双向可靠) | `crates/beam-proto/src/message.rs:19-27`、`crates/beam-net/src/endpoint.rs:174-181`、`crates/beam-client/src/adapters.rs:82-85` | 偏差 | 协议层用 1 字节“消息族标签”表达通道（message.rs:19-27、211），没有 stream 号概念；QUIC 层提供 `open_bi`（endpoint.rs:174-181）但**全仓库无调用方**（已搜索 `.open_bi(`、`.open_uni(`，仅命中定义处）；会话侧真实实现 `NetTransport::send_control` 是空实现，注释「本轮只保留契约」（adapters.rs:82-85），`recv_control` 直接返回 `None`（adapters.rs:101-103）。通道未接通。 | 已完成 |
-| P5-03 | 输入 stream(单向可靠,客户端→主机) | `crates/beam-proto/src/message.rs:26`、`crates/beam-proto/src/input.rs:49`、`crates/beam-net/src/endpoint.rs:183-188`、`crates/beam-client/src/adapters.rs:96-99` | 偏差 | 协议层类型齐备（族标签 `INPUT`=2，message.rs:26；`InputEvent` input.rs:49），单向流原语 `open_uni` 存在但无调用方；`NetTransport::send_input` 为空实现（adapters.rs:96-99）。 | 进行中 |
+| P5-03 | 输入 stream(单向可靠,客户端→主机) | `crates/beam-proto/src/message.rs:26`、`crates/beam-proto/src/input.rs:49`、`crates/beam-net/src/endpoint.rs:183-188`、`crates/beam-client/src/adapters.rs:96-99` | 偏差 | 协议层类型齐备（族标签 `INPUT`=2，message.rs:26；`InputEvent` input.rs:49），单向流原语 `open_uni` 存在但无调用方；`NetTransport::send_input` 为空实现（adapters.rs:96-99）。 | 已完成 |
 | P5-04 | 视频/音频走 QUIC datagram | `crates/beam-proto/src/frame.rs:31-40`、`crates/beam-net/src/endpoint.rs:203-207`、`crates/beam-net/src/datagram.rs:60-139` | 已实现 | 帧头 `type` 区分视频/音频/FEC（frame.rs:31-40）；net 层有 `send_datagram`（endpoint.rs:203-207）与分包实现（datagram.rs:60-139）。 | 未开始 |
 | P5-05 | 控制消息:Hello | `crates/beam-proto/src/message.rs:72`、`crates/beam-proto/src/message.rs:40-45` | 已实现 | `ControlMsg::Hello(Hello)`。 | 未开始 |
 | P5-06 | 控制消息:HelloAck | `crates/beam-proto/src/message.rs:74-77` | 已实现 | `HelloAck { agreed: Agreed }`。 | 未开始 |
@@ -514,30 +548,30 @@
 
 | # | 文档要求 | 实现位置 | 判定 | 说明 | 状态 |
 |---|---|---|---|---|---|
-| E-01 | 「GPU 上 RGB→NV12(D3D11 VideoProcessor 或 compute shader)」 | `crates/beam-encode/src/encoder.rs:200-205` | 占位 | 只有一行注释「真实实现：D3D11 硬件帧上下文 → D3D11 VideoProcessor 颜色转换 → NVENC/AMF/QSV」（`encoder.rs:203`），实际代码 `let _ = f;` 后返回 `Err(EncError::BackendDisabled)`。无 VideoProcessor、无 compute shader、无 NV12 格式代码。 | 进行中 |
-| E-02 | 「NVENC/AMF/QSV 硬编(ffmpeg-next 封装,D3D11 硬件帧上下文)」 | `crates/beam-encode/src/encoder.rs:198-211`；`crates/beam-encode/Cargo.toml:30` | 占位 | `ffmpeg-next` 声明为 optional 依赖，但 `src/` 中**从未被引用**（已搜索 `ffmpeg_next` / `ffmpeg::`，`crates/` 全目录零命中）。`EncoderKind` 三个变体（`encoder.rs:45-54`）只用于名字解析（`encoder.rs:74-82`），不驱动任何编码器选择。 | 进行中 |
-| E-03 | 「低延迟参数」 | `crates/beam-encode/src/encoder.rs:98-99` | 占位 | `EncoderCaps.low_latency: bool` 字段存在（注释还写了「ultra-low-latency / vbr_latency / veryfast」），但 `probe()` 恒返回空列表（`encoder.rs:161-171`），该字段**没有任何生产者**，也没有任何低延迟开关传给编码器。 | 进行中 |
-| E-04 | 「切片输出」 | `crates/beam-encode/src/encoder.rs:117-118`；`crates/beam-proto/src/lib.rs:89-90` | 占位 | 数据结构齐备：`EncodeConfig.slices: u32`（`encoder.rs:118`）+ `EncodedFrame.slices: Vec<Bytes>`（`beam-proto/src/lib.rs:90`），但 `encode()` 从不产出切片（恒报错）。文档标注切片属 v1（§3.6 第 135 行「里程碑:MVP / v1(切片、SFE)」）。 | 进行中 |
-| E-05 | 「强制 IDR」 | `crates/beam-encode/src/encoder.rs:213-215` | 占位 | `request_idr()` 只把 `self.idr_requested = true`（`encoder.rs:214`），没有向任何编码器上下文下发 IDR 指令；该标志也无人读取。单测 `bitrate_and_idr_are_recorded`（`encoder.rs:272-278`）只断言标志位为真。 | 进行中 |
-| E-06 | 「码率热更新」 | `crates/beam-encode/src/encoder.rs:217-222` | 占位 | `set_bitrate()` 只改内存字段 `self.bitrate_bps` 并同步到 `cfg`（`encoder.rs:218-221`），没有调用任何编码器的码率更新 API（无 ffmpeg 上下文）。文档要求「码率热更新」且测试要求「码率切换无花屏」（见 E-26），两者当前都无实现。 | 进行中 |
+| E-01 | 「GPU 上 RGB→NV12(D3D11 VideoProcessor 或 compute shader)」 | `crates/beam-encode/src/encoder.rs:200-205` | 占位 | 只有一行注释「真实实现：D3D11 硬件帧上下文 → D3D11 VideoProcessor 颜色转换 → NVENC/AMF/QSV」（`encoder.rs:203`），实际代码 `let _ = f;` 后返回 `Err(EncError::BackendDisabled)`。无 VideoProcessor、无 compute shader、无 NV12 格式代码。 | 偏差 |
+| E-02 | 「NVENC/AMF/QSV 硬编(ffmpeg-next 封装,D3D11 硬件帧上下文)」 | `crates/beam-encode/src/encoder.rs:198-211`；`crates/beam-encode/Cargo.toml:30` | 占位 | `ffmpeg-next` 声明为 optional 依赖，但 `src/` 中**从未被引用**（已搜索 `ffmpeg_next` / `ffmpeg::`，`crates/` 全目录零命中）。`EncoderKind` 三个变体（`encoder.rs:45-54`）只用于名字解析（`encoder.rs:74-82`），不驱动任何编码器选择。 | 已完成 |
+| E-03 | 「低延迟参数」 | `crates/beam-encode/src/encoder.rs:98-99` | 占位 | `EncoderCaps.low_latency: bool` 字段存在（注释还写了「ultra-low-latency / vbr_latency / veryfast」），但 `probe()` 恒返回空列表（`encoder.rs:161-171`），该字段**没有任何生产者**，也没有任何低延迟开关传给编码器。 | 已完成 |
+| E-04 | 「切片输出」 | `crates/beam-encode/src/encoder.rs:117-118`；`crates/beam-proto/src/lib.rs:89-90` | 占位 | 数据结构齐备：`EncodeConfig.slices: u32`（`encoder.rs:118`）+ `EncodedFrame.slices: Vec<Bytes>`（`beam-proto/src/lib.rs:90`），但 `encode()` 从不产出切片（恒报错）。文档标注切片属 v1（§3.6 第 135 行「里程碑:MVP / v1(切片、SFE)」）。 | 已完成 |
+| E-05 | 「强制 IDR」 | `crates/beam-encode/src/encoder.rs:213-215` | 占位 | `request_idr()` 只把 `self.idr_requested = true`（`encoder.rs:214`），没有向任何编码器上下文下发 IDR 指令；该标志也无人读取。单测 `bitrate_and_idr_are_recorded`（`encoder.rs:272-278`）只断言标志位为真。 | 已完成 |
+| E-06 | 「码率热更新」 | `crates/beam-encode/src/encoder.rs:217-222` | 占位 | `set_bitrate()` 只改内存字段 `self.bitrate_bps` 并同步到 `cfg`（`encoder.rs:218-221`），没有调用任何编码器的码率更新 API（无 ffmpeg 上下文）。文档要求「码率热更新」且测试要求「码率切换无花屏」（见 E-26），两者当前都无实现。 | 已完成 |
 | E-07 | 「边界:不负责发包」 | `crates/beam-encode/Cargo.toml:19-30` | 已实现 | crate 无任何 net / 发包代码；返回值是协议层 `EncodedFrame`（`encoder.rs:142`），发包由 beam-net 承担。 | 未开始 |
 | E-08 | 「边界:禁止依赖 net/session」 | `crates/beam-encode/Cargo.toml:19-30` | 已实现 | `Cargo.toml` 依赖仅 `beam-proto` / `thiserror` / `tracing`（+ optional `ffmpeg-next`），无 `beam-net`、无 `beam-session`。`encoder.rs:3-8` 还专门注释说明为何不能依赖 beam-capture。 | 未开始 |
 | E-09 | 「`trait VideoEncoder { fn encode(&mut self, f:&CapturedFrame) -> Result<EncodedFrame, EncError>; fn request_idr(&mut self); fn set_bitrate(&mut self,bps:u32); }`」 | `crates/beam-encode/src/encoder.rs:140-147` | 已实现 | 逐字一致：`encode` `:142`、`request_idr` `:144`、`set_bitrate` `:146`。注：`CapturedFrame` 是 beam-encode 自定义的同形结构（`encoder.rs:30-41`），因 §4 分层禁止 L1 横向依赖——此为有据的等价实现。 | 未开始 |
-| E-10 | 「`fn probe() -> Vec<EncoderCaps>`」 | `crates/beam-encode/src/encoder.rs:161-171` | 占位 | 函数签名与返回类型吻合，但**两个 feature 分支都返回 `Vec::new()`**（`encoder.rs:165` 与 `encoder.rs:169`）。开启 `ffmpeg` feature 也一样是空列表——`ffmpeg-next` 从未被调用。 | 进行中 |
-| E-11 | 「参数基线:NVENC P1 + ultra-low-latency、CBR、无 B 帧、无 lookahead、VBV=1 帧、intra-refresh」 | 未找到（已搜索：`P1`、`ultra`、`low_latency`、`CBR`、`cbr`、`lookahead`、`vbv`、`intra`、`b_frames`、`preset`；`crates/beam-encode/src/` 零命中） | 缺失 | 整个参数基线在代码中**没有任何对应物**。`EncoderCaps` 里只有 `low_latency` 一个布尔标记（`encoder.rs:99`），无 preset、无 rate-control、无 B 帧/lookahead/VBV/intra-refresh 设置。 | 进行中 |
-| E-12 | 「Ada 上 T1 及高帧率档开启 SFE」 | `crates/beam-encode/src/encoder.rs:102-103,119-120` | 占位 | `EncoderCaps.sfe: bool` 与 `EncodeConfig.sfe: bool` 两个字段存在（注释写「split-frame encoding，Ada 起」），但没有任何「按显卡代际 / 按档位自动开启 SFE」的判定逻辑，也没有把 `sfe` 传给编码器。 | 进行中 |
-| E-13 | 「参数基线:AMF `ultralowlatency`+`vbr_latency`」 | 未找到（已搜索：`ultralowlatency`、`vbr_latency`、`amf`；`crates/beam-encode/src/` 仅 `encoder.rs:50` 的枚举变体 `Amf` 命中） | 缺失 | AMF 仅是一个枚举名（`encoder.rs:50`）与字符串解析（`encoder.rs:69`），无任何 AMF 参数设置。 | 进行中 |
-| E-14 | 「参数基线:QSV `veryfast`」 | 未找到（已搜索：`veryfast`、`qsv`；`crates/beam-encode/src/` 仅 `encoder.rs:52` 的枚举变体 `Qsv` 命中） | 缺失 | 同上，QSV 无参数设置代码。 | 进行中 |
-| E-15 | 「线程:单独编码线程(与节拍线程合并),同步调用」 | 未找到（已搜索：`thread::spawn`、`std::thread::`；`crates/beam-encode/` 零命中） | 缺失 | 无任何线程创建。`VideoEncoder::encode` 是同步方法（`encoder.rs:142`），但「单独编码线程」这一线程模型未落地，也没有任何调用方去开线程。 | 进行中 |
-| E-16 | 「错误码 `E6xxx`(6001 无可用硬编)」 | `crates/beam-encode/src/error.rs:6,33-34` | 占位 | 变体 + 文案（`error.rs:18`）齐备，但无产生路径：无论 feature 开或关，`encode()` 返回的都是 `E6004`（`encoder.rs:204,209`），而不是 `E6001`。`encoder.rs:159-160` 的注释还声称空 probe「对应 E6001」，实际返回的是 `E6004`——文档注释与代码语义不符。 | 进行中 |
-| E-17 | 「6002 会话数超限」 | `crates/beam-encode/src/error.rs:8,37-38` | 占位 | 变体 + 文案（`error.rs:19`）齐备，无产生路径（无编码会话计数概念）。 | 进行中 |
-| E-18 | 「6003 参数不支持→降档」 | `crates/beam-encode/src/error.rs:10,41-45` | 占位 | 变体 + 文案（`error.rs:20`）齐备，无产生路径（无参数下发，因而无从判定参数不被支持）。 | 进行中 |
-| E-19 | 「配置:`encoder=auto\|nvenc\|amf\|qsv`」 | `crates/beam-encode/src/encoder.rs:45-54,64-82`；`crates/beam-config/src/model.rs:48,499-503` | 已实现 | crate 内 `EncoderKind` 四值枚举 + `as_str`/`from_name` 双向映射齐备（`encoder.rs:64-82`）；全局配置模型有 `video.encoder: Option<String>`（`model.rs:48`）、CLI 覆盖 `encoder`（`model.rs:137`）、环境变量 `BEAM_ENCODER`（`model.rs:176-178`）与取值校验（`model.rs:499-503`）。**取值链路已通**，但下游无编码器可选（见 E-02）。 | 未开始 |
-| E-20 | 「配置:`codec=hevc\|h264\|av1`」 | `crates/beam-encode/src/encoder.rs:150-155`；`crates/beam-config/src/model.rs:46,494-498` | 已实现 | `CodecKind` 三值 + `supports_codec()`（AV1 由 `av1` feature 门控，`encoder.rs:152`，与 §7 一致）；配置侧有 `video.codec`（`model.rs:46`）、CLI（`model.rs:136`）、环境变量（`model.rs:173-175`）与校验（`model.rs:494-498`）。 | 未开始 |
+| E-10 | 「`fn probe() -> Vec<EncoderCaps>`」 | `crates/beam-encode/src/encoder.rs:161-171` | 占位 | 函数签名与返回类型吻合，但**两个 feature 分支都返回 `Vec::new()`**（`encoder.rs:165` 与 `encoder.rs:169`）。开启 `ffmpeg` feature 也一样是空列表——`ffmpeg-next` 从未被调用。 | 已完成 |
+| E-11 | 「参数基线:NVENC P1 + ultra-low-latency、CBR、无 B 帧、无 lookahead、VBV=1 帧、intra-refresh」 | 未找到（已搜索：`P1`、`ultra`、`low_latency`、`CBR`、`cbr`、`lookahead`、`vbv`、`intra`、`b_frames`、`preset`；`crates/beam-encode/src/` 零命中） | 缺失 | 整个参数基线在代码中**没有任何对应物**。`EncoderCaps` 里只有 `low_latency` 一个布尔标记（`encoder.rs:99`），无 preset、无 rate-control、无 B 帧/lookahead/VBV/intra-refresh 设置。 | 已完成 |
+| E-12 | 「Ada 上 T1 及高帧率档开启 SFE」 | `crates/beam-encode/src/encoder.rs:102-103,119-120` | 占位 | `EncoderCaps.sfe: bool` 与 `EncodeConfig.sfe: bool` 两个字段存在（注释写「split-frame encoding，Ada 起」），但没有任何「按显卡代际 / 按档位自动开启 SFE」的判定逻辑，也没有把 `sfe` 传给编码器。 | 已完成 |
+| E-13 | 「参数基线:AMF `ultralowlatency`+`vbr_latency`」 | 未找到（已搜索：`ultralowlatency`、`vbr_latency`、`amf`；`crates/beam-encode/src/` 仅 `encoder.rs:50` 的枚举变体 `Amf` 命中） | 缺失 | AMF 仅是一个枚举名（`encoder.rs:50`）与字符串解析（`encoder.rs:69`），无任何 AMF 参数设置。 | 已完成 |
+| E-14 | 「参数基线:QSV `veryfast`」 | 未找到（已搜索：`veryfast`、`qsv`；`crates/beam-encode/src/` 仅 `encoder.rs:52` 的枚举变体 `Qsv` 命中） | 缺失 | 同上，QSV 无参数设置代码。 | 已完成 |
+| E-15 | 「线程:单独编码线程(与节拍线程合并),同步调用」 | 未找到（已搜索：`thread::spawn`、`std::thread::`；`crates/beam-encode/` 零命中） | 缺失 | 无任何线程创建。`VideoEncoder::encode` 是同步方法（`encoder.rs:142`），但「单独编码线程」这一线程模型未落地，也没有任何调用方去开线程。 | 未开始 |
+| E-16 | 「错误码 `E6xxx`(6001 无可用硬编)」 | `crates/beam-encode/src/error.rs:6,33-34` | 占位 | 变体 + 文案（`error.rs:18`）齐备，但无产生路径：无论 feature 开或关，`encode()` 返回的都是 `E6004`（`encoder.rs:204,209`），而不是 `E6001`。`encoder.rs:159-160` 的注释还声称空 probe「对应 E6001」，实际返回的是 `E6004`——文档注释与代码语义不符。 | 已完成 |
+| E-17 | 「6002 会话数超限」 | `crates/beam-encode/src/error.rs:8,37-38` | 占位 | 变体 + 文案（`error.rs:19`）齐备，无产生路径（无编码会话计数概念）。 | 已完成 |
+| E-18 | 「6003 参数不支持→降档」 | `crates/beam-encode/src/error.rs:10,41-45` | 占位 | 变体 + 文案（`error.rs:20`）齐备，无产生路径（无参数下发，因而无从判定参数不被支持）。 | 已完成 |
+| E-19 | 「配置:`encoder=auto\|nvenc\|amf\|qsv`」 | `crates/beam-encode/src/encoder.rs:45-54,64-82`；`crates/beam-config/src/model.rs:48,499-503` | 已实现 | crate 内 `EncoderKind` 四值枚举 + `as_str`/`from_name` 双向映射齐备（`encoder.rs:64-82`）；全局配置模型有 `video.encoder: Option<String>`（`model.rs:48`）、CLI 覆盖 `encoder`（`model.rs:137`）、环境变量 `BEAM_ENCODER`（`model.rs:176-178`）与取值校验（`model.rs:499-503`）。**取值链路已通**，但下游无编码器可选（见 E-02）。 | 已完成 |
+| E-20 | 「配置:`codec=hevc\|h264\|av1`」 | `crates/beam-encode/src/encoder.rs:150-155`；`crates/beam-config/src/model.rs:46,494-498` | 已实现 | `CodecKind` 三值 + `supports_codec()`（AV1 由 `av1` feature 门控，`encoder.rs:152`，与 §7 一致）；配置侧有 `video.codec`（`model.rs:46`）、CLI（`model.rs:136`）、环境变量（`model.rs:173-175`）与校验（`model.rs:494-498`）。 | 已完成 |
 | E-21 | 「配置:`slices`」 | `crates/beam-encode/src/encoder.rs:117-118`；`crates/beam-config/src/model.rs` 中未找到（已搜索 `slices`） | 偏差 | crate 内 `EncodeConfig.slices: u32` 存在（默认 0），但**全局配置模型没有 `slices` 项**（`crates/beam-config/src/model.rs` 全文无 `slices`），用户无法配置切片数。且即使配置了也无实现（见 E-04）。 | 已完成 |
 | E-22 | 「配置:`sfe`」 | `crates/beam-encode/src/encoder.rs:119-120`；`crates/beam-config/src/model.rs` 中未找到（已搜索 `sfe`） | 偏差 | 同 E-21：crate 内 `EncodeConfig.sfe: bool` 存在，beam-config 无 `sfe` 配置项，无法由用户开启；且无任何「Ada + T1 自动开启」逻辑（见 E-12）。 | 已完成 |
 | E-23 | 「性能:颜色转换+编码 T1 ≤7 ms(Ampere 级,Ada ≤4 ms)、T2 ≤3 ms、T3 ≤2 ms」 | 未找到（已搜索：`bench`、`criterion`、`p99`、`P99`；全仓零命中） | 缺失 | 无任何基准设施（同 C-18），无可对照的实测数据。 | 已阻塞 |
-| E-24 | 「测试:probe 矩阵」 | `crates/beam-encode/src/encoder.rs:250-256`（单测 `probe_without_backend_returns_empty`） | 缺失 | 唯一相关单测断言的是「probe 返回空」，属于 `占位` 的佐证；**没有覆盖 NVENC/AMF/QSV × HEVC/H.264/AV1 的能力矩阵**。 | 进行中 |
+| E-24 | 「测试:probe 矩阵」 | `crates/beam-encode/src/encoder.rs:250-256`（单测 `probe_without_backend_returns_empty`） | 缺失 | 唯一相关单测断言的是「probe 返回空」，属于 `占位` 的佐证；**没有覆盖 NVENC/AMF/QSV × HEVC/H.264/AV1 的能力矩阵**。 | 已完成 |
 | E-25 | 「测试:各档 P99 编码耗时基准」 | 未找到（已搜索：`criterion`、`bench`、`p99`；全仓零命中） | 缺失 | 同 E-23，无基准框架。 | 已阻塞 |
 | E-26 | 「测试:码率切换无花屏」 | 未找到（已搜索：`set_bitrate`、`idr`、`switch`、`artifact`；`crates/beam-encode/src/` 仅 `encoder.rs:217` 命中） | 缺失 | `set_bitrate` 无实现（E-06），因此也不存在验证「切换无花屏」的测试。 | 已阻塞 |
 
@@ -584,15 +618,15 @@
 
 | # | 文档要求 | 实现位置 | 判定 | 说明 | 状态 |
 |---|---|---|---|---|---|
-| V-01 | 「ffmpeg D3D11VA 硬解 HEVC/H.264」 | `crates/beam-decode/src/decoder.rs:76-89` | 占位 | `D3D11VaDecoder::decode()` 在 `ffmpeg` feature 开与关两个分支**都**返回 `Err(DecError::BackendDisabled)`（`decoder.rs:82,87`）。`ffmpeg-next` 在 `crates/beam-decode/Cargo.toml:25` 声明为 optional，`src/` 中从未被引用（已搜索 `ffmpeg_next`/`ffmpeg::`，`crates/` 全目录零命中）。`DecodeConfig.hardware = true`（`decoder.rs:21,29`）与 `low_latency = true`（`decoder.rs:22,30`）都只是标志位，无消费者。 | 进行中 |
-| V-02 | 「(/AV1 v2)」 | `crates/beam-decode/src/decoder.rs:43-49`；`crates/beam-decode/Cargo.toml:16` | 占位 | `supports_codec()` 按 `av1` feature 门控 AV1（`decoder.rs:46`），与 §7「`av1`(v2)」一致，feature **默认关闭**（`Cargo.toml:12,16`）。但即便开启也无解码实现（V-01）。 | 进行中 |
+| V-01 | 「ffmpeg D3D11VA 硬解 HEVC/H.264」 | `crates/beam-decode/src/decoder.rs:76-89` | 占位 | `D3D11VaDecoder::decode()` 在 `ffmpeg` feature 开与关两个分支**都**返回 `Err(DecError::BackendDisabled)`（`decoder.rs:82,87`）。`ffmpeg-next` 在 `crates/beam-decode/Cargo.toml:25` 声明为 optional，`src/` 中从未被引用（已搜索 `ffmpeg_next`/`ffmpeg::`，`crates/` 全目录零命中）。`DecodeConfig.hardware = true`（`decoder.rs:21,29`）与 `low_latency = true`（`decoder.rs:22,30`）都只是标志位，无消费者。 | 已完成 |
+| V-02 | 「(/AV1 v2)」 | `crates/beam-decode/src/decoder.rs:43-49`；`crates/beam-decode/Cargo.toml:16` | 占位 | `supports_codec()` 按 `av1` feature 门控 AV1（`decoder.rs:46`），与 §7「`av1`(v2)」一致，feature **默认关闭**（`Cargo.toml:12,16`）。但即便开启也无解码实现（V-01）。 | 已完成 |
 | V-03 | 「解码纹理直接交给 D3D11 flip-model 交换链」 | `crates/beam-render/src/renderer.rs:80-95` | 占位 | `present()` 在 `d3d11` feature 下只做 `let _ = f;` + 注释「真实实现：D3D11 纹理 → flip-model 交换链 → Present」后 `self.presented += 1; Ok(())`（`renderer.rs:84-87`）。**不创建 D3D11 设备、不创建交换链、不做任何绘制**。`d3d11` 是**空 feature**（`crates/beam-render/Cargo.toml:14`：`d3d11 = []`，不引入任何依赖），因此连「开关是否真的接了原生库」都无法验证。 | 已完成 |
 | V-04 | 「支持可变刷新率」（VRR） | `crates/beam-render/src/renderer.rs:16-29,36-38` | 占位 | 只有 `RenderConfig{refresh_rate: u32, vrr: bool}` 两个字段（`renderer.rs:24,26`，默认 `vrr = true`）与注释「目标刷新率（用于 VRR）」。**没有任何 DXGI 交换链创建、没有任何 `SetDisplayMode`/`SetFrameRate`/VRR 协商代码**（`Win32_Graphics_Dxgi` feature 虽在 `Cargo.toml:25-26` 启用但未被使用）。`vrr` 字段无任何消费者。 | 已完成 |
 | V-05 | 「叠加层由 Tauri 窗口负责」 | `crates/beam-render/Cargo.toml:16-28`；`crates/beam-render/src/` | 已实现 | beam-render 内无任何 UI/叠加层代码，依赖仅 `beam-proto` / `thiserror` / `tracing` + windows 图形 API；职责划分与文档一致（`crates/beam-render/src/lib.rs:12-13` 亦明确「不做 UI 叠加层」）。 | 未开始 |
-| V-06 | 「`trait VideoDecoder { fn decode(&mut self, f: AssembledFrame) -> Result<DecodedFrame, DecError>; }`」 | `crates/beam-decode/src/decoder.rs:36-41` | 已实现 | `decode` 签名逐字一致（`decoder.rs:38`）。`AssembledFrame` 定义在 L0 的 beam-proto（`crates/beam-proto/src/lib.rs:108-121`）以规避 §4 的 L1 横向依赖限制，有据。 | 未开始 |
+| V-06 | 「`trait VideoDecoder { fn decode(&mut self, f: AssembledFrame) -> Result<DecodedFrame, DecError>; }`」 | `crates/beam-decode/src/decoder.rs:36-41` | 已实现 | `decode` 签名逐字一致（`decoder.rs:38`）。`AssembledFrame` 定义在 L0 的 beam-proto（`crates/beam-proto/src/lib.rs:108-121`）以规避 §4 的 L1 横向依赖限制，有据。 | 已完成 |
 | V-07 | 「`Renderer::present(&DecodedFrame)`」 | `crates/beam-render/src/renderer.rs:11-14` | 已实现 | `fn present(&mut self, f: &DecodedFrame) -> Result<(), RenderError>`（`renderer.rs:13`），签名吻合；`DecodedFrame` 同样来自 L0（`crates/beam-proto/src/lib.rs:145-157`）。 | 未开始 |
 | V-08 | 「线程:解码线程 → 单槽 → 渲染线程(按 vblank)」 | 未找到（已搜索：`thread::spawn`、`std::thread::`、`sync_channel`、`单槽`、`WaitForSingleObject`、`Present`；`crates/beam-decode/`、`crates/beam-render/` 零命中） | 缺失 | **既无解码线程、无单槽交换、也无渲染线程**。唯一的「节拍」是 `FramePacer::should_present()`（`renderer.rs:113-124`），它只是比较两次时间戳差值是否小于 `interval_us`——这是**软件时间闸门，不是 vblank 对齐**，且其 `interval_us` 由调用方传入，代码中无任何地方调用它（`crates/beam-render/` 内除单测外无调用点）。 | 已完成 |
-| V-09 | 「错误码 `E10xxx`」 | `crates/beam-decode/src/error.rs:6-14,32-52`；`crates/beam-render/src/error.rs:7-15,33-53` | 占位 | 解码侧 10001/10002/10003（`error.rs:8,10,12`）与渲染侧 10011/10012/10013（`error.rs:9,11,13`）的变体与文案齐备，但**没有任何产生路径**——默认路径只抛 `E10004`（`decoder.rs:87`）/`E10014`（`renderer.rs:92`）。 | 进行中 |
+| V-09 | 「错误码 `E10xxx`」 | `crates/beam-decode/src/error.rs:6-14,32-52`；`crates/beam-render/src/error.rs:7-15,33-53` | 占位 | 解码侧 10001/10002/10003（`error.rs:8,10,12`）与渲染侧 10011/10012/10013（`error.rs:9,11,13`）的变体与文案齐备，但**没有任何产生路径**——默认路径只抛 `E10004`（`decoder.rs:87`）/`E10014`（`renderer.rs:92`）。 | 已完成 |
 | V-10 | 「性能:解码 T1 ≤8、T2 ≤5、T3 ≤4 ms」 | 未找到（已搜索：`bench`、`criterion`、`p99`；全仓零命中） | 缺失 | 无基准设施、无计时点（与 E-23/E-25/C-18 同源）。 | 已阻塞 |
 | V-11 | 「性能:上屏等待平均半帧」 | 未找到（已搜索：`latency`、`half_frame`、`vblank`、`present_time`；`crates/beam-render/src/` 零命中） | 缺失 | 无上屏延迟测量。 | 已阻塞 |
 | V-12 | 「测试:各显卡解码基准」 | 未找到（已搜索：`bench`、`criterion`、`gpu`；全仓零命中） | 缺失 | 同 V-10。 | 已阻塞 |
@@ -688,7 +722,7 @@
 | T-17 | 时序:`Hello{ver,caps}` | 未找到（已搜索：`Hello`、`HelloAck` 于 `crates/beam-{session,host,client,ffi}/**`） | 缺失 | 协议类型在 `crates/beam-proto/src/message.rs:72`；5 个 crate 内既不发送也不解析（`Transport::recv_control` 全仓无调用点）。 | 已完成 |
 | T-18 | 时序:`HelloAck{agreed StreamConfig}` | 未找到（已搜索：`HelloAck` 于 `crates/beam-{session,host,client,ffi}/**`） | 缺失 | 类型在 `crates/beam-proto/src/message.rs:74-77`；无协商实现（见 S-04）。 | 已完成 |
 | T-19 | 时序:视频 datagram 首帧 IDR | 未找到（已搜索：`request_idr`、`is_key`、`IDR` 于 `crates/beam-session/**`、`crates/beam-host/**`） | 缺失 | 主机侧推帧不保证首帧为 IDR，也不主动请求 IDR（`crates/beam-session/src/host.rs:174-179` 只做 `poll` + `send_frame`）；`request_idr` 无生产调用点。 | 未开始 |
-| T-20 | 时序:输入 stream / Feedback | `crates/beam-client/src/adapters.rs:96-99` | 缺失 | `Transport::send_input` 契约在 `crates/beam-session/src/event.rs:124`，但 `NetTransport::send_input` 是空实现（`beam-client/src/adapters.rs:96-99`）；主机侧 `HostDeps.input` 声明后从未被调用（已搜索 `deps.input`、`\.input\.` 于 `crates/beam-session/src/**`），`Feedback` 无任何发送路径。 | 进行中 |
+| T-20 | 时序:输入 stream / Feedback | `crates/beam-client/src/adapters.rs:96-99` | 缺失 | `Transport::send_input` 契约在 `crates/beam-session/src/event.rs:124`，但 `NetTransport::send_input` 是空实现（`beam-client/src/adapters.rs:96-99`）；主机侧 `HostDeps.input` 声明后从未被调用（已搜索 `deps.input`、`\.input\.` 于 `crates/beam-session/src/**`），`Feedback` 无任何发送路径。 | 已完成 |
 | T-21 | 时序:新连接/迁移 + `Resume{session_id}` | 未找到（已搜索：`Resume`、`session_id` 于 `crates/beam-{session,host,client,ffi}/**`） | 缺失 | 类型存在：`crates/beam-proto/src/message.rs:125-128`（`Resume{session_id:u64}`）；但 5 个 crate 内既不构造也不处理该消息，重连续传未实现。 | 已完成 |
 | T-22 | 时序:重连后主机发 IDR | 未找到（已搜索：`request_idr`、`Reconnected` 于 `crates/beam-session/**`） | 缺失 | `SessionInput::Reconnected` 只把状态改回 `Streaming`（`crates/beam-session/src/client.rs:179-183`），不触发 IDR 请求。 | 已完成 |
 | T-23 | 时序:`Bye` | 未找到（已搜索：`Bye` 于 `crates/beam-{session,host,client,ffi}/**`） | 缺失 | 协议类型在 `crates/beam-proto/src/message.rs:130`；5 个 crate 内无发送路径（`beam-net` 侧只有传输层 `Conn::close`，`crates/beam-net/src/endpoint.rs:149`，不是协议 `Bye`）。 | 已完成 |
@@ -706,7 +740,7 @@
 | F-08 | 控制面走 uniffi | 未找到（已搜索：`uniffi::export`、`uniffi::setup`、`uniffi::` 于 `crates/beam-ffi/**`） | 缺失 | 全仓无任何 uniffi 导出宏/UDL/`build.rs`（`crates/beam-ffi/` 下只有 `src/lib.rs`、`src/client.rs`、`src/error.rs`、`Cargo.toml`），控制面目前也不是 uniffi 类型。 | 已完成 |
 | F-09 | uniffi 导出面（`beam-ffi` → Kotlin `core-net`） | `crates/beam-ffi/Cargo.toml:14`、`crates/beam-ffi/Cargo.toml:26` | 缺失 | 只有可选依赖 `uniffi` 与 `uniffi` feature；`BeamClient`/`FrameSink` 均为普通 Rust 类型，无导出注解，Kotlin 侧无法绑定（`android/core-net/README.md:51` 提到的 `beam_ffi.udl` 文件不存在）。 | 已完成 |
 | F-10 | 边界:`beam-ffi` 只含 proto/net/pair/discovery，平台 crate 不得进入 ffi | `crates/beam-ffi/Cargo.toml:16-26` | 已实现 | 依赖恰为 `beam-proto/beam-session/beam-net/beam-pair/beam-discovery/bytes/futures/thiserror/tracing/uniffi`，无 capture/encode/input/decode/render。 | 未开始 |
-| F-11 | 线程:帧回调在专用线程 → `queue()` | `crates/beam-ffi/src/client.rs:95-97` | 缺失 | `EventBridge::forward_frame` 在调用者线程同步直调 sink，无专用帧回调线程（`browse` 的后台线程只服务发现，`crates/beam-ffi/src/client.rs:144-155`）。 | 未开始 |
+| F-11 | 线程:帧回调在专用线程 → `queue()` | `crates/beam-ffi/src/client.rs:95-97` | 缺失 | `EventBridge::forward_frame` 在调用者线程同步直调 sink，无专用帧回调线程（`browse` 的后台线程只服务发现，`crates/beam-ffi/src/client.rs:144-155`）。 | 已完成 |
 
 ##### §2 / §3.11 相关
 | # | 文档要求 | 实现位置 | 判定 | 说明 | 状态 |
@@ -783,7 +817,7 @@
 | AN-16 | `:feature-stream` 职责·悬浮工具栏 | `android/feature-stream/src/main/java/dev/beam/feature/stream/StreamScreen.kt:185` | 已实现 | `StreamToolbar`（`:185-203`）真实渲染展开/收起、统计浮层开关、断开按钮，用 `BeamTokens.OverlaySurface` + `OverlayOutline` 浮层底色。 | 未开始 |
 | AN-17 | `:feature-stream` 职责·统计浮层 | `android/feature-stream/src/main/java/dev/beam/feature/stream/StreamScreen.kt:135` | 已实现 | `StatsOverlay`（`:135-177`）真实消费 `SessionStats`：端到端延迟、解码/显示耗时、分辨率、编码、丢包与 FEC 恢复率；数据由 `StreamViewModel.kt:216-218` 从 `SessionEvent.Stats` 写入。 | 未开始 |
 | AN-18 | `:feature-stream` 对外接口：`StreamScreen` | `android/feature-stream/src/main/java/dev/beam/feature/stream/StreamScreen.kt:45` | 已实现 | 类型名与文档一致；纯展示 Composable（状态 + 回调），无状态内部逻辑。 | 未开始 |
-| AN-19 | `:feature-stream` 禁止：解码细节 | `android/feature-stream/src/main/java/dev/beam/feature/stream/StreamViewModel.kt:11` | 偏差 | 文档禁止「解码细节」。但 `StreamViewModel.kt:11` 直接 `import dev.beam.core.decoder.MediaCodecVideoDecoder`，`:88` 默认工厂 `{ MediaCodecVideoDecoder() }`，`:245-254` 在 feature 层做 `VideoCodec → DecoderCodec` 映射并构造 `VideoFormat`（含 profile/level/fps）。`feature-stream/README.md:42` 自称「本模块**不**接触 `MediaCodec`」，与代码不符。解码器应由 `:core-decoder` 侧以工厂/`VideoFormat` 构造器下沉。 | 未开始 |
+| AN-19 | `:feature-stream` 禁止：解码细节 | `android/feature-stream/src/main/java/dev/beam/feature/stream/StreamViewModel.kt:11` | 偏差 | 文档禁止「解码细节」。但 `StreamViewModel.kt:11` 直接 `import dev.beam.core.decoder.MediaCodecVideoDecoder`，`:88` 默认工厂 `{ MediaCodecVideoDecoder() }`，`:245-254` 在 feature 层做 `VideoCodec → DecoderCodec` 映射并构造 `VideoFormat`（含 profile/level/fps）。`feature-stream/README.md:42` 自称「本模块**不**接触 `MediaCodec`」，与代码不符。解码器应由 `:core-decoder` 侧以工厂/`VideoFormat` 构造器下沉。 | 已完成 |
 | AN-20 | `:feature-settings` 职责·设置页 | `android/feature-settings/src/main/java/dev/beam/feature/settings/SettingsScreen.kt:40` | 已实现 | 真实设置页：画质（分辨率 `:78`/帧率 `:82`/码率 `:88`）、编码（`:98`）、FEC（`:109`）、解码器偏好（`:119`）、统计浮层/音频/主题开关（`:139-152`）、恢复默认（`:156`）；写操作全落 `SettingsRepo`（`SettingsViewModel.kt:79-83`）。 | 未开始 |
 | AN-21 | `:feature-settings` 对外接口：— | — | 已实现 | 文档未要求对外接口；模块仅被 `:app` 经 `BeamNavHost.kt:149-152` 使用。 | 未开始 |
 | AN-22 | `:feature-settings` 禁止：— | — | 已实现 | 文档未列禁止项；核实无越界（无解码/网络/JNI）。 | 未开始 |
@@ -827,7 +861,7 @@
 
 | # | 文档要求 | 实现位置 | 判定 | 说明 | 状态 |
 |---|---|---|---|---|---|
-| AU-01 | uniffi 导出(beam-ffi) 的产物落地（Kotlin 绑定 + `libbeam_ffi.so`） | `crates/beam-ffi/src/lib.rs:53` | 缺失 | **Rust 侧根本没有 uniffi 导出面**，因此生成物永远无法产出：`crates/beam-ffi/src/lib.rs:53-59` 只有 `pub mod client/error` 与 re-export，无 `uniffi::setup_scaffolding!`、无 `#[uniffi::export]`/`derive(Uniffi)`（在 `crates/beam-ffi` 内搜 `uniffi::`/`setup_scaffolding`/`derive(...Uniffi)` 零命中）；`crates/beam-ffi/Cargo.toml` 声明了 `uniffi` 可选依赖与 `uniffi` feature（`:11-14`、`:26`，默认关闭）但无任何代码引用，且**无 `crate-type = ["cdylib"]`**（全文件仅 29 行）；仓库内**无任何 `.udl` 文件**；Kotlin 生成目录 `android/core-net/src/main/java/dev/beam/core/net/uniffi/` 不存在；`android/core-net/src/main/jniLibs/arm64-v8a/README.md:1-7` 与 `x86_64/README.md:1-7` 只有占位说明，无 `.so`。→ 串流链路当前不可用。 | 未开始 |
+| AU-01 | uniffi 导出(beam-ffi) 的产物落地（Kotlin 绑定 + `libbeam_ffi.so`） | `crates/beam-ffi/src/lib.rs:53` | 缺失 | **Rust 侧根本没有 uniffi 导出面**，因此生成物永远无法产出：`crates/beam-ffi/src/lib.rs:53-59` 只有 `pub mod client/error` 与 re-export，无 `uniffi::setup_scaffolding!`、无 `#[uniffi::export]`/`derive(Uniffi)`（在 `crates/beam-ffi` 内搜 `uniffi::`/`setup_scaffolding`/`derive(...Uniffi)` 零命中）；`crates/beam-ffi/Cargo.toml` 声明了 `uniffi` 可选依赖与 `uniffi` feature（`:11-14`、`:26`，默认关闭）但无任何代码引用，且**无 `crate-type = ["cdylib"]`**（全文件仅 29 行）；仓库内**无任何 `.udl` 文件**；Kotlin 生成目录 `android/core-net/src/main/java/dev/beam/core/net/uniffi/` 不存在；`android/core-net/src/main/jniLibs/arm64-v8a/README.md:1-7` 与 `x86_64/README.md:1-7` 只有占位说明，无 `.so`。→ 串流链路当前不可用。 | 已完成 |
 | AU-02 | `NativeBeamBridge` 用反射调用生成类 | `android/core-net/src/main/java/dev/beam/core/net/NativeBeamBridge.kt:52` | 已实现 | 真实反射适配：`Reflect.findClass` 依次试候选包名 `dev.beam.core.net.uniffi` / `uniffi.beam_ffi` / `dev.beam.ffi`（`:364-377`）、`findMethod` 按名+参数个数（`:328-333`）、`Reflect.invoke` 包装异常（`core-net/.../Reflect.kt:54-60`）。 | 未开始 |
 | AU-03 | `System.loadLibrary("beam_ffi")` | `android/core-net/src/main/java/dev/beam/core/net/NativeBeamBridge.kt:439` | 已实现 | `const val LIBRARY_NAME = "beam_ffi"`（`:362`）、`System.loadLibrary(LIBRARY_NAME)`（`:439`），`UnsatisfiedLinkError` 被转成带修复指引的 `BeamNativeUnavailableException`（`:440-447`）。 | 未开始 |
 | AU-04 | `Class.forName` | `android/core-net/src/main/java/dev/beam/core/net/Reflect.kt:35` | 已实现 | `Class.forName(name)` 逐候选尝试，`ClassNotFoundException`/`LinkageError` 均降级为「不可用」（`:33-42`）。 | 未开始 |
@@ -836,7 +870,7 @@
 | AU-07 | DirectByteBuffer 池化 | `android/core-net/src/main/java/dev/beam/core/net/buffer/ByteBufferPool.kt:18` | 已实现 | 真实池：`rent` 命中复用或 `ByteBuffer.allocateDirect`（`:35-51`，默认 1 MiB `:86`）、`release` 回池（`:61-68`，上限 4 MiB `:89`）、`BufferLease.close` 归还（`:103-117`）、线程安全（`synchronized(idle)`）。 | 未开始 |
 | AU-08 | `deliverFrame` 接管所有权或从 `ByteBufferPool` 租直接内存 | `android/core-net/src/main/java/dev/beam/core/net/NativeBeamBridge.kt:171` | 已实现 | 两条路径都真实存在：Rust 传 `ByteBuffer` → 直接接管（`:181-184`）；Rust 传 `ByteArray` → `pool.rentLease` 租直接内存并拷贝（`:185-191`）；其余类型直接丢弃（`:192`）。 | 未开始 |
 | AU-09 | 消费方实现 `PooledFrameSink` 则转移所有权，否则回调返回即归还 | `android/core-net/src/main/java/dev/beam/core/net/NativeBeamBridge.kt:195` | 已实现 | `if (sink is PooledFrameSink)` → `sink.onPooledFrame(PooledFrame(...))` 转移所有权（`:195-197`，接口见 `core-net/.../PooledFrameSink.kt:13-20`）；否则 `try { sink.onFrame(...) } finally { lease.close() }`（`:199-204`），与 §6「回调返回后归还」一致。 | 未开始 |
-| AU-10 | 控制面 Rust 回调 → `SessionBus.events` → `session://stats`（500 ms） | `android/core-net/src/main/java/dev/beam/core/net/NativeBeamBridge.kt:148` | 偏差 | 回调→Flow 链路完整（`onEvent` → `bus.events.tryEmit` `:148`；`SessionBus.events` `:482-486`；`stats` 派生 `:508-510`）。但**500 ms 节拍无人产生**：Kotlin 侧无任何定时器/节拍器（`android/` 内搜 `500`/`delay(500)`/`ticker` 零命中），Rust 侧 `crates/beam-session/src/event.rs:30` 只定义了 `Stats(StatsReport)` 变体，`crates/beam-session/src/` 内搜 `from_millis`/`interval`/`ticker` 零命中。节拍因此从未产生，`stats` 流实际为空。 | 未开始 |
+| AU-10 | 控制面 Rust 回调 → `SessionBus.events` → `session://stats`（500 ms） | `android/core-net/src/main/java/dev/beam/core/net/NativeBeamBridge.kt:148` | 偏差 | 回调→Flow 链路完整（`onEvent` → `bus.events.tryEmit` `:148`；`SessionBus.events` `:482-486`；`stats` 派生 `:508-510`）。但**500 ms 节拍无人产生**：Kotlin 侧无任何定时器/节拍器（`android/` 内搜 `500`/`delay(500)`/`ticker` 零命中），Rust 侧 `crates/beam-session/src/event.rs:30` 只定义了 `Stats(StatsReport)` 变体，`crates/beam-session/src/` 内搜 `from_millis`/`interval`/`ticker` 零命中。节拍因此从未产生，`stats` 流实际为空。 | 已完成 |
 | AU-11 | 生成物缺席时抛 `BeamNativeUnavailableException` 并在消息中给出修复命令 | `android/core-net/src/main/java/dev/beam/core/net/Reflect.kt:15` | 已实现 | 异常类定义 `Reflect.kt:15-16`；三处带修复指引的消息：`NativeBeamBridge.kt:398-401`（「请执行 core-net/README.md 的 uniffi-bindgen 生成步骤」）、`:425-427`（构造器形状不符）、`:441-446`（「请用 cargo-ndk 构建并把产物复制到 core-net/src/main/jniLibs/arm64-v8a/ 与 jniLibs/x86_64/」）、`:323-326`（record 类缺失）。`core-net/README.md:98-109` 有对应表格。 | 未开始 |
 | AU-12 | App 降级为 `UnavailableBeamClient` 后仍可启动 | `android/app/src/main/java/dev/beam/app/AppContainer.kt:48` | 已实现 | `nativeReady = NativeBeamBridge.isAvailable()`（`:41`）→ 未就绪则 `UnavailableBeamClient()`（`:52`），创建异常也回落（`:49-50`）；`UnavailableBeamClient.kt:12-35` 为完整降级实现，`:33-34` 默认文案含「请按 core-net/README.md 生成 uniffi 绑定并用 cargo-ndk 构建 .so」。UI 侧 `DiscoveryScreen.kt:69-75` 显示「原生库尚未构建」告警而不崩溃。 | 未开始 |
 | AU-13 | 线程：Rust tokio 运行时在 so 内 | `crates/beam-ffi/Cargo.toml:16` | 缺失 | `crates/beam-ffi` 与 `crates/beam-session` 内搜 `tokio` **零命中**，beam-ffi 也未启动任何 runtime（tokio 仅作为 `beam-net` 的依赖存在：`crates/beam-net/Cargo.toml:20`、`:24`）。即便补上 uniffi 导出，so 内也没有 §3.12 要求的 tokio 运行时；且 so 本身尚未产出（AU-01）。 | 未开始 |
@@ -857,7 +891,7 @@
 | AB-01 | buildType debug/release | `android/app/build.gradle.kts:23` | 已实现 | `buildTypes { debug { … } release { … } }`（`:23-39`）：debug `isMinifyEnabled=false` + `PERF_STATS=true`（`:27`），release `isMinifyEnabled=true` + `isShrinkResources=true` + `PERF_STATS=false`（`:30-37`），符合 §3.13 门控。 | 未开始 |
 | AB-02 | flavor `store`/`internal` | — | 缺失 | **未找到**。对 `android/` 下全部 `*.gradle.kts`/`*.gradle` 搜索 `flavorDimensions`、`productFlavors`、`flavor` **命中 0**（`app/build.gradle.kts` 全文 104 行，只有 `buildTypes` 无 `flavors {}` 块）。无 `store`/`internal` 两个变体，发布渠道差异无从配置。搜索关键词：`flavorDimensions`、`productFlavors`、`flavor`、`create("store")`、`create("internal")`。 | 未开始 |
 | AB-03 | `:feature-perf` 只在 debug | `android/app/build.gradle.kts:86` | 已实现 | 依赖图层面成立：全仓仅 `debugImplementation(project(":feature-perf"))`（`:86`，`:84-85` 注释说明 release 变体不含本行），release 变体用空实现 `app/src/release/java/dev/beam/app/perf/PerfEntry.kt:16-33`。**但** perf 类型仍进 release APK，且 §7:276 的 APK 检查 grep 模式漏匹配（详见 AN-25）。 | 未开始 |
-| AB-04 | cargo-ndk 构建 arm64-v8a(+ x86_64 给模拟器) | `android/core-net/README.md:57` | 偏差 | 目录与命令已就位但**构建未接线**：`core-net/src/main/jniLibs/arm64-v8a/` 与 `jniLibs/x86_64/` 存在（各含占位 README，`.gitignore` 忽略 `*.so`），cargo-ndk 命令写在 `core-net/README.md:57-75`；但对 `android/` 全部 `*.gradle.kts` 搜 `cargo`/`ndk`/`abiFilters`/`jniLibs` **命中 0** —— `core-net/build.gradle.kts` 无 Exec 任务、无 `MergeSourceSetFolders` 依赖，README §2.4（`:83-94`）给出的接线片段明确标注为「可选，推荐」且未落地；`app/build.gradle.kts` 也无 `ndk { abiFilters }` 或 splits 配置。产物因此只能手工复制，且当前不存在。 | 未开始 |
+| AB-04 | cargo-ndk 构建 arm64-v8a(+ x86_64 给模拟器) | `android/core-net/README.md:57` | 偏差 | 目录与命令已就位但**构建未接线**：`core-net/src/main/jniLibs/arm64-v8a/` 与 `jniLibs/x86_64/` 存在（各含占位 README，`.gitignore` 忽略 `*.so`），cargo-ndk 命令写在 `core-net/README.md:57-75`；但对 `android/` 全部 `*.gradle.kts` 搜 `cargo`/`ndk`/`abiFilters`/`jniLibs` **命中 0** —— `core-net/build.gradle.kts` 无 Exec 任务、无 `MergeSourceSetFolders` 依赖，README §2.4（`:83-94`）给出的接线片段明确标注为「可选，推荐」且未落地；`app/build.gradle.kts` 也无 `ndk { abiFilters }` 或 splits 配置。产物因此只能手工复制，且当前不存在。 | 已完成 |
 
 ##### 产品方案 §7 Android 模块结构（补充）
 
@@ -867,7 +901,7 @@
 |---|---|---|---|---|---|
 | PP-01 | `:feature-discovery` 主机列表、NsdManager 兜底、**WOL** | `android/feature-discovery/src/main/java/dev/beam/feature/discovery/HostScanner.kt:33` | 缺失 | 主机列表与 NsdManager 兜底已实现（AN-07/AN-08）。**WOL 未实现**：全仓搜 `WOL`/`Wake`/`wake`/`MagicPacket`/`magicPacket` 零命中，无 Wake-on-LAN 魔术包构造或 UDP 广播代码。 | 未开始 |
 | PP-02 | `:feature-settings` 串流设置页(画质、帧率、解码器、统计浮层开关) | `android/feature-settings/src/main/java/dev/beam/feature/settings/SettingsScreen.kt:72` | 已实现 | 四项逐一到位：画质（分辨率 `:78` + 帧率 `:82` + 码率 `:88`）、解码器偏好（`:119-128`，`DecoderPreference.AUTO/LOW_LATENCY/SYSTEM`）、统计浮层开关（`:140` `SwitchRow`）；另有编码、FEC、音频、主题与恢复默认。 | 未开始 |
-| PP-03 | `:core-input` 触控/**实体手柄/遥控采集**，映射为 InputEvent **回传主机** | `android/core-input/src/main/java/dev/beam/core/input/MotionActions.kt:21` | 偏差 | 映射层已实现（AN-41），但**采集与回传两端都断**：`MotionActions.kt` 仅有 `MotionEvent`→`TouchAction` 的静态映射函数，全仓无任何调用方（`MotionEvent` 仅在 core-input 内出现，无 `pointerInput`/`onTouchEvent` 采集点）；回传侧 `Session.sendInput`（`core-net/.../Session.kt:27`）在 `NativeBeamBridge.kt:525` 有实现，但 `feature-stream/.../StreamViewModel.kt:201` 的 `sendInput` **无调用方**，触控/手柄事件从未上行主机。 | 未开始 |
+| PP-03 | `:core-input` 触控/**实体手柄/遥控采集**，映射为 InputEvent **回传主机** | `android/core-input/src/main/java/dev/beam/core/input/MotionActions.kt:21` | 偏差 | 映射层已实现（AN-41），但**采集与回传两端都断**：`MotionActions.kt` 仅有 `MotionEvent`→`TouchAction` 的静态映射函数，全仓无任何调用方（`MotionEvent` 仅在 core-input 内出现，无 `pointerInput`/`onTouchEvent` 采集点）；回传侧 `Session.sendInput`（`core-net/.../Session.kt:27`）在 `NativeBeamBridge.kt:525` 有实现，但 `feature-stream/.../StreamViewModel.kt:201` 的 `sendInput` **无调用方**，触控/手柄事件从未上行主机。 | 已完成 |
 | PP-04 | `:app` Compose 导航、**全屏沉浸**、TV Leanback 入口 | `android/app/src/main/java/dev/beam/app/MainActivity.kt:15` | 偏差 | Compose 导航已实现（AN-01）、TV Leanback 入口已注册（AN-04）。**「全屏沉浸」仅做到 edge-to-edge**：`MainActivity.kt:15` 与 `TvMainActivity.kt:19` 只调用 `enableEdgeToEdge()`；全仓搜 `immersive`/`WindowInsets`/`systemBars`/`hide(`/`WindowInsetsControllerCompat` 零命中 —— 未隐藏系统栏、未做沉浸式粘性沉浸，「串流页全屏沉浸」未实现。 | 未开始 |
 
 ##### 产品方案 §16 设计规范
@@ -974,7 +1008,7 @@
 | T-17 | 职责:UI | `apps/desktop/src/App.tsx:35-113`、`apps/desktop/src/pages/HomePage.tsx:25` | 已实现 | 5 个页面 + 侧栏导航 + 全局事件订阅，页面只读 store、不直接碰 IPC（`apps/desktop/src/App.tsx:32-33`）。 | 已完成 |
 | T-18 | 职责:托盘 | `apps/desktop/src-tauri/src/tray.rs:27-61`、`apps/desktop/src-tauri/src/tray.rs:76-113` | 已实现 | 托盘图标 + 4 个菜单项齐全：「▶ 一键开播」（`apps/desktop/src-tauri/src/tray.rs:28`）、「■ 停止串流」（`apps/desktop/src-tauri/src/tray.rs:29`）、「显示主窗口」（`apps/desktop/src-tauri/src/tray.rs:30`、`apps/desktop/src-tauri/src/tray.rs:105-110`）、「退出 Beam」（`apps/desktop/src-tauri/src/tray.rs:31`、`apps/desktop/src-tauri/src/tray.rs:111`）；开播/停止复用同一套服务状态并回广播 `host://state-changed`。 | 已完成 |
 | T-19 | 职责:通知 | 未找到（已搜索：`notification`、`Notification`、`通知` 于 `apps/desktop/src-tauri/src/**`、`apps/desktop/src/**`） | 缺失 | 全仓只有文档性提及（`apps/desktop/src-tauri/src/main.rs:4`、`apps/desktop/README.md:6`），没有任何系统通知实现（无 `tauri-plugin-notification`、无 `NotificationExt`、无 Windows toast 调用）。`Cargo.toml` 也未引入通知插件（`apps/desktop/src-tauri/Cargo.toml:35-42`）。 | 未开始 |
-| T-20 | 只通过 commands/events 与 Rust 交互 | `apps/desktop/src/ipc/commands.ts:29-35`、`apps/desktop/src/ipc/events.ts:21-38`、`apps/desktop/src-tauri/capabilities/default.json:6` | 已实现 | 前端 Rust 交互只有 `invoke` 与 `listen` 两个入口（`apps/desktop/src/ipc/commands.ts:11`、`apps/desktop/src/ipc/events.ts:8`）；权限只开 `core:default`，未开文件系统/Shell（`apps/desktop/src-tauri/capabilities/default.json:6`）。 | 进行中 |
+| T-20 | 只通过 commands/events 与 Rust 交互 | `apps/desktop/src/ipc/commands.ts:29-35`、`apps/desktop/src/ipc/events.ts:21-38`、`apps/desktop/src-tauri/capabilities/default.json:6` | 已实现 | 前端 Rust 交互只有 `invoke` 与 `listen` 两个入口（`apps/desktop/src/ipc/commands.ts:11`、`apps/desktop/src/ipc/events.ts:8`）；权限只开 `core:default`，未开文件系统/Shell（`apps/desktop/src-tauri/capabilities/default.json:6`）。 | 已完成 |
 | T-21 | 视频帧不经 IPC | `apps/desktop/src-tauri/src/dto.rs:3-4`、`apps/desktop/src/ipc/events.ts:21-38`、`apps/desktop/src-tauri/src/events.rs:24-31` | 已实现 | 8 个事件的载荷全是控制面/统计面结构（`apps/desktop/src-tauri/src/dto.rs:199-240`），没有任何帧/像素/缓冲区类型；前端亦无帧通道（已搜索 `frame`、`pixel`、`buffer`、`video` 于 `apps/desktop/src/**`）。**符合**文档要求。 | 已完成 |
 | T-22 | 错误:command 返回 `{code:"E2001", message, retryable}` | `apps/desktop/src-tauri/src/error.rs:56-65` | 已实现 | `BeamError` 三个字段与文档逐字一致，`#[serde(rename_all = "camelCase")]` 不改变这三个键名。 | 已完成 |
 | T-23 | 前端按 code 显示中文文案 | `apps/desktop/src/ipc/errors.ts:27-104` | 已实现 | `ERROR_TEXT` 按码查表，`errorText()` 命中即返回中文文案，未登记码回退兜底文案并附后端 message（`apps/desktop/src/ipc/errors.ts:99-104`）；`toBeamError` 兼容 Tauri 把 `Err` 序列化成 JSON 字符串的情况（`apps/desktop/src/ipc/errors.ts:68-88`）。 | 已完成 |

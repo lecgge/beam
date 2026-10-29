@@ -29,6 +29,15 @@
 //! 画面走 QUIC datagram。它们原本寄居在 `beam-client`（职责倒挂），
 //! 本 crate 才是它们的 rightful 归属。
 //!
+//! ## 决策备注
+//!
+//! **D5（跨 crate 的 D3D11 设备契约）**：设备由**本 crate（串流编排层，L3）**
+//! 统一创建，再注入 capture / encode / decode / render。平台 crate 之间**不做**
+//! 横向依赖（§4 规定 L1 之间仅 net→pair 可例外），因此契约用平台类型
+//! `ID3D11Device` 表达：解码侧入口是 `beam_decode::D3D11VaDecoder::open_with_device`，
+//! 渲染侧是 `beam_render::D3D11Renderer::device()`，后者已做运行期设备校验
+//! （不匹配则该帧清屏并告警，**不静默拷错**）。**未改变文档语义**。
+//!
 //! ## 错误码
 //!
 //! 编排层自身只做组装，错误沿用各平台 crate 的 `E5xxx` / `E6xxx` / `E8xxx` / `E2xxx`。
