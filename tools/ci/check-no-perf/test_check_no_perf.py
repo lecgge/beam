@@ -126,6 +126,46 @@ class ApkCheckTests(unittest.TestCase):
             self.assertEqual(hard, [])
             self.assertEqual(soft, [])
 
+    # --- 多 flavor（store / internal）相关的门禁行为 ---
+
+    def test_resolve_apks_expands_glob_to_all_matches(self) -> None:
+        """glob 必须展开成**全部**匹配 —— 只取第一个会让另一个 flavor 静默漏检。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "store", "release"))
+            os.makedirs(os.path.join(tmp, "internal", "release"))
+            first = os.path.join(tmp, "store", "release", "app-store-release.apk")
+            second = os.path.join(tmp, "internal", "release", "app-internal-release.apk")
+            for path in (first, second):
+                with open(path, "wb") as fh:
+                    fh.write(b"")
+            pattern = os.path.join(tmp, "*", "release", "*.apk")
+            self.assertEqual(len(apk_no_perf._resolve_apks(pattern)), 2)
+            self.assertEqual(apk_no_perf._resolve_apks(first), [first])
+
+    def test_pair_mappings_rules(self) -> None:
+        """mapping 配对规则：不给 / 给 1 个 / 给等量 / 数量不匹配。"""
+        apks = ["a.apk", "b.apk"]
+        self.assertEqual(apk_no_perf._pair_mappings(apks, []), [None, None])
+        self.assertEqual(apk_no_perf._pair_mappings(apks, ["m.txt"]), ["m.txt", "m.txt"])
+        self.assertEqual(apk_no_perf._pair_mappings(apks, ["m1.txt", "m2.txt"]), ["m1.txt", "m2.txt"])
+        with self.assertRaises(ValueError):
+            apk_no_perf._pair_mappings(apks, ["m1.txt", "m2.txt", "m3.txt"])
+
+    def test_main_checks_every_apk(self) -> None:
+        """clean 模式下只要有一个 APK 命中就整体失败（不能只看第一个）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            clean = _write_apk(os.path.join(tmp, "clean.apk"), b"nothing to see")
+            dirty = _write_apk(
+                os.path.join(tmp, "dirty.apk"),
+                b"xxLdev/beam/feature/perf/PerfRecorder;yy",
+            )
+            self.assertEqual(apk_no_perf.main(["--apk", clean, dirty, "--quiet"]), 1)
+            self.assertEqual(apk_no_perf.main(["--apk", clean, "--quiet"]), 0)
+            # expect perf：两个 APK 必须都命中才算通过
+            self.assertEqual(
+                apk_no_perf.main(["--apk", clean, dirty, "--expect", "perf", "--quiet"]), 1
+            )
+
 
 class RustCheckTests(unittest.TestCase):
     def test_clean_binary_has_no_hit(self) -> None:

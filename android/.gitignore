@@ -3,6 +3,9 @@
 build/
 !gradle/wrapper/gradle-wrapper.jar
 
+# Kotlin Gradle Plugin 的本地构建缓存（KGP 2.x）
+.kotlin/
+
 # 本机路径
 local.properties
 

@@ -145,21 +145,28 @@ jobs:
       # §7:276：release APK 内不得出现 perf 相关类。
       # 检查对象是 **classes*.dex 里的类名字符串**（流式读进内存，不落盘），
       # 并用 R8 映射表交叉验证「类是否被混淆保留在包里」。
+      # §7 分发渠道：store / internal 两个 flavor 都要查 —— 只查一个的话，
+      # 另一个 flavor 里混进 perf 类不会被发现（门禁静默失效）。
       - name: release APK 无 perf 类
         working-directory: android
         shell: bash
         run: |
           ./gradlew :app:assembleRelease
           python3 ../tools/ci/check-no-perf/apk_no_perf.py \
-            --apk 'app/build/outputs/apk/release/*.apk' \
-            --mapping 'app/build/outputs/mapping/release/mapping.txt'
+            --apk 'app/build/outputs/apk/store/release/*.apk' \
+                  'app/build/outputs/apk/internal/release/*.apk' \
+            --mapping 'app/build/outputs/mapping/storeRelease/mapping.txt' \
+                     'app/build/outputs/mapping/internalRelease/mapping.txt'
       # 负样本自检：debug APK 里含 :feature-perf 的类（debugImplementation），
       # 必须被抓到，否则说明上面那道门禁已经空转。
       - name: 门禁自检（debug APK 必须被检出）
         working-directory: android
         shell: bash
         run: |
-          python3 ../tools/ci/check-no-perf/apk_no_perf.py --apk 'app/build/outputs/apk/debug/*.apk' --expect perf
+          python3 ../tools/ci/check-no-perf/apk_no_perf.py \
+            --apk 'app/build/outputs/apk/store/debug/*.apk' \
+                  'app/build/outputs/apk/internal/debug/*.apk' \
+            --expect perf
 
   desktop:
     name: 桌面端 · 前端构建 + Rust 检查

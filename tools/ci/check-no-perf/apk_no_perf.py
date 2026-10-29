@@ -17,6 +17,19 @@
        是否出现在 dex 里。R8 会**改名保留**仍然可达的类，所以只按原名扫 dex 会漏；
        这一层能识别「类其实还在 release 里，只是被混淆了」。
 
+关于「多个 APK」（引入 store / internal 两个 flavor 之后）：
+
+    ``--apk`` / ``--mapping`` 都接受**多个**参数，且 **glob 会展开成全部匹配**。
+    旧版本 ``--apk`` 只取 glob 的第一个匹配 —— flavor 只有一个时看不出问题，
+    变成两个之后就会静默漏检一个（store 通过、internal 里的 perf 类根本没人看），
+    门禁等于从「恒通过」退化成「随机通过」。因此这里对每个 APK 逐一判定。
+
+    mapping 与 APK 的配对规则：
+
+    - 不给 ``--mapping``：只扫 dex；
+    - 给 1 个 mapping：应用到所有 APK；
+    - 给 N 个 mapping 且 N == APK 数：按顺序 1:1 配对（store / internal 各用自己的）。
+
 关于 mapping.txt 的判定分两档（理由见下面常量旁的注释）：
 
     - `dev.beam.feature.perf.*`（`:feature-perf` 模块，debug 专属）
@@ -33,6 +46,7 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import os
 import re
 import sys
@@ -214,16 +228,48 @@ def check_mapping(mapping_path: str, blobs: Dict[str, bytes]) -> Tuple[List[Mapp
     return hard, soft
 
 
-def _resolve_apk(pattern: str) -> str:
-    """把可能是 glob 的路径解析成具体文件。"""
-    import glob
+def _resolve_apks(pattern: str) -> List[str]:
+    """把可能是 glob 的路径解析成**全部**匹配的文件列表。
 
+    旧实现只取 ``matches[0]``，多 flavor 时会静默漏检。这里返回全部匹配，
+    由调用方对每个 APK 逐一判定。
+    """
     if os.path.isfile(pattern):
-        return pattern
+        return [pattern]
     matches = sorted(glob.glob(pattern))
     if not matches:
         raise FileNotFoundError(f"找不到 APK：{pattern}")
-    return matches[0]
+    return matches
+
+
+def _resolve_mappings(patterns: List[str]) -> List[str]:
+    """解析 mapping 参数：允许普通路径或 glob。"""
+    resolved: List[str] = []
+    for pattern in patterns:
+        if os.path.isfile(pattern):
+            resolved.append(pattern)
+            continue
+        matches = sorted(glob.glob(pattern))
+        if not matches:
+            raise FileNotFoundError(f"找不到 R8 映射表：{pattern}")
+        resolved.extend(matches)
+    return resolved
+
+
+def _pair_mappings(
+    apks: List[str], mappings: List[str]
+) -> List[Optional[str]]:
+    """把 mapping 与 APK 配对，返回与 ``apks`` 等长的列表（元素可为 None）。"""
+    if not mappings:
+        return [None] * len(apks)
+    if len(mappings) == 1:
+        return [mappings[0]] * len(apks)
+    if len(mappings) == len(apks):
+        return list(mappings)
+    raise ValueError(
+        f"--mapping 给了 {len(mappings)} 个，但 APK 有 {len(apks)} 个："
+        f"要么只给 1 个（应用到全部），要么给等量（1:1 配对）"
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -233,18 +279,30 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "示例：\n"
-            "  # release 必须通过\n"
-            "  python apk_no_perf.py --apk app/build/outputs/apk/release/*.apk \\\n"
-            "      --mapping app/build/outputs/mapping/release/mapping.txt\n"
+            "  # release 必须通过（store / internal 两个 flavor 一起查）\n"
+            "  python apk_no_perf.py \\\n"
+            "      --apk 'app/build/outputs/apk/store/release/*.apk' \\\n"
+            "            'app/build/outputs/apk/internal/release/*.apk' \\\n"
+            "      --mapping 'app/build/outputs/mapping/storeRelease/mapping.txt' \\\n"
+            "               'app/build/outputs/mapping/internalRelease/mapping.txt'\n"
             "  # debug 必须被抓到（门禁自检 / 负样本）\n"
-            "  python apk_no_perf.py --apk app/build/outputs/apk/debug/*.apk --expect perf\n"
+            "  python apk_no_perf.py \\\n"
+            "      --apk 'app/build/outputs/apk/store/debug/*.apk' \\\n"
+            "            'app/build/outputs/apk/internal/debug/*.apk' --expect perf\n"
         ),
     )
-    parser.add_argument("--apk", required=True, help="APK 路径或 glob（默认取第一个匹配）")
+    parser.add_argument(
+        "--apk",
+        required=True,
+        nargs="+",
+        help="APK 路径或 glob（可给多个；glob 展开成全部匹配，逐个判定）",
+    )
     parser.add_argument(
         "--mapping",
         default=None,
-        help="R8 mapping.txt 路径（可选；存在则做混淆名交叉验证）",
+        nargs="+",
+        help="R8 mapping.txt 路径（可选；给 1 个则应用到全部 APK，"
+        "给等量则按顺序 1:1 配对）",
     )
     parser.add_argument(
         "--expect",
@@ -262,19 +320,18 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Optional[Iterable[str]] = None) -> int:
-    args = build_parser().parse_args(list(argv) if argv is not None else None)
+def _check_one_apk(
+    apk_path: str,
+    mapping_path: Optional[str],
+    args: argparse.Namespace,
+) -> Tuple[bool, int]:
+    """检查单个 APK，返回 (是否命中 perf, dex 命中处数)。
 
-    try:
-        apk_path = _resolve_apk(args.apk)
-    except FileNotFoundError as exc:
-        print(f"::error::{exc}", file=sys.stderr)
-        return 2
-
+    ``mapping_path`` 为 None 时只扫 dex。
+    """
     blobs = _read_dex_blobs(apk_path)
     if not blobs:
-        print(f"::error::APK 内没有 classes*.dex：{apk_path}", file=sys.stderr)
-        return 2
+        raise LookupError(f"APK 内没有 classes*.dex：{apk_path}")
 
     if not args.quiet:
         print(f"[beam] APK: {apk_path}")
@@ -284,42 +341,95 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
 
     hard_mapping: List[MappingHit] = []
     soft_mapping: List[MappingHit] = []
-    if args.mapping:
-        if os.path.isfile(args.mapping):
-            hard_mapping, soft_mapping = check_mapping(args.mapping, blobs)
-        elif not args.quiet:
-            print(f"[beam] 未找到 R8 映射表（跳过交叉验证）：{args.mapping}")
+    if mapping_path and os.path.isfile(mapping_path):
+        hard_mapping, soft_mapping = check_mapping(mapping_path, blobs)
+    elif mapping_path and not args.quiet:
+        print(f"[beam] 未找到 R8 映射表（跳过交叉验证）：{mapping_path}")
 
     found = bool(dex_hits) or bool(hard_mapping)
     for hit in dex_hits:
-        print(f"::error::release APK 的 {hit.dex_name} 中出现 perf 类：{hit.pattern} → {hit.context}")
+        print(
+            f"::error::{os.path.basename(apk_path)} 的 {hit.dex_name} 中出现 perf 类："
+            f"{hit.pattern} → {hit.context}"
+        )
     for hit in hard_mapping:
-        print(f"::error::R8 映射表显示 debug 专属的 perf 模块被打进 release：{hit}")
+        print(
+            f"::error::R8 映射表显示 debug 专属的 perf 模块被打进 {os.path.basename(apk_path)}：{hit}"
+        )
 
     if soft_mapping:
         level = "error" if args.strict_mapping else "warning"
         print(
-            f"::{level}::R8 映射表显示以下 perf 类被混淆保留在 release APK 中"
+            f"::{level}::R8 映射表显示以下 perf 类被混淆保留在 "
+            f"{os.path.basename(apk_path)} 中"
             f"（来自始终参与 release 的模块，非 :feature-perf）："
         )
         for hit in soft_mapping:
             print(f"::{level}::  {hit}")
 
-    if args.expect == "perf":
-        if found:
-            if not args.quiet:
-                print(f"[beam] 结论: 检出 perf 命中 {len(dex_hits)} 处（负样本符合预期）")
-            return 0
-        print("::error::期望检出 perf 类，实际没有命中 —— 门禁可能已经失效", file=sys.stderr)
-        return 1
+    return found, len(dex_hits)
 
-    if found:
+
+def main(argv: Optional[Iterable[str]] = None) -> int:
+    args = build_parser().parse_args(list(argv) if argv is not None else None)
+
+    # --- 解析 APK（glob 展开成全部匹配，避免多 flavor 时静默漏检）---
+    apks: List[str] = []
+    try:
+        for pattern in args.apk:
+            for path in _resolve_apks(pattern):
+                if path not in apks:
+                    apks.append(path)
+    except FileNotFoundError as exc:
+        print(f"::error::{exc}", file=sys.stderr)
+        return 2
+
+    # --- 解析 mapping 并与 APK 配对 ---
+    try:
+        mappings = _resolve_mappings(list(args.mapping or []))
+        paired = _pair_mappings(apks, mappings)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"::error::{exc}", file=sys.stderr)
+        return 2
+
+    if not args.quiet:
+        print(f"[beam] 待检查 APK {len(apks)} 个：{', '.join(os.path.basename(a) for a in apks)}")
+
+    results: List[Tuple[str, bool, int]] = []
+    for apk_path, mapping_path in zip(apks, paired):
+        try:
+            found, hit_count = _check_one_apk(apk_path, mapping_path, args)
+        except LookupError as exc:
+            print(f"::error::{exc}", file=sys.stderr)
+            return 2
+        results.append((apk_path, found, hit_count))
+
+    # --- 汇总：每个 APK 都要满足期望（clean = 全干净；perf = 全命中）---
+    if args.expect == "perf":
+        missed = [os.path.basename(p) for p, found, _ in results if not found]
+        if missed:
+            print(
+                "::error::期望检出 perf 类，以下 APK 没有命中 —— 门禁可能已经失效："
+                + ", ".join(missed),
+                file=sys.stderr,
+            )
+            return 1
+        total = sum(c for _, _, c in results)
+        if not args.quiet:
+            print(f"[beam] 结论: 全部 {len(results)} 个 APK 均检出 perf（合计 {total} 处，负样本符合预期）")
+        return 0
+
+    dirty = [os.path.basename(p) for p, found, _ in results if found]
+    if dirty:
         sys.stdout.flush()
-        print("::error::release APK 中出现 perf 相关类", file=sys.stderr)
+        print(
+            "::error::以下 APK 中出现 perf 相关类：" + ", ".join(dirty),
+            file=sys.stderr,
+        )
         return 1
 
     if not args.quiet:
-        print("[beam] 结论: 通过 —— release APK 的 dex 中没有 perf 类")
+        print(f"[beam] 结论: 通过 —— {len(results)} 个 APK 的 dex 中都没有 perf 类")
     return 0
 
 

@@ -38,6 +38,21 @@ android {
         }
     }
 
+    // §7：分发渠道 flavor（`store` / `internal`）。
+    // store 面向正式分发，internal 面向内测；两者 applicationId 不同，可同时安装。
+    // 注意：`feature-perf` 仍只在 `debug` buildType 引入（见下方 dependencies），
+    // 因此「release 无 perf 类」的门禁不受 flavor 影响。
+    flavorDimensions += "channel"
+    productFlavors {
+        create("store") {
+            dimension = "channel"
+        }
+        create("internal") {
+            dimension = "channel"
+            applicationIdSuffix = ".internal"
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17

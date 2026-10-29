@@ -7,7 +7,7 @@
 旧 CI 的 Android 检查是：
 
 ```bash
-APK=$(ls app/build/outputs/apk/release/*.apk | head -1)
+APK=$(ls app/build/outputs/apk/release/*/*.apk | head -1)
 if unzip -l "$APK" | grep -qi "feature-perf\|perfstats"; then ... exit 1; fi
 ```
 
@@ -40,23 +40,43 @@ if unzip -l "$APK" | grep -qi "feature-perf\|perfstats"; then ... exit 1; fi
 再交叉验证 R8 映射表。
 
 ```bash
-# release 必须通过
+# release 必须通过（store / internal 两个 flavor 一起查）
 python tools/ci/check-no-perf/apk_no_perf.py \
-    --apk 'android/app/build/outputs/apk/release/*.apk' \
-    --mapping 'android/app/build/outputs/mapping/release/mapping.txt'
+    --apk 'android/app/build/outputs/apk/store/release/*.apk' \
+          'android/app/build/outputs/apk/internal/release/*.apk' \
+    --mapping 'android/app/build/outputs/mapping/storeRelease/mapping.txt' \
+             'android/app/build/outputs/mapping/internalRelease/mapping.txt'
 
 # debug 必须被抓到（负样本自检）
 python tools/ci/check-no-perf/apk_no_perf.py \
-    --apk 'android/app/build/outputs/apk/debug/*.apk' --expect perf
+    --apk 'android/app/build/outputs/apk/store/debug/*.apk' \
+          'android/app/build/outputs/apk/internal/debug/*.apk' \
+    --expect perf
 ```
 
 | 参数 | 说明 |
 |---|---|
-| `--apk` | APK 路径或 glob（取第一个匹配） |
-| `--mapping` | R8 `mapping.txt` 路径，可选 |
+| `--apk` | APK 路径或 glob，**可给多个**；glob 展开成**全部**匹配，逐个判定 |
+| `--mapping` | R8 `mapping.txt` 路径，可选；给 1 个则应用到全部 APK，给等量则按顺序 1:1 配对 |
 | `--expect clean\|perf` | `clean`=不许出现 perf（默认，门禁用）；`perf`=必须出现（负样本自检） |
 | `--strict-mapping` | 把 mapping 告警升级为硬失败（见下） |
 | `--quiet` | 只输出结论 |
+
+### 多 flavor 与「静默漏检」
+
+`--apk` 的 glob 会展开成**全部**匹配并**逐个**判定；`--expect` 两种模式都要求
+**每个 APK 都满足**：
+
+- `clean`：任何一个 APK 命中 perf → 整体失败；
+- `perf`：任何一个 APK 没命中 → 整体失败（说明该 flavor 的 debug 依赖图漂移了）。
+
+原因：Android 侧现在有 `store` / `internal` 两个 flavor（§7 分发渠道），产物路径是
+`apk/<flavor>/<buildType>/`。旧版 `--apk` 只取 glob 的**第一个**匹配，单 flavor 时看不出
+问题，两个 flavor 之后就会漏检一个 —— 门禁从「恒通过」退化成「随机通过」。
+
+mapping 与 APK 的配对规则：给 1 个 → 应用于全部；给 N 个且 N == APK 数 → 按顺序 1:1
+（store 用 `storeRelease/mapping.txt`，internal 用 `internalRelease/mapping.txt`）；
+其余组合按用法错误退出 2。
 
 ### `rust_no_perf.py` —— Rust 侧
 
@@ -135,9 +155,10 @@ android 侧把性能面板关进 `BuildConfig.PERF_STATS` 之后，可以用 `--
 python tools/ci/check-no-perf/test_check_no_perf.py
 ```
 
-14 个用例，只依赖标准库，不需要 cargo / gradle / APK 产物；覆盖：干净样本不误报、
+17 个用例，只依赖标准库，不需要 cargo / gradle / APK 产物；覆盖：干净样本不误报、
 三个命名空间 + 三个类型名都能抓到、`PerfUiState` 不误报、mapping 两档判定、
-R8 字节扫描的跨块边界、以及 `nm -C` 通道。
+R8 字节扫描的跨块边界、`nm -C` 通道，以及多 flavor 场景下的
+「glob 展开成全部匹配 / mapping 配对规则 / 每个 APK 都要判定」。
 
 ## 退出码
 
