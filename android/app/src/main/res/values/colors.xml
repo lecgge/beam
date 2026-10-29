@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 产品方案 §16：页面底色 #0b0f17（浅色 #f4f6fb 由 Compose 主题接管） -->
+    <color name="beam_background">#0B0F17</color>
+    <color name="beam_primary">#5B7CFF</color>
+    <color name="beam_launcher_background">#121826</color>
+</resources>
