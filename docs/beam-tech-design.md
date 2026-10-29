@@ -50,7 +50,8 @@ beam/
 │  ├─ beam-perf/             # perf-stats(feature = "perf-stats")
 │  ├─ beam-host/             # 主机编排
 │  ├─ beam-client/           # Windows 客户端编排
-│  └─ beam-ffi/              # uniffi 导出给 Android
+│  ├─ beam-ffi/              # uniffi 导出给 Android
+│  └─ beam-gamestream/       # GameStream 兼容层(v1 新增,仅按公开协议行为实现)
 ├─ apps/desktop/             # Tauri 2
 │  ├─ src/                   # 前端 (React + TS)
 │  │  ├─ pages/ (Home, Devices, Settings, Connect, Perf)
@@ -120,7 +121,8 @@ pub struct CapturedFrame { pub tex: ID3D11Texture2D, pub ts_us: u64, pub dirty: 
 - 线程:WGC 回调线程只更新“最新帧”槽(单槽交换);编码节拍线程按目标帧率拉取。
 - 错误码 `E5xxx`(5001 无显示器,5002 独占全屏无法抓取→切 DXGI,5003 设备丢失)。 配置:`backend=auto|wgc|dxgi`、`display_id`、`min_update_interval`。
 - 性能:抓屏+取纹理 T1 ≤1.5 ms、T2/T3 ≤1 ms;必须能交付 ≥ 目标帧率(主机显示器刷新率需 ≥ 目标)。
-- 测试:帧率计数(165/240Hz 显示器)、设备丢失恢复、多显示器。 里程碑:MVP(WGC)/v1(DXGI 回退、虚拟显示器)。
+- 测试:帧率计数(165/240Hz 显示器)、设备丢失恢复、多显示器;Windows 10 22H2 实测抓屏帧率上限。 里程碑:MVP(WGC)/v1(DXGI 回退、虚拟显示器)。
+- 平台限制:`MinUpdateInterval` 需 SDK 26100(Windows 11 24H2)。Windows 10 22H2 无此能力,MVP 阶段又无 DXGI 回退,抓屏上限约 60fps——1080p60 恰好够但无余量,M1 验收须含 Windows 10 实测项。
 
 ### 3.6 beam-encode(Windows)
 - 职责:GPU 上 RGB→NV12(D3D11 VideoProcessor 或 compute shader);NVENC/AMF/QSV 硬编(ffmpeg-next 封装,D3D11 硬件帧上下文);低延迟参数;切片输出;强制 IDR;码率热更新。
@@ -269,6 +271,9 @@ sequenceDiagram
 - Cargo features:`perf-stats`(仅 debug)、`gamestream`(v1)、`av1`(v2)、`vigem`(默认开)。release profile:`lto="thin"`、`panic="abort"`。
 - Android:buildType debug/release;flavor `store`/`internal`;`:feature-perf` 只在 debug;cargo-ndk 构建 arm64-v8a(+ x86_64 给模拟器)。
 - CI(GitHub Actions):fmt/clippy/test(Linux 跑纯逻辑 crate,Windows runner 跑平台 crate 编译);Android assemble + 单测;release 产物检查无 perf 符号;cargo-deny 许可证检查。
+- release 无 perf 符号的可执行校验(替代"检查"这类口头约定):
+  - Rust 侧:`cargo build --release` 后执行 `nm -C target/release/beam-perf* 2>/dev/null | grep -i "perf_span\|perf::" && exit 1 || exit 0`,或用 `cargo bloat --release` 对比 debug/release 体积差;亦可在 CI 用 `cargo tree -e features` 断言 `perf-stats` 未进入 release 解析结果。
+  - Android 侧:`./gradlew :app:assembleRelease` 后对 APK 执行 `unzip -l app/build/outputs/apk/release/*.apk | grep -i "feature-perf\|perfstats" && exit 1 || exit 0`,并检查 R8 映射表中无 perf 相关类名。
 - 签名:Windows 安装包与驱动代码签名;Android release keystore 放 CI secret。
 - FFmpeg:只用 LGPL 构建(不开 `--enable-gpl` 与 nonfree),以 DLL 动态链接,随包附许可证与源码获取说明。
 - 许可证:自有代码 MIT/Apache-2.0;禁止复制、翻译或让 AI 改写 Sunshine/Moonlight 的 GPL 代码;NVENC/AMF/QSV SDK 头文件分发前逐个核对;不使用 NVIDIA 商标作产品名。
@@ -280,20 +285,23 @@ sequenceDiagram
 |---|---|---|---|---|
 | T0 1080p60 | ≤30 ms | <0.5% | 20–40 Mbps | Windows、Android |
 | T1 4K60 | ≤27 ms | <0.5% | 80–150 Mbps | Windows;Android 旗舰(降为屏幕分辨率) |
-| T2 1440p165 | ≤14 ms | <1% | 100–200 Mbps | Windows 165Hz 屏;165Hz Android 平板 |
-| T3 1080p200 | ≤11 ms | <1% | 80–150 Mbps | Windows 240Hz 屏 |
+| T2 1440p165 | ≤14 ms(帧量化口径下 ≤20 ms) | <1% | 100–200 Mbps | Windows 165Hz 屏;165Hz Android 平板 |
+| T3 1080p200 | ≤11 ms(帧量化口径下 ≤16 ms) | <1% | 80–150 Mbps | Windows 240Hz 屏 |
+- E2E 目标的"上屏等待"含对齐目标刷新率 vsync 的整帧量化,T2/T3 的管线环节下界之和已超过对应帧间隔,故另列帧量化口径下的上限;该口径须在 M2.5 基准中验证 vsync 能否在帧内对齐。
 - 测试矩阵:GPU = RTX 20/30/40 系各 1、RX 6000/7000 各 1、Intel Arc 或带 QSV 核显 1;Android = 骁龙 8 Gen 2/Gen 3 手机、165Hz 平板(如拯救者 Y700 2025)、中端天玑手机、Android TV 盒子 1;OS = Windows 11 24H2、Windows 10 22H2(兼容)。
 
 ## 9. 工作拆解
 | 里程碑 | 任务 | 工时(人日) | 依赖 | 可并行 |
 |---|---|---|---|---|
-| M0 原型(第 1 天) | proto 基础类型;net 无 FEC datagram;capture WGC;encode NVENC;client decode/render 简版 | 1 | — | capture/encode 与 net 并行 |
-| M1 MVP(第 2–3 天) | pair(QR+PIN);discovery;Tauri 主页/设备/设置;Android 列表/配对/解码;input 键鼠 | 2 | M0 | Tauri UI 与 Android 并行 |
+| M-1 工程骨架(第 1 天) | Cargo workspace 与 17 个 crate 骨架(beam-gamestream 于 v1 新增);单独验证三个高风险点:WGC 出纹理、NVENC 出码流、D3D11VA 解码上屏 | 1 | — | 三个验证点并行 |
+| M0 原型(第 2 天) | proto 基础类型;net 无 FEC datagram;capture WGC;encode NVENC;client decode/render 简版 | 1 | M-1 | capture/encode 与 net 并行 |
+| M1 MVP(第 3–4 天) | pair(QR+PIN);discovery;Tauri 主页/设备/设置;Android 列表/配对/解码;input 键鼠 | 2 | M0 | Tauri UI 与 Android 并行 |
 | M2 可日用(第 2 周) | 音频;FEC;重连状态机;延迟浮层;perf-stats;config/log 完善 | 5 | M1 | 音频与 FEC 并行 |
 | M2.5 高帧率(第 3 周) | 零拷贝颜色转换;切片/SFE;帧节奏+MinUpdateInterval;Android 低延迟解码与高刷;T1–T3 基准 | 5 | M2(perf-stats) | Windows 与 Android 并行 |
-| M3 v1(第 3–5 周) | ViGEm 手柄;虚拟显示器驱动;Android TV;GameStream 兼容层;安装包与签名 | 10 | M2 | 驱动、TV、兼容层三线并行 |
+| M3 v1(第 3–5 周) | ViGEm 手柄;虚拟显示器驱动;Android TV;GameStream 兼容层;安装包与签名 | 10 | M2.5 | 驱动、TV、兼容层三线并行 |
 | M4 v2(第 6 周起) | HDR/AV1/120fps+;外网;机型适配矩阵 | 待定 | M3 | — |
 工时为单人 + AI 辅助编码的粗估。
+M3 依赖 M2.5 而非 M2:v1 承诺的 T1(4K60)达标基准在 M2.5 产出,M3 启动前该基准必须已通过,否则 v1 的核心验收项缺少前置。M2.5 于第 3 周完成,M3 第 3–5 周并行推进,依赖不构成时间冲突。
 
 风险与对策:
 | 风险 | 对策 |

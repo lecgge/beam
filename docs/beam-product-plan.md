@@ -27,9 +27,9 @@ Rust core 写一次,Windows 用 Tauri 直接调,Android 通过 uniffi 复用 pro
 ## 4. 功能清单
 | 阶段 | Windows(主机/客户端) | Android(客户端) | 协议/网络 |
 |---|---|---|---|
-| MVP(2–3 天) | WGC 抓屏 + NVENC/AMF/QSV HEVC;SendInput 键鼠;托盘一键开播;二维码/PIN;Windows 客户端最简版 | 发现列表、扫码/PIN、MediaCodec 硬解、触控转鼠标、基础设置 | QUIC 视频 datagram、控制 stream、mDNS、证书指纹 |
-| v1(+3–4 周) | WASAPI 音频 + Opus;ViGEm 手柄;虚拟显示器;延迟诊断浮层;多客户端管理 | 音频、实体手柄、屏幕虚拟手柄、Android TV、统计浮层 | FEC、自适应码率、GameStream 兼容层 |
-| v2 | HDR、AV1、多显示器、剪贴板与文件拖放、Wake-on-LAN | 120fps+、HDR、国产机型解码器白名单、平板分屏 | 外网:Tailscale 引导/中继、P2P 打洞 |
+| MVP(M0–M1,第 1–4 天) | WGC 抓屏 + NVENC/AMF/QSV HEVC;SendInput 键鼠;托盘一键开播;二维码/PIN;Windows 客户端最简版 | 发现列表、扫码/PIN、MediaCodec 硬解、触控转鼠标、基础设置 | QUIC 视频 datagram、控制 stream、mDNS、证书指纹 |
+| v1(M2–M3,第 5 周) | WASAPI 音频 + Opus;ViGEm 手柄;虚拟显示器;延迟诊断浮层;多客户端管理 | 音频、实体手柄、屏幕虚拟手柄、Android TV、统计浮层 | FEC、自适应码率、GameStream 兼容层 |
+| v2(M4,第 6 周起) | HDR、AV1、多显示器、剪贴板与文件拖放、Wake-on-LAN | 120fps+、HDR、国产机型解码器白名单、平板分屏 | 外网:Tailscale 引导/中继、P2P 打洞 |
 
 ## 5. 整体架构
 ```mermaid
@@ -51,12 +51,19 @@ Windows 作为客户端:同一个 Tauri App 切到“连接其他主机”,用 f
 | `beam-net` | quinn 端点、datagram 分片 + FEC、可靠控制/输入 stream、重连、统计 |
 | `beam-pair` | 自签证书(rcgen)、指纹固定、SPAKE2 PIN、二维码载荷 |
 | `beam-discovery` | mdns-sd 广播与浏览 |
+| `beam-session` | 主/客会话状态机,串联 capture→encode→net 与 net→decode→render |
 | `beam-capture` | windows-capture(WGC)与 DXGI 回退,输出 D3D11 纹理 |
 | `beam-encode` | ffmpeg-next 封装,NVENC/AMF/QSV |
 | `beam-audio` | WASAPI loopback + Opus |
 | `beam-input` | SendInput 键鼠、vigem-client 手柄 |
+| `beam-decode` | Windows 客户端 D3D11VA 硬解 |
+| `beam-render` | Windows 客户端 D3D11 flip-model 交换链 |
+| `beam-config` | 配置读写、优先级合并、存储 |
+| `beam-log` | tracing 初始化、日志轮转 |
+| `beam-perf` | 分段性能统计(feature = "perf-stats",仅 Debug) |
 | `beam-host` / `beam-client` | 主机/客户端会话编排 |
 | `beam-ffi` | uniffi 导出给 Android(只含 proto/net/pair/discovery) |
+| `beam-gamestream` | GameStream 兼容层(v1 新增,仅按公开协议行为实现,不参考 GPL 代码) |
 | `apps/desktop` | Tauri 2 App |
 
 - Commands:`get_host_status`、`start_hosting(opts)`/`stop_hosting`、`get_pairing_code`、`approve_pair(id)`/`remove_device(id)`、`list_hosts`/`connect(host_id)`、`get_settings`/`set_settings(patch)`
@@ -69,8 +76,12 @@ Windows 作为客户端:同一个 Tauri App 切到“连接其他主机”,用 f
 | `:app` | Compose 导航、全屏沉浸、TV Leanback 入口 |
 | `:feature-discovery` | 主机列表、NsdManager 兜底、WOL |
 | `:feature-pairing` | CameraX + ML Kit 扫码、PIN 输入 |
-| `:feature-stream` | SurfaceView、悬浮工具栏、统计浮层、触控/手柄映射 |
+| `:feature-stream` | SurfaceView、悬浮工具栏、统计浮层 |
+| `:feature-settings` | 串流设置页(画质、帧率、解码器、统计浮层开关) |
+| `:feature-perf` | 性能面板(仅 debugImplementation,release 不得依赖) |
 | `:core-decoder` | MediaCodec 异步、低延迟、厂商解码器白名单 |
+| `:core-renderer` | Surface 管理、`Surface.setFrameRate`、帧节奏 |
+| `:core-input` | 触控/实体手柄/遥控采集,映射为 `InputEvent` 回传主机 |
 | `:core-audio` | Opus 解码 + AAudio |
 | `:core-net` | uniffi 绑定 + `libbeam_ffi.so` |
 | `:core-data` | DataStore 设置、已配对主机与指纹 |
@@ -81,13 +92,14 @@ Windows 作为客户端:同一个 Tauri App 切到“连接其他主机”,用 f
 | 通道 | QUIC 承载 | 内容 |
 |---|---|---|
 | 控制 | 双向可靠 stream 0 | 握手、能力协商、画质切换、IDR 请求、心跳 |
-| 视频 | unreliable datagram | 帧号 + 分片号 + FEC 组(Reed-Solomon,默认 20%) |
+| 视频 | unreliable datagram | 帧号 + 分片号 + FEC 组(Reed-Solomon,ratio 默认 0.2;v1 启用,MVP 关闭) |
 | 音频 | datagram | Opus 5 ms 帧 |
 | 输入 | 独立可靠 stream | 键鼠/触控/手柄事件,带时间戳 |
 | 统计 | 控制 stream | 客户端回报解码/显示耗时 |
 
 - 证书:双方自签 Ed25519,TLS 1.3 双向认证,校验已固定指纹。
 - 扫码载荷:IP:端口 + 证书指纹 + 120 秒一次性 token。PIN:4–6 位,SPAKE2。
+- 扫码链路的安全前提:载荷在局域网上是明文,旁观者扫到即获得配对资格,因此**主机端必须弹窗人工确认后才会写入信任库**——该确认是不可省略的安全环节,不得实现为自动放行。
 - GameStream 兼容层(v1):按公开协议行为实现,不参考 GPL 代码。
 
 ## 9. 管线与延迟预算(1080p60 基线,设计目标)
@@ -106,7 +118,7 @@ Windows 作为客户端:同一个 Tauri App 切到“连接其他主机”,用 f
 | 档位 | 帧间隔 | HEVC 码率 | 线上占用 | Windows 客户端 | Android 客户端 | 结论 |
 |---|---|---|---|---|---|---|
 | 4K 60 | 16.7 ms | 80–150 Mbps | 100–186 Mbps | 可达 | 旗舰可解,手机屏多为 2K 以下 | 可达到 |
-| 1440p 165 | 6.1 ms | 100–200 Mbps | 124–248 Mbps | 需 165Hz+ 屏 | 仅 165Hz 平板 | 有条件达到 |
+| 1440p 165 | 6.06 ms | 100–200 Mbps | 124–248 Mbps | 需 165Hz+ 屏 | 仅 165Hz 平板 | 有条件达到 |
 | 1080p 200 | 5.0 ms | 80–150 Mbps | 100–186 Mbps | 需 240Hz 屏 | 主流 120–144Hz,上不了 200 | Windows 有条件 / Android 不现实 |
 
 线上占用 = 码率 × 1.24(20% FEC + 约 3% 协议开销)。码率区间为工程估计。
@@ -128,6 +140,8 @@ Windows 作为客户端:同一个 Tauri App 切到“连接其他主机”,用 f
 | 解码 | 3–8 | 2–5 | 2–4 |
 | 上屏等待 | 8.3 | 3.0 | 2.5 |
 | 端到端 | 16–27 | 8–14 | 7–11 |
+
+**"上屏等待"的定义**:指从解码完成到首帧被显示的等待时间,**含对齐到目标刷新率 vsync 的整帧量化**。按此定义,T2(165Hz,帧间隔 6.06 ms)与 T3(200Hz,帧间隔 5.0 ms)的管线环节下界之和分别为 7.5 ms 与 6.5 ms,已超过对应帧间隔,必然叠加最多一帧等待余量。因此 T2/T3 的端到端目标按"环节下界之和 + 最多 1 帧量化"取值,T1(4K60,帧间隔 16.7 ms)环节下界之和 16 ms 未超帧间隔,不叠加整帧余量。若后续实测表明 vsync 可在帧内对齐(非整帧量化),T2/T3 目标可相应收紧——此口径需在 M2.5 基准中一并验证。
 
 **最低要求**:主机 4K60 需 RTX 20 / RX 6000 / Arc 及以上,高帧率档建议 RTX 30+(Ada 优先),Windows 11 24H2、有线千兆;Windows 客户端需 D3D11VA HEVC 与对应刷新率屏;Android 需骁龙 8 Gen 2 级及低延迟解码器;电视多为百兆网口,4K60 建议盒子并限 80 Mbps。
 
@@ -159,12 +173,15 @@ Windows 作为客户端:同一个 Tauri App 切到“连接其他主机”,用 f
 ## 13. 里程碑
 | 里程碑 | 内容 | 工期 |
 |---|---|---|
-| M0 原型 | Windows 主机 + 客户端打通抓屏→编码→QUIC→解码 | 第 1 天 |
-| M1 MVP | Android 解码显示、输入回传、mDNS、扫码/PIN、托盘开播 | 第 2–3 天 |
+| M-1 工程骨架 | 搭起 Cargo workspace 与 17 个 crate 骨架(beam-gamestream 于 v1 新增);三个高风险集成交点各自单独验证:WGC 出 D3D11 纹理、NVENC 出码流、D3D11VA 解码上屏 | 第 1 天 |
+| M0 原型 | Windows 主机 + 客户端打通抓屏→编码→QUIC→解码 | 第 2 天 |
+| M1 MVP | Android 解码显示、输入回传、mDNS、扫码/PIN、托盘开播 | 第 3–4 天 |
 | M2 可日用 | 音频、FEC、重连、延迟浮层、设置页、Debug 性能统计 | 第 2 周 |
 | M2.5 高帧率 | 零拷贝 + 切片 + 帧节奏;4K60 达标,T2/T3 实测;Android 低延迟与高刷 | 第 3 周 |
 | M3 v1 | 手柄、虚拟显示器、Android TV、GameStream 兼容层、安装包 | 第 3–5 周 |
 | M4 v2 | HDR/AV1/120fps、外网、机型矩阵 | 第 6 周起 |
+
+M-1 是 M0 的前置:M0 需一次性打通 quinn、WGC、ffmpeg-next/NVENC 零拷贝、D3D11VA 解码与 D3D11 交换链渲染,风险集中在三个集成交点。M-1 将它们拆开逐一验证,避免风险全部压在 M0。
 
 ## 14. 风险与许可证
 | 风险 | 对策 |
