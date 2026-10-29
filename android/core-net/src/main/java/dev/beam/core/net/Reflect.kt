@@ -42,13 +42,35 @@ internal object Reflect {
         return null
     }
 
-    /** 按名称 + 参数个数查找方法；找不到返回 null。 */
+    /**
+     * 按名称 + 参数个数查找方法；找不到返回 null。
+     *
+     * 容忍 Kotlin 的 inline class 名称修饰（见 [findMethodByName]）。
+     */
     fun findMethod(cls: Class<*>, name: String, argCount: Int): Method? =
-        cls.methods.firstOrNull { it.name == name && it.parameterCount == argCount }
+        matchMethods(cls, name).firstOrNull { it.parameterCount == argCount }
 
-    /** 按名称查找任意参数个数的方法。 */
+    /**
+     * 按名称查找任意参数个数的方法。
+     *
+     * ## 为什么要容忍名称修饰
+     *
+     * Kotlin 会给**签名里出现 inline class 的成员函数**加 `-<hash>` 后缀（mangling）：
+     * `val fps: UInt` 的 getter 在 JVM 上叫 `getFps-pVg5ArA` 而不是 `getFps`。
+     * uniffi 生成的 record 大量使用 `UInt` / `ULong`（如 `SessionStats.fps`、
+     * `SessionStats.droppedFrames`），若只按精确名字查找，**所有无符号整型字段都会读到 null**，
+     * 统计流因此全是 0 值。
+     */
     fun findMethodByName(cls: Class<*>, name: String): Method? =
-        cls.methods.firstOrNull { it.name == name }
+        matchMethods(cls, name).firstOrNull()
+
+    /** 按名称找出所有候选方法（含 inline class 修饰过的名字）。 */
+    private fun matchMethods(cls: Class<*>, name: String): List<Method> {
+        val exact = cls.methods.filter { it.name == name }
+        if (exact.isNotEmpty()) return exact
+        val prefix = "$name-"
+        return cls.methods.filter { it.name.length > prefix.length && it.name.startsWith(prefix) }
+    }
 
     /** 调用方法，把被包装的异常转成 [BeamNativeException]。 */
     fun invoke(target: Any, method: Method, vararg args: Any?): Any? = try {
@@ -101,6 +123,12 @@ internal object Reflect {
         is Double -> v
         is Float -> v.toDouble()
         is Number -> v.toDouble()
+        // Kotlin 的无符号整型是 inline class，**不继承 java.lang.Number**，
+        // 因此 `is Number` 匹配不到；uniffi 的 u32/u64 字段必须显式处理。
+        is kotlin.UInt -> v.toDouble()
+        is kotlin.ULong -> v.toDouble()
+        is kotlin.UShort -> v.toDouble()
+        is kotlin.UByte -> v.toDouble()
         else -> null
     }
 

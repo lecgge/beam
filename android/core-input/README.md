@@ -21,6 +21,35 @@
 | `InputMapperConfig` | 摇杆死区、是否归一化、是否反转 Y |
 | `DpadDirection` | 遥控器 / D-pad 方向 → 方向键键码 |
 | `MotionActions` | `MotionEvent` action → `TouchAction` |
+| `AndroidKeys` | Android `KeyEvent.keyCode` → 协议键码 / 手柄按键 |
+| `GamepadMotion` | Android `MotionEvent` 模拟轴 → 协议轴 |
+| `Modifier.beamTouchInput` | Compose 触控采集（`pointerInput`） |
+| `Modifier.beamKeyInput` | Compose 按键 / 遥控 / 手柄按键采集（`onKeyEvent`） |
+| `BeamGamepadInput` | 手柄模拟轴采集（Android generic motion 通道） |
+| `InputClock` | 单调时钟微秒（协议时间戳口径） |
+
+## 采集 → 回传链路
+
+```
+Compose 触控/按键/手柄
+        │  （本模块：Android 事件 → InputEvent）
+        ▼
+InputEvent (`:core-net` 的协议模型)
+        │  （`:core-net`：序列化回传）
+        ▼
+Session.sendInput(event) → Rust 主机
+```
+
+* **采集**在本模块（`Modifier.beamTouchInput` / `beamKeyInput` / `BeamGamepadInput`）；
+* **映射**在本模块（`InputMapper` / `AndroidKeys` / `GamepadMotion`）；
+* **回传**在 `:core-net`（`Session.sendInput`）；
+* **接线**在 `:feature-stream`（`StreamScreen` 把 Modifier 挂到画面上，
+  `StreamViewModel.sendInput` 交给会话）。
+
+> **当前缺口**：Rust 侧 uniffi 导出面（`crates/beam-ffi/src/ffi.rs`）尚未导出
+> `InputEvent`，`Session` 也只有 `state()` / `stop()`，
+> 因此 `Session.sendInput` 目前会抛 `BeamNativeUnavailableException`。
+> 上面的链路已就位，补齐 Rust 导出面后即可打通。
 
 ## 映射口径
 
@@ -51,3 +80,6 @@
 
 `InputMapperTest` 覆盖：触控归一化与边界、Y 轴反转、摇杆死区与线性重映射、
 D-pad 映射、键鼠事件字段对齐。
+
+`AndroidKeysTest` 覆盖：方向键 / 确认键 / 字母数字键的协议码、无法识别的按键、
+手柄按键映射、Android 轴索引到协议轴的映射、摇杆死区。

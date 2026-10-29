@@ -39,6 +39,13 @@ class MediaCodecVideoDecoder(
     private val lock = Any()
     private val pending = ArrayDeque<PendingFrame>()
 
+    /**
+     * 输出栅栏（§3.12「output fence」）。
+     *
+     * 公开以便上层观测输出侧统计（在途缓冲索引 / 已渲染帧数 / 跳过的 config 缓冲数）。
+     */
+    val outputFence: OutputFence = OutputFence()
+
     private var codec: MediaCodec? = null
     private var thread: HandlerThread? = null
     private var handler: Handler? = null
@@ -94,8 +101,16 @@ class MediaCodecVideoDecoder(
             }
 
             override fun onOutputBufferAvailable(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
-                // 直接渲染到 Surface，由系统处理 output fence。
-                runCatching { codec.releaseOutputBuffer(index, true) }
+                // 输出栅栏：登记在途缓冲与显示时间戳，并判断该缓冲是否该上屏。
+                // codec-config 缓冲（SPS/PPS）**不能**渲染到 Surface。
+                val render = outputFence.begin(
+                    bufferIndex = index,
+                    presentationTimeUs = info.presentationTimeUs,
+                    isCodecConfig = isCodecConfig(info.flags),
+                )
+                // 渲染到 Surface：框架在内部完成 output fence 同步（公开 SDK 不暴露 fence）。
+                runCatching { codec.releaseOutputBuffer(index, render) }
+                outputFence.complete(index)
             }
 
             override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) = Unit
@@ -139,6 +154,7 @@ class MediaCodecVideoDecoder(
             pending.clear()
             freeInputIndex = -1
         }
+        outputFence.reset()
         thread?.quitSafely()
         thread = null
         handler = null
@@ -187,6 +203,10 @@ class MediaCodecVideoDecoder(
         }
         return DecoderSelector.select(candidates, codec, preferLowLatency)?.name
     }
+
+    /** 是否是 codec-config 缓冲（SPS/PPS 等，**不能**渲染到 Surface）。 */
+    private fun isCodecConfig(flags: Int): Boolean =
+        flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0
 
     companion object {
         /** 单帧最大输入字节数：覆盖 4K60 的 IDR（§5 单帧上限）。 */

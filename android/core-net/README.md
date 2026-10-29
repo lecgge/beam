@@ -20,78 +20,70 @@
 | `.../InputEvent.kt` | 输入事件模型（与 `beam-proto::InputEvent` 对齐） |
 | `.../FrameSink.kt`、`PooledFrameSink.kt` | 帧回调接口（热路径 DirectByteBuffer） |
 | `.../NativeBeamBridge.kt` | **反射适配层**：调用 uniffi 生成类 |
+| `.../NativeMappings.kt` | 生成物 → 模型的映射（纯函数，可单测） |
 | `.../Reflect.kt` | 反射工具 + `BeamNativeUnavailableException` |
 | `.../buffer/ByteBufferPool.kt` | DirectByteBuffer 池（§6 内存所有权约定） |
-| `src/main/jniLibs/arm64-v8a/`、`src/main/jniLibs/x86_64/` | 原生库占位目录（**不放假 .so**） |
+| `src/main/jniLibs/arm64-v8a/`、`src/main/jniLibs/x86_64/` | 原生库输出目录（**不提交 `.so`**） |
 
 ---
 
-## 2. 生成 uniffi Kotlin 绑定
+## 2. 生成 uniffi Kotlin 绑定与原生库
 
-### 2.1 安装工具
+### 2.1 一条命令（推荐）
 
-```bash
-cargo install uniffi-bindgen            # 生成 Kotlin 绑定
-cargo install cargo-ndk                  # 交叉编译 .so（可选，也可用 cargo-ndk 命令行）
+Gradle 里已经接好两个任务：
+
+```powershell
+# 交叉编译 libbeam_ffi.so（arm64-v8a + x86_64）
+.\gradlew.bat :core-net:cargoNdkBuild
+
+# 用 uniffi-bindgen 生成 Kotlin 绑定（读刚编出来的 .so）
+.\gradlew.bat :core-net:generateUniffiBindings
 ```
 
-> `cargo install` 需要 crates.io 可达；网络受限时可改用
-> `cargo install uniffi-bindgen --locked` 或从 release 下载预编译二进制。
+需要的环境：
 
-### 2.2 生成 Kotlin 绑定
+| 依赖 | 说明 |
+|---|---|
+| `cargo` + `cargo-ndk` | `cargo install cargo-ndk` |
+| Android NDK | `ANDROID_NDK_HOME` 环境变量 / `-Pbeam.ndk.home=<路径>` / `local.properties` 的 `sdk.dir\ndk\<版本>` |
+| `uniffi-bindgen` | PATH 上的 `uniffi-bindgen`，或 `-Pbeam.uniffi.bindgen=<可执行文件路径>` |
+| `FFMPEG_DIR` / `LIBCLANG_PATH` | 只有打开 Rust 侧可选的 `ffmpeg` feature 时才需要（`Exec` 默认继承当前进程环境变量） |
 
-在仓库根目录（`crates/beam-ffi`）执行：
+### 2.2 接进常规构建（可选）
 
-```bash
-# 方式 A：uniffi-bindgen 直接绑定
-uniffi-bindgen generate --library target/release/libbeam_ffi.so \
-    --language kotlin --out-dir android/core-net/src/main/java/dev/beam/core/net/uniffi
-
-# 方式 B：工程内 build.rs 自行生成（推荐，可离线复现）
-#   crates/beam-ffi/build.rs 内调用 uniffi::generate_scaffolding("src/beam_ffi.udl")
+```powershell
+.\gradlew.bat -Pbeam.native=true :core-net:assembleDebug
 ```
 
-生成物落在 `android/core-net/src/main/java/dev/beam/core/net/uniffi/`，包名
-`dev.beam.core.net.uniffi`（与 `NativeBeamBridge` 的候选类名前缀一致）。
+`-Pbeam.native=true` 会让 `compile*Kotlin` 依赖 `generateUniffiBindings`、
+`merge*NativeLibs` 依赖 `cargoNdkBuild`。
 
-### 2.3 交叉编译 `libbeam_ffi.so`
+**默认（不加这个开关）不参与构建**：本机没有 cargo / NDK / uniffi-bindgen 时，
+`assembleDebug` 仍必须能通过 —— 降级路径（`BeamNativeUnavailableException` →
+`UnavailableBeamClient` → App 仍可启动）不能被破坏。
 
-```bash
-cargo install cargo-ndk
+### 2.3 产物落点
 
-# arm64-v8a（真机）
-cargo ndk -t arm64-v8a -o android/core-net/src/main/jniLibs build --release -p beam-ffi
+| 产物 | 落点 | 是否入库 |
+|---|---|---|
+| `libbeam_ffi.so` | `src/main/jniLibs/{arm64-v8a,x86_64}/` | **否**（`.gitignore`） |
+| uniffi Kotlin 绑定 | `build/generated/uniffi/uniffi/beam_ffi/beam_ffi.kt` | **否**（构建目录） |
 
-# x86_64（模拟器）
-cargo ndk -t x86_64   -o android/core-net/src/main/jniLibs build --release -p beam-ffi
-```
+生成的 Kotlin 绑定通过 `sourceSets` 挂进编译（`build.gradle.kts`），
+因此**不需要**把生成物放进源码目录。若确实要手工生成一份放进
+`src/main/java/dev/beam/core/net/uniffi/`，该目录已被 `.gitignore` 忽略，
+且 `build.gradle.kts` 会优先使用它（避免重复类）。
 
-产物布局（AGP 会自动打进 APK 的 `lib/<abi>/`）：
+> 生成物的 **package 是 `uniffi.beam_ffi`**（不是目录名 `uniffi`），
+> `NativeBeamBridge` 的候选类名列表里已经包含这个前缀，因此两边对得上。
 
-```
-core-net/src/main/jniLibs/
-├─ arm64-v8a/libbeam_ffi.so
-└─ x86_64/libbeam_ffi.so
-```
+### 2.4 JNA 依赖
 
-> **不要把 `.so` 提交进仓库**：`.gitignore` 已忽略
-> `core-net/src/main/jniLibs/*/libbeam_ffi.so`。
-> 当前仓库里只有空目录占位（`.gitkeep`），**没有假 .so**。
-
-### 2.4 在 Gradle 里接入（可选，推荐）
-
-若希望 `assembleDebug` 自动跑 cargo-ndk，可在 `core-net/build.gradle.kts` 中：
-
-```kotlin
-val cargoNdk by tasks.registering(Exec::class) {
-    workingDir = rootProject.file("..")
-    commandLine("cargo", "ndk", "-t", "arm64-v8a", "-t", "x86_64",
-                "-o", "src/main/jniLibs", "build", "--release", "-p", "beam-ffi")
-}
-tasks.withType<com.android.build.gradle.tasks.MergeSourceSetFolders> {
-    dependsOn(cargoNdk)
-}
-```
+uniffi 生成的 Kotlin 绑定依赖 `com.sun.jna.*`，并且用到
+`com.sun.jna.internal.Cleaner` —— 因此 **JNA 必须 ≥ 5.9.0**
+（当前锁定 `5.14.0`）。该依赖只在真的要编译生成物时才引入
+（`-Pbeam.native=true` 或生成目录已存在），避免给降级构建塞无用依赖。
 
 ---
 
@@ -102,29 +94,53 @@ tasks.withType<com.android.build.gradle.tasks.MergeSourceSetFolders> {
 
 | 缺失物 | 异常 | 提示内容 |
 |---|---|---|
-| `libbeam_ffi.so` | `BeamNativeUnavailableException` | 「无法加载原生库 libbeam_ffi.so … 请用 cargo-ndk 构建并把产物复制到 jniLibs/arm64-v8a 与 x86_64」 |
+| `libbeam_ffi.so` | `BeamNativeUnavailableException` | 「无法加载原生库 libbeam_ffi.so … 请用 cargo-ndk 构建并把产物复制到 jniLibs/arm64-v8a 与 jniLibs/x86_64」 |
 | `BeamClient` 类 | `BeamNativeUnavailableException` | 「未找到 uniffi 生成的 BeamClient 类（尝试过：…）」 |
 | `BeamClient.browse` 等方法 | `BeamNativeUnavailableException` | 「uniffi 生成的 BeamClient 缺少方法 browse …」 |
+| `Session.send_input` | `BeamNativeUnavailableException` | 「uniffi 会话句柄缺少 sendInput 方法 … Rust 侧需要在 crates/beam-ffi/src/ffi.rs 的 Session 导出面补 `pub fn send_input(&self, event: InputEvent)`」 |
 
 `NativeBeamBridge.isAvailable()` 供 UI 区分「so 没构建」与「真的没找到主机」。
 
 ---
 
-## 4. uniffi 导出面约定
+## 4. uniffi 导出面约定（**实测形状**）
 
-`NativeBeamBridge` 按下表反射调用 `beam-ffi` 的生成物。若 Rust 侧改名，
-请同步这里与本表（否则会得到「缺少方法 X」的可读错误）。
+下表取自 `crates/beam-ffi/src/ffi.rs` 的真实导出面，并用
+`uniffi-bindgen 0.29.5` 生成的 Kotlin 绑定核对过。
 
-| 生成物 | 期望形状 |
+| 生成物 | 实际形状 |
 |---|---|
-| `BeamClient(config: BeamClientConfig)` | `browse(listener)` / `pairQr(payload)` / `pairPin(peer, pin)` / `connect(peer, cfg, sink)` |
-| `FrameSink` | `onFrame(data, ptsUs, captureTsUs, key)` / `onEvent(event)` /（可选）`onAudio(data, ptsUs)` |
-| `DiscoveryListener` | `onHost(host)` |
-| `Peer` | record：`id` `name` `address` `fingerprint` `platform` `trusted` |
-| `StreamCfg` | record：`width` `height` `fps` `codec` `bitrateKbps` `fecRatio` `audioEnabled` |
-| `BeamClientConfig` | record：`clientName` `logLevel` `fecRatio` `jitterFrames` `connectTimeoutMs` `reconnectTimeoutMs` |
-| `SessionEvent` | 变体名：`Stats` `Reconnecting` `Disconnected` `StateChanged` `Error` |
-| `InputEvent` | 变体名：`Key` `MouseMove` `MouseButton` `MouseWheel` `Touch` `GamepadButton` `GamepadAxis` |
+| `BeamClient` | `class BeamClient(config: BeamClientConfig)`；方法 `browse(listener)` / `pairQr(payload): Peer` / `pairPin(peer, pin)` / `connect(peer, cfg, sink): Session` |
+| `Session` | `class Session`；方法**只有** `state(): SessionState` / `stop()` |
+| `FrameSink` | `interface FrameSink { onFrame(data: ByteArray, ptsUs: ULong, captureTsUs: ULong, key: Boolean); onEvent(event: SessionEvent) }` |
+| `DiscoveryListener` | `interface DiscoveryListener { onHost(host: DiscoveredHost); onHostLost(fullname: String) }` |
+| `SessionEvent` | `sealed class`；变体 `StateChanged(state)` / `Paired(fingerprint)` / `Negotiated(config)` / **`Stats(stats)`** / `Error(code, message, retryable)` / `Closed` |
+| `SessionStats` | `sessionId: ULong` / `fps: UInt` / `bitrateBps: UInt` / `lossPpm: UInt` / `rttUs: UInt` / `decodeUs: UInt` / `renderUs: UInt` / `e2eUs: UInt` / `droppedFrames: UInt` |
+| `DiscoveredHost` | `id` / `name` / `version` / `fingerprint` / `port: UInt` / `address` / `fullname` —— **地址与端口是分开的两个字段** |
+| `Peer` | `id` / `name` / `address` / `fingerprint` / `platform` / `trusted` |
+| `StreamCfg` | `width` / `height` / `fps` / `codec: String` / `bitrateKbps` / `fecRatio` / `audioEnabled` |
+| `BeamClientConfig` | `clientName` / `logLevel` / `fecRatio` / `jitterFrames` / `connectTimeoutMs` / `reconnectTimeoutMs` |
+| `InputEvent` | **尚未导出**（Rust 侧没有该类型） |
+
+### 4.1 三个必须记住的坑
+
+1. **`SessionEvent.Stats` 是嵌套记录**：统计字段在 `stats: SessionStats` 上，
+   不在变体本身。直接读变体会全读到 0 值。
+2. **单位不同**：Rust 用整数最小单位（µs / ppm / bit·s⁻¹），
+   Kotlin 侧模型用 ms / 百分比 / kbit·s⁻¹，换算集中在 `NativeMappings.mapStats`。
+3. **Kotlin 会修饰 inline class 的 getter 名**：`val fps: UInt` 的 getter 在 JVM 上
+   叫 `getFps-<hash>`，不是 `getFps`。只按精确名字查找方法会让**所有无符号整型字段
+   读成 null** —— `Reflect.findMethodByName` 已容忍该后缀。
+
+### 4.2 `Result` 被 uniffi 提升
+
+uniffi 会把 `Result<T, E>` 提升成「成功返回值 / 失败抛异常」：
+
+* `pair_qr` 成功时**直接返回 `Peer` 记录**（不是 `Ok(Peer)` 包装）；
+* `pair_pin` 成功时返回 `Unit`；
+* 失败时抛 `BeamException` 的子类，其 `message` **不含错误码**
+  （`PinFailed.message` 是空串），只能按**异常类名**映射
+  （`InvalidPayload`→`E14001`、`PinFailed`→`E14002` …）。
 
 record 的构造**按参数名**装配（`kotlin-reflect` 的 `callBy`），因此 Rust 字段
 顺序变化不会破坏适配层。
@@ -139,7 +155,7 @@ record 的构造**按参数名**装配（`kotlin-reflect` 的 `callBy`），因�
 
 1. Rust 传入 `ByteBuffer` → 直接接管所有权；
 2. Rust 传入 `ByteArray` → 从 `ByteBufferPool` 租一块直接内存并拷贝；
-3. 消费方实现 `PooledFrameSink` → **所有权转移**给消费方，由其在消费完毕后
+3. 消费方实现 `PooledFrameSink` → **所有权转移**给消费方，由其在解码完毕后
    `PooledFrame.close()` 归还；
 4. 否则在 `onFrame` 返回后立即归还（回调期间缓冲有效，回调后失效）。
 
@@ -158,7 +174,7 @@ Rust 侧的 `SessionEvent` 回调进入 `SessionBus.events`（`MutableSharedFlow
 | `Session.events` | `SessionBus.events` | 全部控制面事件 |
 | `Session.stats` | `SessionBus.events.filterIsInstance<Stats>()` | `session://stats`，500 ms |
 | `Session.audioPackets` | `SessionBus.audio` | Opus 音频包（v1） |
-| `Session.state` | `StateChanged` 事件驱动 | §3.9 会话状态机 |
+| `Session.state` | `StateChanged` 事件驱动（建连时先问一次原生 `state()`） | §3.9 会话状态机 |
 
 ---
 
@@ -178,3 +194,18 @@ Rust 侧的 `SessionEvent` 回调进入 `SessionBus.events`（`MutableSharedFlow
 | 其他模块直接调 JNI | `System.loadLibrary` / `Class.forName` 只出现在本模块的 `NativeBeamBridge` / `Reflect` |
 | 本模块做解码/渲染 | 不依赖 `:core-decoder` / `:core-renderer`；帧只做透传 |
 | 帧数据走 uniffi 对象拷贝 | 热路径用 `ByteBuffer`（DirectByteBuffer）+ 池化；控制面才走 uniffi |
+
+---
+
+## 9. 测试
+
+```bash
+./gradlew :core-net:test
+```
+
+`NativeMappingsTest` 覆盖：嵌套统计的映射与单位换算、统计事件字段非零、
+协商结果补齐分辨率/帧率、状态/错误/关闭/协商事件的映射、
+发现结果的 `host:port` 拼接、扫码与 PIN 配对的结果形状、错误码映射。
+
+> 测试用 `dev.beam.core.net.fakes` 里的**替身类型**（与生成物同构），
+> 因为生成物是构建产物且依赖 JNA 与 `.so`，无法在 JVM 单测里加载。

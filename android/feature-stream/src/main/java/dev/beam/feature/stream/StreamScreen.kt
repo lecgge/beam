@@ -27,6 +27,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import dev.beam.core.data.ui.BeamTokens
+import dev.beam.core.input.BeamGamepadInput
+import dev.beam.core.input.beamKeyInput
+import dev.beam.core.input.beamTouchInput
+import dev.beam.core.net.InputEvent
 import dev.beam.core.net.SessionStats
 
 /**
@@ -35,7 +39,8 @@ import dev.beam.core.net.SessionStats
  * 组成：
  * - `SurfaceView` 承载解码输出（§3.12「SurfaceView」）；
  * - 右上角**悬浮工具栏**（展开/收起）；
- * - 左上角**统计浮层**（消费 `session://stats`，500 ms 一次）。
+ * - 左上角**统计浮层**（消费 `session://stats`，500 ms 一次）；
+ * - 触控 / 按键 / 遥控 / 手柄的**采集**（映射逻辑在 `:core-input`，本模块只负责接线）。
  *
  * ## 禁止事项
  * **不涉及解码细节**：解码器与节拍由 `:core-decoder` / `:core-renderer` 负责，
@@ -49,11 +54,22 @@ fun StreamScreen(
     onToggleOverlay: () -> Unit,
     onToggleToolbar: () -> Unit,
     onDisconnect: () -> Unit,
+    onInput: (InputEvent) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
 
-    Box(modifier = modifier.fillMaxSize().background(Color.Black)) {
+    // 手柄模拟轴走 Android 的 generic motion 通道（不在 Compose 的按键/指针通道里）。
+    BeamGamepadInput(onEvent = onInput)
+
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(Color.Black)
+            // 输入采集：Compose 触控 / 按键 → :core-input 映射 → 回传主机。
+            .beamTouchInput(onEvent = onInput)
+            .beamKeyInput(onEvent = onInput),
+    ) {
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
@@ -87,6 +103,23 @@ fun StreamScreen(
                 codecLabel = state.codecLabel,
                 modifier = Modifier.align(Alignment.TopStart).padding(BeamTokens.SpacingMd),
             )
+        }
+
+        // 输入回传失败要**如实显示**（例如 Rust 侧尚未导出 send_input）。
+        state.inputError?.let { reason ->
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(BeamTokens.SpacingMd)
+                    .background(BeamTokens.OverlaySurface, RoundedCornerShape(8.dp))
+                    .padding(horizontal = BeamTokens.SpacingMd, vertical = BeamTokens.SpacingSm),
+            ) {
+                Text(
+                    text = "输入回传失败：$reason",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFFFFC107),
+                )
+            }
         }
 
         StreamToolbar(

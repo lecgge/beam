@@ -8,6 +8,7 @@ package dev.beam.core.net
  *  - `session://reconnecting` → [Reconnecting]
  *  - `session://disconnected` → [Disconnected]
  *  - `session://state-changed` → [StateChanged]
+ *  - 能力协商完成 → [Negotiated]
  *  - 错误统一为 `SessionEvent::Error{code, retryable}`（§6 错误传播）
  */
 sealed interface SessionEvent {
@@ -31,6 +32,14 @@ sealed interface SessionEvent {
 
     /** 会话状态机迁移，对应 §4.1 的状态集合。 */
     data class StateChanged(val state: SessionState, val previous: SessionState) : SessionEvent
+
+    /**
+     * 能力协商完成（Rust 侧 `SessionEvent::Negotiated { config }`）。
+     *
+     * 协商结果是**最终生效**的串流配置（分辨率 / 帧率 / 编码 / 码率），
+     * 与本地请求值可能不同，因此单独作为一个事件上送。
+     */
+    data class Negotiated(val cfg: StreamCfg) : SessionEvent
 
     /** 统一错误出口；UI 只根据 [code] 显示文案。 */
     data class Error(

@@ -10,7 +10,9 @@
 * 用 `MediaCodec` 异步模式把 H.264 / HEVC / AV1 码流解码到 `Surface`；
 * 下发 `MediaFormat.KEY_LOW_LATENCY = 1`；
 * 自动探测设备解码器，优先厂商 low-latency 硬解（§9 风险表「国产机 MediaCodec 差异」）；
-* output buffer 直接 `releaseOutputBuffer(index, true)` 交给系统渲染（由系统处理 output fence，不额外拷贝）。
+* **输出栅栏（output fence）**：输出缓冲的索引、显示时间戳与「该不该上屏」由
+  `OutputFence` 显式登记；渲染到 Surface 时由系统处理内部 fence（公开 SDK
+  不暴露 `SyncFence`），不额外拷贝。
 
 ## Kotlin 对外接口
 
@@ -20,6 +22,8 @@
 | `VideoFormat` | 流格式：分辨率 / 编码 / profile / level / 帧率 |
 | `DecoderCodec` | `H264` / `HEVC` / `AV1`，带 `mime` |
 | `MediaCodecVideoDecoder` | 默认实现 |
+| `VideoDecoderFactory` | **工厂**：编码名 → 解码器 / `VideoFormat`（让 `:feature-stream` 不接触解码细节） |
+| `OutputFence` | 输出栅栏：在途缓冲索引 / 显示时间戳 / 已渲染与已跳过计数 |
 | `DecoderSelector` | 解码器选型策略（纯逻辑，可单测） |
 | `DecoderCandidate` | 解码器候选（纯数据，可单测） |
 | `DeviceDecoders` | 设备解码器枚举 |
@@ -55,6 +59,22 @@
 `FrameSink` 契约一致）。`MediaCodec.queueInputBuffer` 会自行拷贝输入数据，
 因此可以同步提交而无需额外拷贝。
 
+### 输出栅栏（output fence）
+
+MediaCodec 的**公开 SDK 不暴露** Surface 输出的原始 fence —— 框架在
+`onOutputBufferAvailable()` 回调之前就已经等过内部 fence。因此本模块把
+输出侧**可观测、可测试**的那部分显式化：
+
+* `OutputFence.begin(index, ptsUs, isCodecConfig)` 登记一次输出缓冲，
+  并判断该缓冲**该不该上屏**；
+* `OutputFence.complete(index)` 登记缓冲已交还 MediaCodec；
+* `MediaCodecVideoDecoder.outputFence` 公开该对象，供上层统计在途索引、
+  已渲染帧数与被跳过的缓冲数。
+
+> **顺带修掉一个真实缺陷**：此前 `onOutputBufferAvailable` 完全忽略
+> `MediaCodec.BufferInfo`，导致 **codec-config 缓冲（SPS/PPS）也被当成画面渲染上屏**。
+> 现在带 `BUFFER_FLAG_CODEC_CONFIG` 的缓冲只交还、不渲染。
+
 ## 测试
 
 ```bash
@@ -62,6 +82,9 @@
 ```
 
 `DecoderSelectorTest` 覆盖：低延迟优先、硬解优先、软解兜底、白名单识别、mime 取值。
+
+`OutputFenceTest` 覆盖：普通缓冲渲染计数、codec-config 缓冲跳过计数、
+交还后清空在途索引、索引错配忽略、重置、编码名到容器格式的解析与流格式构造。
 
 ## 性能预算（§3.12）
 

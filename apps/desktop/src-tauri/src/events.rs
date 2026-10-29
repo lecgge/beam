@@ -18,7 +18,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
 use crate::dto::DisconnectedInfo;
-use crate::service::BeamService;
+use crate::service::{BeamService, SessionEventInfo};
 
 // ---- 事件名常量 ----
 pub const HOST_STATE_CHANGED: &str = "host://state-changed";
@@ -75,6 +75,54 @@ pub fn start_background_timers(app: AppHandle, service: Arc<dyn BeamService>) {
                             },
                         );
                     }
+                }
+                // §3.9:真实客户端会话的事件(协商完成 / 出错 / 结束)。
+                for event in service.take_session_events() {
+                    match event {
+                        SessionEventInfo::Negotiated { .. } => {
+                            // 会话状态已经同步到服务层,广播主机状态让前端刷新。
+                            emit(&app, HOST_STATE_CHANGED, service.host_status());
+                        }
+                        SessionEventInfo::Error { code, retryable } => {
+                            let session_id =
+                                service.session().map(|s| s.session_id).unwrap_or_default();
+                            emit(
+                                &app,
+                                SESSION_DISCONNECTED,
+                                DisconnectedInfo {
+                                    session_id,
+                                    reason: "session_error".to_string(),
+                                    code: Some(format!("E{code}")),
+                                },
+                            );
+                            if retryable {
+                                tracing::warn!(code, "客户端会话出错(可重试)");
+                            } else {
+                                tracing::error!(code, "客户端会话出错");
+                            }
+                        }
+                        SessionEventInfo::Closed => {
+                            let session_id =
+                                service.session().map(|s| s.session_id).unwrap_or_default();
+                            emit(
+                                &app,
+                                SESSION_DISCONNECTED,
+                                DisconnectedInfo {
+                                    session_id,
+                                    reason: "closed".to_string(),
+                                    code: None,
+                                },
+                            );
+                        }
+                        SessionEventInfo::Paired { fingerprint } => {
+                            tracing::info!(%fingerprint, "配对完成");
+                        }
+                        SessionEventInfo::Stats { .. } => {}
+                    }
+                }
+                // §3.3:新出现的配对请求(主机端人工确认)。
+                for request in service.take_new_pair_requests() {
+                    emit(&app, PAIR_REQUEST, request);
                 }
                 if let Some(stats) = service.session_stats() {
                     emit(&app, SESSION_STATS, stats);

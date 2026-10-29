@@ -74,49 +74,51 @@ private val LightColors = lightColorScheme(
 
 /**
  * 字体规格（产品方案 §16：标题 18/600、正文 14/400、辅助 12/400、PIN 26/700）。
+ *
+ * @param scale 字号缩放系数；TV（10 英尺观看距离）用更大的字号。
  */
-private val BeamTypography = Typography(
+private fun beamTypography(scale: Float): Typography = Typography(
     titleLarge = TextStyle(
         fontFamily = FontFamily.SansSerif,
         fontWeight = FontWeight.SemiBold,
-        fontSize = BeamTokens.TitleSize.value.sp,
-        lineHeight = 24.sp,
+        fontSize = (BeamTokens.TitleSize.value * scale).sp,
+        lineHeight = (24f * scale).sp,
     ),
     titleMedium = TextStyle(
         fontFamily = FontFamily.SansSerif,
         fontWeight = FontWeight.SemiBold,
-        fontSize = 16.sp,
-        lineHeight = 22.sp,
+        fontSize = (16f * scale).sp,
+        lineHeight = (22f * scale).sp,
     ),
     bodyLarge = TextStyle(
         fontFamily = FontFamily.SansSerif,
         fontWeight = FontWeight.Normal,
-        fontSize = BeamTokens.BodySize.value.sp,
-        lineHeight = 20.sp,
+        fontSize = (BeamTokens.BodySize.value * scale).sp,
+        lineHeight = (20f * scale).sp,
     ),
     bodyMedium = TextStyle(
         fontFamily = FontFamily.SansSerif,
         fontWeight = FontWeight.Normal,
-        fontSize = BeamTokens.BodySize.value.sp,
-        lineHeight = 20.sp,
+        fontSize = (BeamTokens.BodySize.value * scale).sp,
+        lineHeight = (20f * scale).sp,
     ),
     bodySmall = TextStyle(
         fontFamily = FontFamily.SansSerif,
         fontWeight = FontWeight.Normal,
-        fontSize = BeamTokens.CaptionSize.value.sp,
-        lineHeight = 16.sp,
+        fontSize = (BeamTokens.CaptionSize.value * scale).sp,
+        lineHeight = (16f * scale).sp,
     ),
     labelLarge = TextStyle(
         fontFamily = FontFamily.SansSerif,
         fontWeight = FontWeight.Medium,
-        fontSize = BeamTokens.BodySize.value.sp,
-        lineHeight = 20.sp,
+        fontSize = (BeamTokens.BodySize.value * scale).sp,
+        lineHeight = (20f * scale).sp,
     ),
     labelSmall = TextStyle(
         fontFamily = FontFamily.SansSerif,
         fontWeight = FontWeight.Normal,
-        fontSize = BeamTokens.CaptionSize.value.sp,
-        lineHeight = 16.sp,
+        fontSize = (BeamTokens.CaptionSize.value * scale).sp,
+        lineHeight = (16f * scale).sp,
     ),
 )
 
@@ -124,15 +126,20 @@ private val BeamTypography = Typography(
  * 应用主题。
  *
  * @param darkTheme 是否深色；默认跟随系统。
+ * @param tv 是否 TV 形态：TV 观看距离更远，字号整体放大（§3.12 `:app` 职责含「TV 入口」）。
  */
 @Composable
 fun BeamTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
+    tv: Boolean = false,
     content: @Composable () -> Unit,
 ) {
     MaterialTheme(
         colorScheme = if (darkTheme) DarkColors else LightColors,
-        typography = BeamTypography,
+        typography = beamTypography(if (tv) TV_TYPE_SCALE else 1f),
         content = content,
     )
 }
+
+/** TV 形态的字号缩放系数（10 英尺观看距离）。 */
+private const val TV_TYPE_SCALE: Float = 1.4f

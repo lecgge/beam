@@ -26,7 +26,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use beam_client::ClientConfig;
+use beam_client::{
+    ClientConfig, ClientRuntime, FrameStatsHandle, NetTransport, ReadyTransportFactory,
+};
 use beam_config::{
     default_config_path, default_trust_path, load_file_layer, merge, save_file_layer, validate,
     AudioMode, ConfigLayers, ResolvedConfig, TomlFileStore,
@@ -38,29 +40,36 @@ use beam_pair::{
     PeerPerms, TrustStore, TrustedPeer,
 };
 use beam_proto::CodecKind;
-use beam_session::{PeerAddr, SessionState, StateMachine};
-use futures::StreamExt;
+use beam_session::{PeerAddr, SessionEvent, SessionHandle, SessionState, StateMachine, Transport};
+use futures::{FutureExt, StreamExt};
 use serde::{Deserialize, Serialize};
 
 use crate::dto::*;
 use crate::error::*;
-use crate::service::{BeamService, TransportOutcome};
+use crate::service::{BeamService, SessionEventInfo, TransportOutcome};
 
 /// §3.3 `pin_ttl=120s`。
 const PIN_TTL: Duration = Duration::from_secs(120);
+
+/// §3.4 的 mDNS TXT 不带平台字段,发现到的主机平台无从得知。
+///
+/// 诚实标注为「未知平台」,而不是编一个。
+const PLATFORM_UNKNOWN: &str = "未知平台";
 
 /// 桌面端自有、beam-config 未建模的设置项。
 ///
 /// 持久化在 `%APPDATA%/Beam/desktop.json`;
 /// beam-config 负责 §3.14 的通用配置面(画质 / 网络 / 输入 / 音频)。
+///
+/// **只保留桌面端真正的专属项**(窗口行为 / 主题语言 / 端口等)。
+/// 抓屏后端(`capture_backend`)、切片(`slices`)、SFE(`sfe`)已经是
+/// `beam-config` 的规范配置项(§3.5 / §3.6),桌面端不再自持一份,
+/// 一律读写 `ResolvedConfig`,避免两处真值。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct DesktopSettings {
     pub match_client_resolution: bool,
     pub preset: String,
-    pub capture_backend: String,
-    pub slices: u32,
-    pub sfe: bool,
     pub port: u16,
     pub allow_tailscale: bool,
     pub language: String,
@@ -75,9 +84,6 @@ impl Default for DesktopSettings {
         Self {
             match_client_resolution: true,
             preset: "low_latency_p1".to_string(),
-            capture_backend: "auto".to_string(),
-            slices: 1,
-            sfe: false,
             port: 47990,
             allow_tailscale: false,
             language: "zh-CN".to_string(),
@@ -125,7 +131,18 @@ struct CrateInner {
     state: StateMachine,
     advertiser: Option<Advertiser>,
     session: Option<SessionInfo>,
+    /// 真实客户端会话句柄(§3.9):`disconnect` 用它结束会话。
+    client_session: Option<SessionHandle>,
+    /// 帧通道统计句柄(§3.2):E2004(帧过期丢弃)的计数从这里读。
+    frame_stats: Option<FrameStatsHandle>,
+    /// 待确认的配对请求(§3.3)。
     pending_pairs: Vec<PairRequest>,
+    /// 自上次上报以来**新出现**的待确认请求(供 `pair://request` 事件)。
+    new_pairs: Vec<PairRequest>,
+    /// 已被用户拒绝的主机指纹:发现列表不再把它们当成待确认请求。
+    rejected_pairs: Vec<String>,
+    /// 正在采集完整指纹的主机 id(避免重复发起探测)。
+    probing: Vec<String>,
     /// 当前配对码(含真实二维码载荷与轮换时间,§3.3)。
     pairing: PairingCode,
     config_path: Option<PathBuf>,
@@ -139,6 +156,8 @@ pub struct CrateService {
     discovery: Arc<DiscoveryState>,
     /// 传输层握手结果槽:后台任务写入,事件层取走。
     transport_outcome: Arc<Mutex<Option<TransportOutcome>>>,
+    /// 真实客户端会话的事件槽:后台会话任务写入,事件层取走。
+    session_events: Arc<Mutex<Vec<SessionEventInfo>>>,
 }
 
 impl CrateService {
@@ -235,7 +254,12 @@ impl CrateService {
                 state: StateMachine::new(),
                 advertiser: None,
                 session: None,
+                client_session: None,
+                frame_stats: None,
                 pending_pairs: Vec::new(),
+                new_pairs: Vec::new(),
+                rejected_pairs: Vec::new(),
+                probing: Vec::new(),
                 pairing,
                 config_path,
                 trust_path,
@@ -243,6 +267,7 @@ impl CrateService {
             })),
             discovery,
             transport_outcome: Arc::new(Mutex::new(None)),
+            session_events: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -398,7 +423,7 @@ impl BeamService for CrateService {
             platform: pending
                 .as_ref()
                 .map(|r| r.platform.clone())
-                .unwrap_or_else(|| "未知平台".to_string()),
+                .unwrap_or_else(|| PLATFORM_UNKNOWN.to_string()),
             paired_at: now_ms() / 1000,
             perms: PeerPerms {
                 view: true,
@@ -407,9 +432,10 @@ impl BeamService for CrateService {
                 gamepad: true,
             },
         };
-        // 真实写入信任库(§3.3)。
+        // 真实写入信任库(§3.3):人工确认之后才写(产品方案 §8)。
         inner.trust.upsert(peer);
         inner.pending_pairs.retain(|r| r.id != id);
+        inner.new_pairs.retain(|r| r.id != id);
         self.save_trust(&inner)?;
         Ok(device_from_peer(
             inner.trust.peers().last().expect("刚刚 upsert 过"),
@@ -420,11 +446,17 @@ impl BeamService for CrateService {
         let mut inner = self.lock();
         let before = inner.pending_pairs.len();
         inner.pending_pairs.retain(|r| r.id != id);
+        inner.new_pairs.retain(|r| r.id != id);
         if inner.pending_pairs.len() == before {
             return Err(BeamError::invalid(
                 E_DEVICE_NOT_FOUND,
                 format!("配对请求 {id} 不存在"),
             ));
+        }
+        // 记住被拒绝的主机,发现列表不再把它当成待确认请求。
+        let prefix: String = id.chars().take(8).collect();
+        if !prefix.is_empty() && !inner.rejected_pairs.contains(&prefix) {
+            inner.rejected_pairs.push(prefix);
         }
         Ok(())
     }
@@ -503,10 +535,19 @@ impl BeamService for CrateService {
 
         // §3.9 / §3.14:客户端运行参数来自解析后的配置。
         let client_cfg = ClientConfig::from_resolved(&inner.resolved);
+        // §3.4 的 mDNS 只广播指纹前 8 位;信任库里存的是完整指纹,
+        // 这里用前缀匹配出完整指纹交给会话层(真正的校验由 TLS 信任库完成)。
+        let discovered_prefix = host.fingerprint.to_lowercase();
+        let trusted_fingerprint = inner
+            .trust
+            .peers()
+            .iter()
+            .find(|p| p.fp.short_hex().to_lowercase() == discovered_prefix)
+            .map(|p| p.fp.to_hex());
         let peer = PeerAddr {
             host: host.address.to_string(),
             port: host.port,
-            fingerprint: Some(host.fingerprint.clone()),
+            fingerprint: Some(trusted_fingerprint.unwrap_or(host.fingerprint.clone())),
         };
         let _ = client_cfg.peer.clone();
 
@@ -536,16 +577,12 @@ impl BeamService for CrateService {
         };
         inner.session = Some(session.clone());
 
-        // 真实 QUIC 握手放到后台跑(§3.2),结果通过事件层回报。
+        // §3.9:真实客户端会话(控制面 + 帧面)。建链在后台进行,
+        // 结果通过会话事件与传输结果回报给事件层。
         let identity = inner.identity.clone();
         let trust = inner.trust.clone();
-        self.spawn_transport(
-            inner.resolved.clone(),
-            peer,
-            host.name.clone(),
-            identity,
-            trust,
-        );
+        let resolved = inner.resolved.clone();
+        self.spawn_client_session(resolved, peer, host.name.clone(), identity, trust);
 
         Ok(session)
     }
@@ -556,6 +593,11 @@ impl BeamService for CrateService {
             .session
             .take()
             .ok_or_else(|| BeamError::invalid(E_SESSION_INVALID_STATE, "当前没有串流会话"))?;
+        // 结束真实会话(§3.9):会话层会发 `Bye` 再释放传输。
+        if let Some(handle) = inner.client_session.take() {
+            handle.stop();
+        }
+        inner.frame_stats = None;
         let _ = inner.state.transition(SessionState::Closed);
         Ok(session)
     }
@@ -567,6 +609,12 @@ impl BeamService for CrateService {
     fn session_stats(&self) -> Option<SessionStats> {
         let inner = self.lock();
         let session = inner.session.clone()?;
+        // 帧通道统计(§3.2):被丢弃的帧数就是 E2004 的计数。
+        let dropped_frames = inner
+            .frame_stats
+            .as_ref()
+            .map(|handle| handle.snapshot().frames_expired as u32)
+            .unwrap_or(0);
         // 真实会话还没跑起来(平台后端是占位实现),这里给的是协商后的配置,
         // 不冒充实测统计:各项耗时字段留 0,由前端按「未采集」显示。
         Some(SessionStats {
@@ -583,7 +631,7 @@ impl BeamService for CrateService {
             loss_pct: 0.0,
             fec_recovered_pct: 0.0,
             jitter_ms: 0.0,
-            dropped_frames: 0,
+            dropped_frames,
             resolution: session.resolution.clone(),
             codec: session.codec.clone(),
             timestamp_ms: now_ms(),
@@ -628,6 +676,17 @@ impl BeamService for CrateService {
         if let Some(encoder) = &patch.encoder {
             layers.file.video.encoder = Some(encoder.clone());
         }
+        // 规范配置项(§3.5 / §3.6):抓屏后端 / 切片 / SFE 一律写进 beam-config,
+        // 桌面端不再维护平行的一份。
+        if let Some(backend) = &patch.capture_backend {
+            layers.file.capture.backend = Some(backend.clone());
+        }
+        if let Some(slices) = patch.slices {
+            layers.file.video.slices = Some(slices);
+        }
+        if let Some(sfe) = patch.sfe {
+            layers.file.video.sfe = Some(sfe);
+        }
         if let Some(ratio) = patch.fec_ratio {
             layers.file.network.fec_ratio = Some(ratio);
         }
@@ -669,15 +728,6 @@ impl BeamService for CrateService {
         }
         if let Some(v) = patch.preset {
             ui.preset = v;
-        }
-        if let Some(v) = patch.capture_backend {
-            ui.capture_backend = v;
-        }
-        if let Some(v) = patch.slices {
-            ui.slices = v;
-        }
-        if let Some(v) = patch.sfe {
-            ui.sfe = v;
         }
         if let Some(v) = patch.port {
             ui.port = v;
@@ -791,6 +841,57 @@ impl BeamService for CrateService {
             .unwrap_or_else(|e| e.into_inner())
             .take()
     }
+
+    fn take_session_events(&self) -> Vec<SessionEventInfo> {
+        let events: Vec<SessionEventInfo> = self
+            .session_events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+            .collect();
+        if events.is_empty() {
+            return events;
+        }
+        // 会话状态同步到桌面端状态机(§3.9)。
+        {
+            let mut inner = self.lock();
+            for event in &events {
+                match event {
+                    SessionEventInfo::Negotiated {
+                        width,
+                        height,
+                        fps,
+                        codec,
+                    } => {
+                        let _ = inner.state.transition(SessionState::Streaming);
+                        if let Some(session) = inner.session.as_mut() {
+                            session.state = "streaming".to_string();
+                            session.resolution = resolution_label(*width, *height);
+                            session.fps = *fps;
+                            session.codec = codec.clone();
+                        }
+                    }
+                    SessionEventInfo::Error { .. } | SessionEventInfo::Closed => {
+                        let _ = inner.state.transition(SessionState::Error);
+                        if let Some(session) = inner.session.as_mut() {
+                            session.state = "error".to_string();
+                        }
+                    }
+                    SessionEventInfo::Paired { .. } | SessionEventInfo::Stats { .. } => {}
+                }
+            }
+            inner.host.revision += 1;
+            inner.host.updated_at_ms = now_ms();
+        }
+        events
+    }
+
+    fn take_new_pair_requests(&self) -> Vec<PairRequest> {
+        // 发现到的主机 → 待确认的配对请求(§3.3)。
+        self.collect_pair_candidates();
+        let mut inner = self.lock();
+        std::mem::take(&mut inner.new_pairs)
+    }
 }
 
 impl CrateService {
@@ -807,12 +908,17 @@ impl CrateService {
         })
     }
 
-    /// 在后台做真实 QUIC 握手(§3.2),结果回报给事件层。
+    /// 在后台建立**真实的客户端会话**(§3.9)。
+    ///
+    /// 流程:
+    /// 1. 真实 QUIC/TLS 握手(§3.2)——证书由信任库校验(§3.3);
+    /// 2. 客户端传输打开控制双向流与输入单向流(§5);
+    /// 3. `beam-client` 组装客户端会话:能力协商、帧回调、输入回传;
+    /// 4. 循环推进会话,把会话事件回报给事件层。
     ///
     /// **不阻塞调用方**:`connect` 是同步 command(跑在 UI 线程上),
-    /// 在这里等握手会把界面卡住最多 `CONNECT_TIMEOUT`;
-    /// 握手结果改由 `take_transport_outcome` 交给事件层上报。
-    fn spawn_transport(
+    /// 在这里等握手会把界面卡住最多 `CONNECT_TIMEOUT`。
+    fn spawn_client_session(
         &self,
         resolved: ResolvedConfig,
         peer: PeerAddr,
@@ -832,50 +938,212 @@ impl CrateService {
         // 后台任务需要拿到共享状态:用 Arc 克隆,不借用 `self`(否则 future 不满足 'static)。
         let outcome_slot = self.transport_outcome.clone();
         let inner = self.inner.clone();
+        let events_slot = self.session_events.clone();
 
         // QUIC 需要 tokio reactor:在 tauri 的异步运行时里跑,
         // 不用 futures::executor::block_on(它不驱动 reactor,会挂住)。
         tauri::async_runtime::spawn(async move {
             let request = crate::transport::TransportRequest {
                 addr,
-                resolved,
+                resolved: resolved.clone(),
                 identity,
                 trust,
-                server_name: host_name.clone(),
             };
-            let outcome = match crate::transport::connect_peer(request).await {
-                Ok(()) => TransportOutcome {
-                    ok: true,
-                    code: None,
-                    message: format!("已连接到 {host_name}"),
-                    host_name,
-                },
-                Err(err) => TransportOutcome {
-                    ok: false,
-                    code: Some(err.code.clone()),
-                    message: err.message.clone(),
-                    host_name,
-                },
+            let conn = match crate::transport::connect_peer(request).await {
+                Ok(conn) => conn,
+                Err(err) => {
+                    report_transport_failure(&inner, &outcome_slot, &err, &host_name);
+                    return;
+                }
             };
 
-            // 握手结果写回会话状态(§3.9)。
+            // §5 客户端传输:开控制双向流 + 输入单向流。
+            let transport = match NetTransport::connect(conn).await {
+                Ok(t) => t,
+                Err(e) => {
+                    let err =
+                        BeamError::retryable(E_CONNECTION_TIMEOUT, format!("建立会话失败: {e}"));
+                    report_transport_failure(&inner, &outcome_slot, &err, &host_name);
+                    return;
+                }
+            };
+            // 帧通道统计句柄:上层据此知道有多少帧被丢弃(E2004)。
+            let frame_stats = transport.frame_stats_handle();
+            let factory = ReadyTransportFactory::new(Box::new(transport) as Box<dyn Transport>);
+
+            let runtime = ClientRuntime::new(ClientConfig::from_resolved(&resolved));
+            let handle = runtime.connect_default(peer, Some(Box::new(factory)));
             {
                 let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
-                if outcome.ok {
-                    let _ = guard.state.transition(SessionState::Streaming);
-                    if let Some(session) = guard.session.as_mut() {
-                        session.state = "streaming".to_string();
-                    }
-                } else {
-                    let _ = guard.state.transition(SessionState::Error);
-                    if let Some(session) = guard.session.as_mut() {
-                        session.state = "error".to_string();
-                    }
-                }
+                guard.client_session = Some(handle.clone());
+                guard.frame_stats = Some(frame_stats);
             }
 
-            *outcome_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
+            // 推进会话:取控制消息 / 取帧 / 回报统计。
+            let mut events = handle.events();
+            loop {
+                let _ = handle.pump();
+                while let Some(Some(event)) = events.next().now_or_never() {
+                    if let Some(info) = translate_session_event(event) {
+                        events_slot
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push(info);
+                    }
+                }
+                if handle.is_stopped() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
         });
+    }
+
+    /// 把发现到的、尚未信任的主机变成「待确认的配对请求」(§3.3 / 产品方案 §8)。
+    ///
+    /// 产品方案第 102 行把「人工确认后才写入信任库」列为不可省略的安全环节:
+    /// 这里产生的只是**待确认**请求,用户点「同意」才写库。
+    ///
+    /// §3.4 的 mDNS 只广播指纹前 8 位,而信任库需要完整指纹(§3.3),
+    /// 因此这里先在后台做一次指纹采集(握手必然失败,只取对端证书里的指纹),
+    /// 采集到并且与 mDNS 广播的前缀一致,才生成真正的待确认请求。
+    fn collect_pair_candidates(&self) {
+        let (hosts, resolved, identity) = {
+            let inner = self.lock();
+            (
+                self.discovery.snapshot(),
+                inner.resolved.clone(),
+                inner.identity.clone(),
+            )
+        };
+        let trusted: Vec<String> = self
+            .lock()
+            .trust
+            .peers()
+            .iter()
+            .map(|p| p.fp.short_hex().to_lowercase())
+            .collect();
+
+        for host in hosts {
+            let prefix = host.fingerprint.to_lowercase();
+            if prefix.is_empty() || trusted.contains(&prefix) {
+                continue;
+            }
+            {
+                let inner = self.lock();
+                if inner
+                    .pending_pairs
+                    .iter()
+                    .any(|r| r.id.starts_with(&prefix))
+                    || inner.rejected_pairs.contains(&prefix)
+                    || inner.probing.contains(&host.id)
+                {
+                    continue;
+                }
+            }
+            // 标记为正在采集,避免重复发起。
+            self.lock().probing.push(host.id.clone());
+            self.spawn_fingerprint_probe(host, prefix, resolved.clone(), identity.clone());
+        }
+    }
+
+    /// 后台采集某台主机的完整证书指纹,并据此生成待确认的配对请求。
+    fn spawn_fingerprint_probe(
+        &self,
+        host: beam_discovery::DiscoveredHost,
+        expected_prefix: String,
+        resolved: ResolvedConfig,
+        identity: Identity,
+    ) {
+        let inner = self.inner.clone();
+        tauri::async_runtime::spawn(async move {
+            let request = crate::transport::ProbeRequest {
+                addr: SocketAddr::new(std::net::IpAddr::V4(host.address), host.port),
+                resolved,
+                identity,
+            };
+            let fp = match crate::transport::probe_fingerprint(request).await {
+                Ok(fp) => fp,
+                Err(err) => {
+                    tracing::warn!(
+                        code = %err.code,
+                        host = %host.name,
+                        "采集主机证书指纹失败,无法生成配对请求"
+                    );
+                    let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
+                    guard.probing.retain(|id| id != &host.id);
+                    return;
+                }
+            };
+            if fp.short_hex().to_lowercase() != expected_prefix {
+                // mDNS 广播的指纹与证书对不上:不生成请求(宁可少一条,不能错一条)。
+                tracing::warn!(
+                    host = %host.name,
+                    expected = %expected_prefix,
+                    actual = %fp.short_hex(),
+                    "mDNS 指纹与证书指纹不一致,放弃生成配对请求"
+                );
+                let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
+                guard.probing.retain(|id| id != &host.id);
+                return;
+            }
+            let request = PairRequest {
+                id: fp.to_hex(),
+                name: host.name.clone(),
+                platform: PLATFORM_UNKNOWN.to_string(),
+                address: host.address.to_string(),
+                fingerprint: fp.to_hex(),
+                requested_at_ms: now_ms(),
+            };
+            let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard.probing.retain(|id| id != &host.id);
+            guard.pending_pairs.push(request.clone());
+            guard.new_pairs.push(request);
+        });
+    }
+}
+
+/// 建链失败:把结果回报给事件层,并把会话置为错误态。
+fn report_transport_failure(
+    inner: &Arc<Mutex<CrateInner>>,
+    outcome_slot: &Arc<Mutex<Option<TransportOutcome>>>,
+    err: &BeamError,
+    host_name: &str,
+) {
+    {
+        let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = guard.state.transition(SessionState::Error);
+        if let Some(session) = guard.session.as_mut() {
+            session.state = "error".to_string();
+        }
+    }
+    *outcome_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(TransportOutcome {
+        ok: false,
+        code: Some(err.code.clone()),
+        message: err.message.clone(),
+        host_name: host_name.to_string(),
+    });
+}
+
+/// 把 `beam-session` 的事件翻译成桌面端这一层的事件。
+fn translate_session_event(event: SessionEvent) -> Option<SessionEventInfo> {
+    match event {
+        SessionEvent::Negotiated { config } => Some(SessionEventInfo::Negotiated {
+            width: config.width,
+            height: config.height,
+            fps: config.fps,
+            codec: codec_name(config.codec),
+        }),
+        SessionEvent::Paired { fingerprint } => Some(SessionEventInfo::Paired { fingerprint }),
+        SessionEvent::Stats(report) => Some(SessionEventInfo::Stats {
+            fps: report.fps,
+            bitrate_bps: report.bitrate_bps,
+        }),
+        SessionEvent::Error { code, retryable } => {
+            Some(SessionEventInfo::Error { code, retryable })
+        }
+        SessionEvent::Closed => Some(SessionEventInfo::Closed),
+        SessionEvent::StateChanged { .. } => None,
     }
 }
 
@@ -987,9 +1255,10 @@ fn settings_from(resolved: &ResolvedConfig, ui: &DesktopSettings) -> Settings {
         encoder: resolved.video.encoder.clone(),
         codec: resolved.video.codec.clone(),
         preset: ui.preset.clone(),
-        capture_backend: ui.capture_backend.clone(),
-        slices: ui.slices,
-        sfe: ui.sfe,
+        // 规范配置项(§3.5 / §3.6):真值在 beam-config,桌面端只做展示。
+        capture_backend: resolved.capture.backend.clone(),
+        slices: resolved.video.slices.unwrap_or(0),
+        sfe: resolved.video.sfe,
         fec_ratio: resolved.network.fec_ratio,
         port: ui.port,
         allow_tailscale: ui.allow_tailscale,

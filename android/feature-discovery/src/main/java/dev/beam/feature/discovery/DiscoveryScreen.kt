@@ -22,9 +22,17 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusEvent
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import dev.beam.core.data.ui.BeamTokens
@@ -120,13 +128,33 @@ private fun HostCard(
     onClick: () -> Unit,
     onPair: () -> Unit,
 ) {
+    // TV（10 英尺）用 D-pad 导航：焦点可见、中心键激活。
+    val focused = remember { mutableStateOf(false) }
     Surface(
         modifier = Modifier
             .fillMaxWidth()
+            .onKeyEvent { event ->
+                if (event.type == KeyEventType.KeyDown &&
+                    (event.key == Key.DirectionCenter || event.key == Key.Enter)
+                ) {
+                    onClick()
+                    true
+                } else {
+                    false
+                }
+            }
+            .onFocusEvent { state -> focused.value = state.isFocused }
             .clickable(onClick = onClick),
         shape = RoundedCornerShape(BeamTokens.RadiusCard),
         color = MaterialTheme.colorScheme.surface,
-        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+        border = androidx.compose.foundation.BorderStroke(
+            width = if (focused.value) 2.dp else 1.dp,
+            color = if (focused.value) {
+                MaterialTheme.colorScheme.primary
+            } else {
+                MaterialTheme.colorScheme.outline
+            },
+        ),
     ) {
         Column(modifier = Modifier.padding(BeamTokens.SpacingLg)) {
             Row(verticalAlignment = Alignment.CenterVertically) {

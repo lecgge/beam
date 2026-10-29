@@ -7,10 +7,8 @@ import androidx.lifecycle.viewModelScope
 import dev.beam.core.audio.AudioPlayer
 import dev.beam.core.audio.LowLatencyAudioPlayer
 import dev.beam.core.data.SettingsRepo
-import dev.beam.core.decoder.DecoderCodec
-import dev.beam.core.decoder.MediaCodecVideoDecoder
 import dev.beam.core.decoder.VideoDecoder
-import dev.beam.core.decoder.VideoFormat
+import dev.beam.core.decoder.VideoDecoderFactory
 import dev.beam.core.net.BeamClient
 import dev.beam.core.net.FrameSink
 import dev.beam.core.net.InputEvent
@@ -73,6 +71,8 @@ data class StreamUiState(
     val codecLabel: String = "",
     /** 客户端丢弃的帧数（本地统计）。 */
     val droppedFrames: Long = 0L,
+    /** 输入回传失败的原因（null 表示正常）。 */
+    val inputError: String? = null,
 )
 
 /**
@@ -85,7 +85,9 @@ data class StreamUiState(
 class StreamViewModel(
     private val client: BeamClient,
     private val settingsRepo: SettingsRepo,
-    private val decoderFactory: () -> VideoDecoder = { MediaCodecVideoDecoder() },
+    private val decoderFactory: (String) -> VideoDecoder = { codec ->
+        VideoDecoderFactory.create(codec)
+    },
     private val audioPlayerFactory: () -> AudioPlayer = { LowLatencyAudioPlayer() },
 ) : ViewModel() {
 
@@ -128,7 +130,7 @@ class StreamViewModel(
                 )
             }
 
-            val activeDecoder = decoderFactory()
+            val activeDecoder = decoderFactory(cfg.codec.name)
             decoder = activeDecoder
             val sink = StreamSink(activeDecoder)
             val opened = runCatching { client.connect(peer, cfg, sink) }.getOrElse { cause ->
@@ -197,9 +199,20 @@ class StreamViewModel(
     /** 展开/收起悬浮工具栏。 */
     fun toggleToolbar() = _state.update { it.copy(toolbarVisible = !it.toolbarVisible) }
 
-    /** 上行输入事件。 */
+    /**
+     * 上行输入事件。
+     *
+     * 输入由 `:core-input` 映射成 `InputEvent`，这里只负责**回传**（`:core-net` 传输）。
+     *
+     * 回传失败时**如实记录**到 [StreamUiState.inputError]，不静默吞掉：
+     * 例如 Rust 导出面尚未提供 `send_input` 时，UI 会明确显示原因。
+     */
     fun sendInput(event: InputEvent) {
-        runCatching { session?.sendInput(event) }
+        val current = session ?: return
+        runCatching { current.sendInput(event) }
+            .onFailure { cause ->
+                _state.update { it.copy(inputError = cause.message ?: "输入回传失败") }
+            }
     }
 
     /** 请求主机发送新的 IDR。 */
@@ -229,6 +242,13 @@ class StreamViewModel(
                         it.copy(phase = StreamPhase.ERROR, message = event.message)
                     }
                     is SessionEvent.StateChanged -> Unit
+                    // 能力协商完成：用主机的最终配置刷新展示信息。
+                    is SessionEvent.Negotiated -> _state.update {
+                        it.copy(
+                            resolutionLabel = "${event.cfg.width}x${event.cfg.height}",
+                            codecLabel = event.cfg.codec.name,
+                        )
+                    }
                 }
             }
         }
@@ -242,16 +262,14 @@ class StreamViewModel(
         }
     }
 
-    private fun videoFormat(cfg: StreamCfg): VideoFormat = VideoFormat(
-        width = cfg.width,
-        height = cfg.height,
-        codec = when (cfg.codec) {
-            dev.beam.core.net.VideoCodec.H264 -> DecoderCodec.H264
-            dev.beam.core.net.VideoCodec.HEVC -> DecoderCodec.HEVC
-            dev.beam.core.net.VideoCodec.AV1 -> DecoderCodec.AV1
-        },
-        fps = cfg.fps,
-    )
+    /**
+     * 流格式由 `:core-decoder` 的工厂构造。
+     *
+     * 本模块**不接触解码细节**（§3.12 禁止项）：
+     * 只把编码名交给 `:core-decoder`，由它决定 `DecoderCodec` 与 `VideoFormat`。
+     */
+    private fun videoFormat(cfg: StreamCfg) =
+        VideoDecoderFactory.format(cfg.width, cfg.height, cfg.codec.name, cfg.fps)
 
     /**
      * 帧接收端：把 Rust 回调的帧交给解码器。
@@ -300,7 +318,9 @@ class StreamViewModel(
         fun factory(
             client: BeamClient,
             settingsRepo: SettingsRepo,
-            decoderFactory: () -> VideoDecoder = { MediaCodecVideoDecoder() },
+            decoderFactory: (String) -> VideoDecoder = { codec ->
+                VideoDecoderFactory.create(codec)
+            },
             audioPlayerFactory: () -> AudioPlayer = { LowLatencyAudioPlayer() },
         ): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")

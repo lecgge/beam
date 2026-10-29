@@ -39,6 +39,46 @@ pub struct TransportOutcome {
     pub host_name: String,
 }
 
+/// 真实客户端会话产生的事件(§3.9)。
+///
+/// `crates/` 适配器把 `beam-session` 的事件翻译成这一层,
+/// 桌面端据此更新会话状态并广播 §3.11 的事件。
+#[derive(Debug, Clone)]
+pub enum SessionEventInfo {
+    /// 能力协商完成,进入串流态(§3.1)。
+    Negotiated {
+        /// 协商出的分辨率宽。
+        width: u16,
+        /// 协商出的分辨率高。
+        height: u16,
+        /// 协商出的帧率。
+        fps: u32,
+        /// 协商出的编码格式。
+        codec: String,
+    },
+    /// 配对完成(§3.3)。
+    Paired {
+        /// 对端证书指纹。
+        fingerprint: String,
+    },
+    /// 会话统计(§3.11 `session://stats`)。
+    Stats {
+        /// 对端上报的帧率。
+        fps: u32,
+        /// 对端上报的码率,bit/s。
+        bitrate_bps: u32,
+    },
+    /// 会话出错(§6:UI 只按 code 显示文案)。
+    Error {
+        /// 错误码。
+        code: u16,
+        /// 是否值得重试。
+        retryable: bool,
+    },
+    /// 会话结束。
+    Closed,
+}
+
 /// 与 crate 无关的服务接口。接线接缝。
 pub trait BeamService: Send + Sync + 'static {
     /// 当前后端实现来源。
@@ -91,6 +131,22 @@ pub trait BeamService: Send + Sync + 'static {
     ///
     /// 桩实现永远返回 `None`;`crates/` 适配器在 QUIC 握手结束后回报。
     fn take_transport_outcome(&self) -> Option<TransportOutcome>;
+
+    /// 取走真实客户端会话产生的事件(§3.9),取走即清空。
+    ///
+    /// 桩实现没有真实会话,恒返回空。
+    fn take_session_events(&self) -> Vec<SessionEventInfo> {
+        Vec::new()
+    }
+
+    /// 取走**新出现**的配对请求(§3.3 主机端人工确认)。
+    ///
+    /// 与 [`BeamService::pair_requests`] 的区别:后者是全量快照,
+    /// 本方法只返回「自上次调用以来新出现」的请求,供事件层发 `pair://request`。
+    /// 桩实现恒返回空。
+    fn take_new_pair_requests(&self) -> Vec<PairRequest> {
+        Vec::new()
+    }
 }
 
 // ---------------------------------------------------------------------------

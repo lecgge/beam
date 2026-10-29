@@ -142,6 +142,7 @@ fun BeamNavHost(
                     viewModel.disconnect()
                     navController.popBackStack()
                 },
+                onInput = viewModel::sendInput,
             )
         }
 

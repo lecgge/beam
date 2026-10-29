@@ -3,6 +3,8 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.kotlin.android)
+    // §3.12 `:core-input` 提供 Compose 输入采集 Modifier，需要 Compose 编译器插件。
+    alias(libs.plugins.kotlin.compose)
 }
 
 android {
@@ -17,6 +19,10 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    buildFeatures {
+        compose = true
     }
 
     testOptions {
@@ -36,6 +42,11 @@ dependencies {
 
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.android)
+
+    // 输入采集 Modifier（触控 pointerInput / 按键 onKeyEvent / 手柄 generic motion）。
+    implementation(platform(libs.androidx.compose.bom))
+    implementation(libs.androidx.compose.ui)
+    implementation(libs.androidx.compose.ui.graphics)
 
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)

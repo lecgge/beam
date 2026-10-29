@@ -21,6 +21,9 @@ coroutines = "1.10.2"
 cameraX = "1.4.2"
 mlkitBarcode = "17.3.0"
 junit = "4.13.2"
+# uniffi 生成的 Kotlin 绑定依赖 JNA（com.sun.jna.*）。
+# 必须是 >= 5.9.0：uniffi 0.29 的绑定用到 com.sun.jna.internal.Cleaner。
+jna = "5.14.0"
 
 [libraries]
 androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "coreKtx" }
@@ -56,6 +59,9 @@ kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-t
 
 # 反射装配 uniffi 生成的 record 时需要(callBy 按参数名装配)。
 kotlin-reflect = { module = "org.jetbrains.kotlin:kotlin-reflect", version.ref = "kotlin" }
+
+# uniffi 生成的 Kotlin 绑定运行时依赖 JNA。
+jna = { module = "net.java.dev.jna:jna", version.ref = "jna" }
 
 junit = { module = "junit:junit", version.ref = "junit" }
 

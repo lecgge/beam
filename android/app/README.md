@@ -11,7 +11,8 @@
   `docs/prototype/interactive.html` 的 Android 端一一对应；
 * 主题：深浅两套 Material3 配色（产品方案 §16）；
 * 权限：按需申请（相机 / 通知 / 前台服务 / 局域网）；
-* TV 入口：`TvMainActivity`（`LEANBACK_LAUNCHER`），与手机端共用同一套 UI。
+* TV 入口：`TvMainActivity`（`LEANBACK_LAUNCHER`），与手机端共用同一套导航，
+  但走 **TV 形态**（字号放大 + D-pad 焦点导航）。
 
 ## 目录
 
@@ -67,7 +68,11 @@ AppContainer
 * `AndroidManifest.xml` 中 `android.software.leanback` 声明为 `required="false"`，
   同一个 APK 同时支持手机与 TV；
 * `TvMainActivity` 带 `LEANBACK_LAUNCHER` 分类，横屏；
-* TV 端遥控器输入映射在 `:core-input` 的 `DpadDirection`。
+* **与手机 UI 的区分**：`TvMainActivity` 传 `BeamRoot(isTv = true)`：
+  * `BeamTheme(tv = true)` 把字号整体放大 **1.4 倍**（10 英尺观看距离）；
+  * 主机列表项（`:feature-discovery` 的 `HostCard`）支持 **D-pad 焦点导航**：
+    获得焦点时描边加粗并换成主色，**中心键 / Enter 激活**；
+* TV 端遥控器输入映射在 `:core-input` 的 `AndroidKeys` / `DpadDirection`。
 
 ## 构建
 

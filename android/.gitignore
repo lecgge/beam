@@ -13,6 +13,14 @@ local.properties
 *.dex
 .cxx/
 
+# uniffi 生成物（构建产物，不入库）
+# 1) cargo-ndk 交叉编译出来的原生库
+core-net/src/main/jniLibs/**/*.so
+# 2) uniffi-bindgen 生成的 Kotlin 绑定
+core-net/src/main/java/dev/beam/core/net/uniffi/
+# 3) 构建目录里的生成物
+core-net/build/generated/uniffi/
+
 # IDE
 .idea/
 *.iml

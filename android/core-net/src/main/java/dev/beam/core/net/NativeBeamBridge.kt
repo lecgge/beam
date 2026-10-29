@@ -75,7 +75,14 @@ class NativeBeamBridge private constructor(
     override suspend fun pairQr(payload: String): PairResult {
         val method = findMethod(nativeClient.javaClass, PAIR_QR_NAMES, 1)
             ?: throw BeamNativeUnavailableException(missingMessage("pairQr"))
-        return mapPairResult(Reflect.invoke(nativeClient, method, payload))
+        return try {
+            // uniffi 提升 Result 后：成功直接返回 `Peer` 记录，失败抛 `BeamException`。
+            NativeMappings.mapPairResult(Reflect.invoke(nativeClient, method, payload))
+        } catch (e: BeamNativeUnavailableException) {
+            throw e
+        } catch (e: Throwable) {
+            NativeMappings.pairFailure(e)
+        }
     }
 
     override suspend fun pairPin(peer: Peer, pin: String): PairResult {
@@ -83,7 +90,14 @@ class NativeBeamBridge private constructor(
         val method = findMethod(nativeClient.javaClass, PAIR_PIN_NAMES, 2)
             ?: throw BeamNativeUnavailableException(missingMessage("pairPin"))
         val peerRecord = Reflect.buildRecord(peerClass, peerFields(peer))
-        return mapPairResult(Reflect.invoke(nativeClient, method, peerRecord, pin))
+        return try {
+            // uniffi 提升 Result 后：成功返回 `Unit`，失败抛 `BeamException`。
+            NativeMappings.mapPairResult(Reflect.invoke(nativeClient, method, peerRecord, pin), peer)
+        } catch (e: BeamNativeUnavailableException) {
+            throw e
+        } catch (e: Throwable) {
+            NativeMappings.pairFailure(e)
+        }
     }
 
     // ------------------------------------------------------------------ 会话
@@ -145,7 +159,12 @@ class NativeBeamBridge private constructor(
                 }
                 "onEvent", "on_event" -> {
                     val raw = args?.firstOrNull() ?: return@newProxy null
-                    mapSessionEvent(raw)?.let { bus.events.tryEmit(it) }
+                    val mapped = NativeMappings.mapSessionEvent(raw, bus.negotiatedCfg)
+                    if (mapped is SessionEvent.Negotiated) {
+                        // 记住协商结果：Rust 的统计里没有分辨率与目标帧率。
+                        bus.negotiatedCfg = mapped.cfg
+                    }
+                    mapped?.let { bus.events.tryEmit(it) }
                 }
                 "onAudio", "on_audio" -> {
                     val data = args?.getOrNull(0)
@@ -205,96 +224,8 @@ class NativeBeamBridge private constructor(
         }
     }
 
-    private fun mapDiscoveredHost(raw: Any): DiscoveredHost {
-        val peer = Peer(
-            id = Reflect.readString(raw, "id") ?: "",
-            name = Reflect.readString(raw, "name") ?: "",
-            address = Reflect.readString(raw, "address", "addr") ?: "",
-            fingerprint = Reflect.readString(raw, "fingerprint", "fp") ?: "",
-            platform = Reflect.readString(raw, "platform") ?: Peer.PLATFORM_WINDOWS,
-        )
-        val lastSeen = Reflect.readLong(raw, "lastSeenMs", "last_seen_ms") ?: 0L
-        return DiscoveredHost(peer, DiscoverySource.MDNS, lastSeen)
-    }
-
-    private fun mapPairResult(raw: Any?): PairResult {
-        if (raw == null) {
-            return PairResult.Failure(code = "E3001", message = "配对失败：uniffi 返回空结果", retryable = true)
-        }
-        val successFlag = Reflect.readBoolean(raw, "success")
-        val simpleName = raw.javaClass.simpleName
-        val isSuccess = successFlag == true ||
-            (successFlag == null && (simpleName == "Ok" || simpleName == "Success"))
-        if (isSuccess) {
-            val peerRaw = Reflect.read(raw, "peer", "value", "peerRecord")
-            val peer = if (peerRaw != null) {
-                Peer(
-                    id = Reflect.readString(peerRaw, "id") ?: "",
-                    name = Reflect.readString(peerRaw, "name") ?: "",
-                    address = Reflect.readString(peerRaw, "address", "addr") ?: "",
-                    fingerprint = Reflect.readString(peerRaw, "fingerprint", "fp") ?: "",
-                    platform = Reflect.readString(peerRaw, "platform") ?: Peer.PLATFORM_WINDOWS,
-                    trusted = true,
-                )
-            } else {
-                Peer("", "", "", "")
-            }
-            return PairResult.Success(peer)
-        }
-        return PairResult.Failure(
-            code = Reflect.readString(raw, "code") ?: "E3001",
-            message = Reflect.readString(raw, "message") ?: "配对失败",
-            retryable = Reflect.readBoolean(raw, "retryable") ?: false,
-            attemptsLeft = Reflect.readInt(raw, "attemptsLeft", "attempts_left"),
-            lockoutMs = Reflect.readLong(raw, "lockoutMs", "lockout_ms"),
-        )
-    }
-
-    private fun mapSessionEvent(raw: Any): SessionEvent? {
-        val variant = raw.javaClass.simpleName
-        return when (variant) {
-            "Stats" -> SessionEvent.Stats(mapStats(raw))
-            "Reconnecting" -> SessionEvent.Reconnecting(
-                attempt = Reflect.readInt(raw, "attempt") ?: 0,
-                reason = Reflect.readString(raw, "reason"),
-                elapsedMs = Reflect.readLong(raw, "elapsedMs", "elapsed_ms") ?: 0L,
-            )
-            "Disconnected" -> SessionEvent.Disconnected(
-                code = Reflect.readString(raw, "code") ?: "E9000",
-                message = Reflect.readString(raw, "message") ?: "连接已断开",
-                retryable = Reflect.readBoolean(raw, "retryable") ?: false,
-            )
-            "StateChanged" -> {
-                val next = Reflect.readEnumName(raw, "state") ?: return null
-                val previous = Reflect.readEnumName(raw, "previous") ?: next
-                SessionEvent.StateChanged(
-                    state = parseSessionState(next),
-                    previous = parseSessionState(previous),
-                )
-            }
-            "Error" -> SessionEvent.Error(
-                code = Reflect.readString(raw, "code") ?: "E9000",
-                message = Reflect.readString(raw, "message") ?: "会话错误",
-                retryable = Reflect.readBoolean(raw, "retryable") ?: false,
-            )
-            else -> null
-        }
-    }
-
-    private fun mapStats(raw: Any): SessionStats = SessionStats(
-        fps = Reflect.readDouble(raw, "fps") ?: 0.0,
-        bitrateKbps = Reflect.readDouble(raw, "bitrateKbps", "bitrate_kbps") ?: 0.0,
-        rttMs = Reflect.readDouble(raw, "rttMs", "rtt_ms") ?: 0.0,
-        lossPercent = Reflect.readDouble(raw, "lossPercent", "loss_percent") ?: 0.0,
-        fecRecoveredPercent = Reflect.readDouble(raw, "fecRecoveredPercent", "fec_recovered_percent") ?: 0.0,
-        decodeMs = Reflect.readDouble(raw, "decodeMs", "decode_ms") ?: 0.0,
-        renderMs = Reflect.readDouble(raw, "renderMs", "render_ms") ?: 0.0,
-        e2eMs = Reflect.readDouble(raw, "e2eMs", "e2e_ms") ?: 0.0,
-        droppedFrames = Reflect.readLong(raw, "droppedFrames", "dropped_frames") ?: 0L,
-        width = Reflect.readInt(raw, "width") ?: 0,
-        height = Reflect.readInt(raw, "height") ?: 0,
-        fpsTarget = Reflect.readInt(raw, "fpsTarget", "fps_target") ?: 0,
-    )
+    private fun mapDiscoveredHost(raw: Any): DiscoveredHost =
+        NativeMappings.mapDiscoveredHost(raw, DiscoverySource.MDNS)
 
     private fun peerFields(peer: Peer): Map<String, Any?> = mapOf(
         "id" to peer.id,
@@ -375,6 +306,7 @@ class NativeBeamBridge private constructor(
         val PEER_CLASSES: List<String> = candidates("Peer")
         val CFG_CLASSES: List<String> = candidates("StreamCfg")
         val CONFIG_CLASSES: List<String> = candidates("BeamClientConfig")
+        val INPUT_EVENT_CLASSES: List<String> = candidates("InputEvent")
 
         private val BROWSE_NAMES = listOf("browse", "startBrowsing")
         private val STOP_BROWSE_NAMES = listOf("stopBrowsing", "unbrowse")
@@ -489,6 +421,15 @@ internal class SessionBus {
         extraBufferCapacity = 64,
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
+
+    /**
+     * 最近一次能力协商的结果。
+     *
+     * Rust 的 `SessionStats` 不带分辨率与目标帧率，这两个字段只能由协商结果补齐。
+     * 回调线程写、统计映射线程读，用 `@Volatile` 保证可见性。
+     */
+    @Volatile
+    var negotiatedCfg: StreamCfg? = null
 }
 
 /**
@@ -512,6 +453,18 @@ private class NativeSession(
     override val audioPackets: Flow<AudioPacket> = bus.audio.asSharedFlow()
 
     init {
+        // 初始状态直接问一次原生句柄（`Session::state()`），
+        // 避免「已连接但还没收到 StateChanged 事件」这段时间里状态显示为 IDLE。
+        Reflect.findMethodByName(handle.javaClass, "state")?.let { method ->
+            runCatching { Reflect.invoke(handle, method) }
+                .getOrNull()
+                ?.let { raw ->
+                    Reflect.readEnumName(raw, "name")
+                        ?: Reflect.readString(raw, "name")
+                        ?: raw.toString()
+                }
+                ?.let { name -> _state.value = NativeMappings.parseSessionState(name) }
+        }
         // 状态机迁移由事件驱动（§3.9 / §4.1）。
         scope.launch {
             bus.events.collect { event ->
@@ -523,35 +476,46 @@ private class NativeSession(
     }
 
     override fun sendInput(event: InputEvent) {
-        val inputClass = Reflect.findClass(
-            listOf(
-                "dev.beam.core.net.uniffi.InputEvent",
-                "uniffi.beam_ffi.InputEvent",
-                "dev.beam.ffi.InputEvent",
-            ),
-        ) ?: throw BeamNativeUnavailableException("未找到 uniffi 生成的 InputEvent 类")
+        // Rust 侧导出面目前**没有**输入通道（`crates/beam-ffi/src/ffi.rs` 的
+        // `Session` 只导出 `state()` / `stop()`）。这里如实报错，不做假实现。
         val method = Reflect.findMethodByName(handle.javaClass, "sendInput")
-            ?: throw BeamNativeUnavailableException("uniffi 会话句柄缺少 sendInput 方法")
+            ?: Reflect.findMethodByName(handle.javaClass, "send_input")
+            ?: throw BeamNativeUnavailableException(
+                "uniffi 会话句柄缺少 sendInput 方法。" +
+                    "Rust 侧需要在 crates/beam-ffi/src/ffi.rs 的 Session 导出面补 " +
+                    "`pub fn send_input(&self, event: InputEvent)`，" +
+                    "并导出与 beam_proto::InputEvent 对齐的 InputEvent 枚举。",
+            )
+        val inputClass = Reflect.findClass(NativeBeamBridge.INPUT_EVENT_CLASSES)
+            ?: throw BeamNativeUnavailableException(
+                "未找到 uniffi 生成的 InputEvent 类（尝试过：${NativeBeamBridge.INPUT_EVENT_CLASSES.joinToString()}）。" +
+                    "Rust 侧需要用 #[derive(uniffi::Enum)] 导出 InputEvent。",
+            )
         Reflect.invoke(handle, method, buildInputEvent(inputClass, event))
     }
 
     override fun requestIdr() {
         val method = Reflect.findMethodByName(handle.javaClass, "requestIdr")
             ?: Reflect.findMethodByName(handle.javaClass, "request_idr")
-            ?: throw BeamNativeUnavailableException("uniffi 会话句柄缺少 requestIdr 方法")
+            ?: throw BeamNativeUnavailableException(
+                "uniffi 会话句柄缺少 requestIdr 方法。" +
+                    "Rust 侧需要在 crates/beam-ffi/src/ffi.rs 的 Session 导出面补 " +
+                    "`pub fn request_idr(&self)`。",
+            )
         Reflect.invoke(handle, method)
     }
 
     override fun update(cfg: StreamCfg) {
-        val cfgClass = Reflect.findClass(
-            listOf(
-                "dev.beam.core.net.uniffi.StreamCfg",
-                "uniffi.beam_ffi.StreamCfg",
-                "dev.beam.ffi.StreamCfg",
-            ),
-        ) ?: throw BeamNativeUnavailableException("未找到 uniffi 生成的 StreamCfg 类")
+        val cfgClass = Reflect.findClass(NativeBeamBridge.CFG_CLASSES)
+            ?: throw BeamNativeUnavailableException(
+                "未找到 uniffi 生成的 StreamCfg 类（尝试过：${NativeBeamBridge.CFG_CLASSES.joinToString()}）。",
+            )
         val method = Reflect.findMethodByName(handle.javaClass, "update")
-            ?: throw BeamNativeUnavailableException("uniffi 会话句柄缺少 update 方法")
+            ?: throw BeamNativeUnavailableException(
+                "uniffi 会话句柄缺少 update 方法。" +
+                    "Rust 侧需要在 crates/beam-ffi/src/ffi.rs 的 Session 导出面补 " +
+                    "`pub fn update(&self, cfg: StreamCfg)`。",
+            )
         Reflect.invoke(
             handle,
             method,
@@ -582,50 +546,84 @@ private class NativeSession(
         }
     }
 
+    /**
+     * 把 Kotlin 侧的 [InputEvent] 装配成 uniffi 生成的输入事件对象。
+     *
+     * ## 形状容忍
+     *
+     * Rust 侧协议模型（`beam_proto::InputEvent`）与 Kotlin 侧模型的字段并不完全一致：
+     * - 变体名可能不同（Kotlin 的 `MouseWheel` 对应 Rust 的 `Scroll`）；
+     * - 按键动作的表达不同（Kotlin 的 `pressed: Boolean` 对应 Rust 的 `action: KeyAction`）；
+     * - 字段命名风格不同（uniffi Kotlin 生成 camelCase，Rust 侧是 snake_case）。
+     *
+     * 因此这里对**变体名**给候选列表、对**字段名**同时提供 camelCase 与 snake_case，
+     * 由 [Reflect.buildRecord] 按参数名挑真正存在的那一个。
+     */
     private fun buildInputEvent(cls: Class<*>, event: InputEvent): Any {
         val kClass = cls.kotlin
-        val variantName = when (event) {
-            is InputEvent.Key -> "Key"
-            is InputEvent.MouseMove -> "MouseMove"
-            is InputEvent.MouseButton -> "MouseButton"
-            is InputEvent.MouseWheel -> "MouseWheel"
-            is InputEvent.Touch -> "Touch"
-            is InputEvent.GamepadButton -> "GamepadButton"
-            is InputEvent.GamepadAxis -> "GamepadAxis"
+        val variantCandidates = when (event) {
+            is InputEvent.Key -> listOf("Key")
+            is InputEvent.MouseMove -> listOf("MouseMove")
+            is InputEvent.MouseButton -> listOf("MouseButton")
+            is InputEvent.MouseWheel -> listOf("MouseWheel", "Scroll")
+            is InputEvent.Touch -> listOf("Touch")
+            is InputEvent.GamepadButton -> listOf("GamepadButton")
+            is InputEvent.GamepadAxis -> listOf("GamepadAxis")
         }
-        val variantClass = kClass.sealedSubclasses.firstOrNull { it.simpleName == variantName }?.java
-            ?: throw BeamNativeException("uniffi InputEvent 缺少变体 $variantName")
-        val values = mutableMapOf<String, Any?>("timestampUs" to event.timestampUs)
+        val variantClass = variantCandidates
+            .asSequence()
+            .mapNotNull { name -> kClass.sealedSubclasses.firstOrNull { it.simpleName == name } }
+            .firstOrNull()
+            ?.java
+            ?: throw BeamNativeException(
+                "uniffi InputEvent 缺少变体 ${variantCandidates.joinToString(" / ")}",
+            )
+
+        val values = mutableMapOf<String, Any?>()
+        values["timestampUs"] = event.timestampUs
+        values["timestamp_us"] = event.timestampUs
         when (event) {
             is InputEvent.Key -> {
                 values["code"] = event.code
                 values["pressed"] = event.pressed
                 values["repeat"] = event.repeat
+                values["action"] = if (event.pressed) "Down" else "Up"
             }
             is InputEvent.MouseMove -> {
                 values["dx"] = event.dx
                 values["dy"] = event.dy
+                values["x"] = event.dx
+                values["y"] = event.dy
             }
             is InputEvent.MouseButton -> {
                 values["button"] = event.button
                 values["pressed"] = event.pressed
+                values["action"] = if (event.pressed) "Press" else "Release"
             }
             is InputEvent.MouseWheel -> {
                 values["deltaX"] = event.deltaX
                 values["deltaY"] = event.deltaY
+                values["delta_x"] = event.deltaX
+                values["delta_y"] = event.deltaY
+                values["dx"] = event.deltaX
+                values["dy"] = event.deltaY
             }
             is InputEvent.Touch -> {
                 values["pointerId"] = event.pointerId
+                values["pointer_id"] = event.pointerId
                 values["action"] = event.action.name
                 values["x"] = event.x
                 values["y"] = event.y
                 values["normalizedX"] = event.normalizedX
                 values["normalizedY"] = event.normalizedY
+                values["normalized_x"] = event.normalizedX
+                values["normalized_y"] = event.normalizedY
                 values["pressure"] = event.pressure
             }
             is InputEvent.GamepadButton -> {
                 values["button"] = event.button.name
                 values["pressed"] = event.pressed
+                values["action"] = if (event.pressed) "Press" else "Release"
             }
             is InputEvent.GamepadAxis -> {
                 values["axis"] = event.axis.name
@@ -635,7 +633,3 @@ private class NativeSession(
         return Reflect.buildRecord(variantClass, values)
     }
 }
-
-private fun parseSessionState(name: String): SessionState = runCatching {
-    SessionState.valueOf(name.uppercase())
-}.getOrDefault(SessionState.IDLE)
