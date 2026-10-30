@@ -19,6 +19,7 @@
 //! - [`ClientSession::connect`]：客户端会话。
 //! - [`ClientSession::connect_with_control`]：带配对 / 码率控制依赖的客户端会话。
 //! - [`SessionHandle`]：`events()` / `update()` / `stop()` / `set_clock()` / `agreed()`.
+//! - [`NetTransport`]：QUIC 会话传输（§5 三通道），L3 的 client / ffi 共用同一份实现。
 //!
 //! ## 控制通道（§4.1 / §5）
 //!
@@ -36,9 +37,18 @@
 //! - **输入注入归 beam-host**：输入事件走 §5 的输入单向流（客户端 → 主机），
 //!   接收与注入都在 beam-host（§3.8 的输入任务）。本 crate **不持有**输入注入器
 //!   （[`HostDeps`] 里没有 `input` 字段），因此只有一处会注入输入。
-//! - **依赖**：proto（数据与协议）、pair（§3.3 配对）、futures（事件流）。
+//! - **依赖**：proto（数据与协议）、pair（§3.3 配对）、net（§3.2 QUIC 传输）、
+//!   futures（事件流）、tokio（QUIC 的 IO 原语）。
 //! - **被依赖**：host、client、ffi。
 //! - **禁止**：依赖 capture / encode / decode / render 等平台 crate（§4）。
+//!
+//! ## 为什么 `net` 依赖落在本层（§4）
+//!
+//! §4 的依赖图允许 `session → net`（L2 → L1），并规定 **L3 之间不得横向依赖**。
+//! QUIC 传输适配器（[`NetTransport`]）实现的是**会话层自己的 trait**
+//! （[`Transport`] / [`ControlChannel`]），因此放在本层：
+//! L3 的 `beam-client` 与 `beam-ffi` 复用**同一份**分帧 / 传输实现，
+//! 不会出现第二份线上格式（§5 的分帧唯一真值来源仍是 `beam_net::framing`）。
 //!
 //! ## 事件
 //!
@@ -85,6 +95,7 @@ pub mod error;
 pub mod event;
 pub mod handle;
 pub mod host;
+pub mod net_transport;
 pub mod state;
 
 pub use client::{ClientControlDeps, ClientDeps, ClientSession, ClientSessionConfig, PeerAddr};
@@ -100,4 +111,5 @@ pub use event::{
 };
 pub use handle::{SessionEventStream, SessionHandle, SessionTimeouts};
 pub use host::{HostControlDeps, HostDeps, HostSession, HostSessionConfig};
+pub use net_transport::{FrameChannelStats, FrameStatsHandle, NetTransport};
 pub use state::{SessionState, StateMachine, ALL_STATES};

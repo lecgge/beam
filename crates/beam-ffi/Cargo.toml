@@ -26,6 +26,9 @@ beam-pair = { workspace = true }
 beam-discovery = { workspace = true }
 bytes = { workspace = true }
 futures = { workspace = true }
+# §3.12「Rust tokio 运行时在 so 内」：客户端持有一个常驻 tokio 运行时，
+# QUIC 建链（`NetEndpoint::connect`）与地址解析都要它。
+tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 uniffi = { workspace = true, optional = true }

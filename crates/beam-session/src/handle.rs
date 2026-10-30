@@ -302,6 +302,15 @@ impl SessionHandle {
         self.inner.stopped.load(Ordering::Relaxed)
     }
 
+    /// 当前是否只剩**这一份**句柄（其他持有者都已经放开）。
+    ///
+    /// 后台线程用它感知「调用方是否已经丢弃了会话」：
+    /// 会话句柄被放开后，会话与注入的回调对象都该被释放，
+    /// 后台线程因此可以自行退出，不必等会话超时。
+    pub fn is_last_handle(&self) -> bool {
+        Arc::strong_count(&self.inner) == 1
+    }
+
     pub(crate) fn inner(&self) -> &Arc<SessionInner> {
         &self.inner
     }

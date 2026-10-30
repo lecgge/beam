@@ -323,11 +323,13 @@ dependencies = [
 name = "beam-session"
 version = "0.1.0"
 dependencies = [
+ "beam-net",
  "beam-pair",
  "beam-proto",
  "bytes",
  "futures",
  "thiserror 2.0.21",
+ "tokio",
  "tracing",
 ]
 

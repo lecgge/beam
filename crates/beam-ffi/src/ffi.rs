@@ -35,10 +35,12 @@
 //!
 //! 1. **热路径 JNI DirectByteBuffer 未实现**：帧数据经 uniffi 的 `Vec<u8>` 传递，
 //!    每帧一次拷贝（[`FrameSink::on_frame`]）。设计见 crate 级文档「热路径」一节。
-//! 2. **`connect` 仍然丢弃 `cfg` 与 `sink`**：Rust 侧
-//!    `crates/beam-ffi/src/client.rs` 的 `connect` 仍是 `let _ = (cfg, sink);` 占位，
-//!    会话停留在 `Idle`，[`FrameSink`] 不会收到任何帧或事件。
-//! 3. **帧回调没有专用线程**：[`FrameSink::on_frame`] 目前由调用方线程同步触发。
+//! 2. **身份持久化与信任库写入未实现**：`beam-ffi` 每次 [`BeamClient::new`]
+//!    现场生成一份自签身份（不落盘），信任库恒为空——对端可信与否靠
+//!    `Peer::fingerprint` 固定的指纹判定。持久化必须由上层（Android `core-data`）
+//!    提供存储后端后接上。
+//! 3. **帧数据是编码码流**：解码在 Kotlin 侧做（§3.12「不负责：解码 / 渲染」），
+//!    `on_frame` 的 `data` 是 H.264 / HEVC / AV1 码流，`key` 是 IDR 标记。
 
 use std::sync::Arc;
 
@@ -416,6 +418,16 @@ pub enum SessionEvent {
     },
     /// 会话结束。
     Closed,
+    /// 丢帧（§3.2 **E2004**）。
+    ///
+    /// **不是**会话错误：它既不改变会话状态，也不代表会话结束——
+    /// 上层只把它当成一条统计 / 提示（§3.11）。
+    FramesDropped {
+        /// 本次丢弃的帧数。
+        count: u32,
+        /// 原因码（§3.2 **E2004** = `2004`）。
+        code: u16,
+    },
 }
 
 impl SessionEvent {
@@ -438,11 +450,15 @@ impl SessionEvent {
                 retryable,
             },
             CoreSessionEvent::Closed => Self::Closed,
+            CoreSessionEvent::FramesDropped { count, code } => Self::FramesDropped { count, code },
         }
     }
 }
 
 /// 帧 / 事件回调（§3.12 `callback interface FrameSink`）。
+///
+/// **帧数据是编码码流**（H.264 / HEVC / AV1）：解码在 Kotlin 侧做
+/// （§3.12「不负责：解码 / 渲染」），`key` 是 IDR 标记（§4.1 首帧必须是 IDR）。
 ///
 /// **当前是拷贝路径**：`data` 由 uniffi 的 `Vec<u8>` 传递，每帧一次拷贝；
 /// 热路径的 JNI DirectByteBuffer 直传尚未实现（见 crate 级文档「热路径」一节）。
@@ -508,9 +524,9 @@ impl BeamClient {
 
     /// 连接主机（§3.12 `connect(peer,cfg,sink: FrameSink)`）。
     ///
-    /// **已知缺口**：内部实现（`crates/beam-ffi/src/client.rs`）目前仍然丢弃
-    /// `cfg` 与 `sink`（`let _ = (cfg, sink);`），会话停留在 `Idle`，
-    /// [`FrameSink`] 不会收到任何帧或事件。本方法只负责把参数转成内部类型。
+    /// 这一步**真的建立会话**：真实 QUIC 连接 → 会话传输 → 客户端会话，
+    /// `cfg` 作为串流配置进入会话，帧与事件在专用线程上回调 [`FrameSink`]。
+    /// 失败时返回 [`BeamError::ConnectFailed`]（`E14003`）。
     pub fn connect(
         &self,
         peer: Peer,

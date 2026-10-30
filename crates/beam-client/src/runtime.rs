@@ -117,7 +117,8 @@ impl ClientRuntime {
     /// 因此桌面端（§4 的 L4 外壳）不应直接依赖 `beam-decode` / `beam-render`；
     /// 默认组合由本 crate 提供，桌面端只调用这一个入口。
     ///
-    /// 平台后端（`d3d11` feature）未启用时，解码会返回 `E10005`，
+    /// 平台后端（`d3d11` feature）未启用时，解码会返回 `E10004`
+    /// （`beam_decode::error::code::BACKEND_DISABLED`），
     /// 错误原样透传到会话事件，不会被伪装成成功。
     pub fn connect_default(
         &self,

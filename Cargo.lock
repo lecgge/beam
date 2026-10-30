@@ -231,6 +231,7 @@ dependencies = [
  "bytes",
  "futures",
  "thiserror",
+ "tokio",
  "tracing",
  "uniffi",
 ]
