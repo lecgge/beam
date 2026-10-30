@@ -121,6 +121,16 @@ class NativeMappingsTest {
     }
 
     @Test
+    fun `丢帧事件被映射且不是错误`() {
+        // §3.2 E2004：丢帧只作统计 / 提示，**不能**被映射成 Error。
+        val event = NativeMappings.mapSessionEvent(GenEvent.FramesDropped(count = 3u, code = 2004u))
+        assertTrue(event is SessionEvent.FramesDropped)
+        val dropped = event as SessionEvent.FramesDropped
+        assertEquals(3, dropped.count)
+        assertEquals("E2004", dropped.code)
+    }
+
+    @Test
     fun `错误事件被映射`() {
         val event = NativeMappings.mapSessionEvent(GenEvent.Error("E9002", "主机拒绝了连接", true))
         assertTrue(event is SessionEvent.Error)

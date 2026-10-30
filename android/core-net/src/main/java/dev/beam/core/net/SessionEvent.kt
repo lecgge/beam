@@ -41,6 +41,20 @@ sealed interface SessionEvent {
      */
     data class Negotiated(val cfg: StreamCfg) : SessionEvent
 
+    /**
+     * 丢帧（Rust 侧 `SessionEvent::FramesDropped { count, code }`）。
+     *
+     * §3.2 **E2004**：传输层丢弃了过期的帧。
+     *
+     * **不是**会话错误：既不结束会话，也不把会话打进 Error 态 ——
+     * 丢帧只作统计 / 提示（§3.11）。UI 应当显示「画面有丢帧」之类的提示，
+     * 而不是当成故障。
+     *
+     * @param count 本次丢弃的帧数。
+     * @param code 原因码（E2004 = 2004）。
+     */
+    data class FramesDropped(val count: Int, val code: String) : SessionEvent
+
     /** 统一错误出口；UI 只根据 [code] 显示文案。 */
     data class Error(
         val code: String,

@@ -32,6 +32,13 @@ sealed class SessionEvent {
 
     /** 会话结束。 */
     object Closed : SessionEvent()
+
+    /**
+     * 丢帧（§3.2 E2004）。
+     *
+     * 数值字段用无符号整型，与 uniffi 生成物同构（`count: UInt` / `code: UShort`）。
+     */
+    data class FramesDropped(val count: kotlin.UInt, val code: kotlin.UShort) : SessionEvent()
 }
 
 /** 会话状态。 */

@@ -89,6 +89,12 @@ internal object NativeMappings {
                 retryable = false,
             )
 
+            // 丢帧（§3.2 E2004）：**不是**会话错误，只作统计 / 提示。
+            "FramesDropped" -> SessionEvent.FramesDropped(
+                count = Reflect.readInt(raw, "count") ?: 0,
+                code = Reflect.readInt(raw, "code")?.let { "E$it" } ?: "E2004",
+            )
+
             // 以下两个变体当前 Rust 导出面没有，但保留映射以兼容后续扩展。
             "Reconnecting" -> SessionEvent.Reconnecting(
                 attempt = Reflect.readInt(raw, "attempt") ?: 0,

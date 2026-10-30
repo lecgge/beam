@@ -242,6 +242,15 @@ class StreamViewModel(
                         it.copy(phase = StreamPhase.ERROR, message = event.message)
                     }
                     is SessionEvent.StateChanged -> Unit
+                    // 丢帧（§3.2 E2004）：**不是**故障 —— 不改相位，只在统计里记一笔。
+                    is SessionEvent.FramesDropped -> _state.update {
+                        val stats = it.stats
+                        if (stats == null) {
+                            it
+                        } else {
+                            it.copy(stats = stats.copy(droppedFrames = stats.droppedFrames + event.count))
+                        }
+                    }
                     // 能力协商完成：用主机的最终配置刷新展示信息。
                     is SessionEvent.Negotiated -> _state.update {
                         it.copy(
