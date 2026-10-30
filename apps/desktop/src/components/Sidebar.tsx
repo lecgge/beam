@@ -10,6 +10,14 @@ const NAV_ITEMS: { key: PageKey; icon: string; labelKey: string }[] = [
   { key: 'settings', icon: '⚙️', labelKey: 'nav.settings' },
 ]
 
+/**
+ * 只在 Debug 构建存在的入口(§11:「隐藏入口仅 debug 构建存在」)。
+ *
+ * 性能统计后端在 release 下由 `perf-stats` feature 整体剔除,放一个常驻入口
+ * 只会让用户点进去撞到「仅 Debug 构建可用」,所以 release 直接不渲染。
+ */
+const DEBUG_ONLY_KEYS: PageKey[] = ['perf']
+
 /** 左侧导航。 */
 export function Sidebar({
   current,
@@ -20,6 +28,10 @@ export function Sidebar({
 }) {
   const { t } = useI18n()
 
+  const items = NAV_ITEMS.filter(
+    (item) => !DEBUG_ONLY_KEYS.includes(item.key) || import.meta.env.DEV,
+  )
+
   return (
     <aside className="sidebar">
       <div className="brand">
@@ -27,7 +39,7 @@ export function Sidebar({
         <span className="brand-name">{t('app.name')}</span>
       </div>
       <nav className="nav">
-        {NAV_ITEMS.map((item) => (
+        {items.map((item) => (
           <button
             key={item.key}
             type="button"

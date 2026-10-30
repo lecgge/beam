@@ -9,7 +9,7 @@ import { Spinner } from './Feedback'
  * 添加新设备面板:二维码 + PIN。
  *
  * PIN 由 §3.3 定义为 4 位、120 秒有效;到期后后端轮换并推送 `pair://code-rotated`,
- * 这里按剩余时间倒数展示。
+ * 这里按剩余时间倒数展示。PIN 用 §16 的 PIN 格子展示(26/700)。
  */
 export function PairingPanel({
   pairing,
@@ -48,7 +48,7 @@ export function PairingPanel({
         <QrCode text={pairing.qrPayload} />
       </div>
       <div className="pairing-pin" aria-label={t('home.pairTitle')}>
-        {pairing.code.split('').map((digit, index) => (
+        {pairing.code.split('').slice(0, 4).map((digit, index) => (
           <span key={`${digit}-${index}`} className="pin-digit">
             {digit}
           </span>

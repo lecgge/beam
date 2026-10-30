@@ -1,3 +1,5 @@
+import { useI18n } from '../i18n'
+
 /** 指标小方块:性能统计页的帧率 / 码率 / CPU 等。 */
 export function StatTile({
   label,
@@ -34,6 +36,8 @@ export function Sparkline({
   /** 参考虚线的 y 值(例如一帧 16.7 ms)。 */
   dashedAt?: number
 }) {
+  const { t } = useI18n()
+
   if (values.length < 2) {
     return (
       <div className="sparkline empty" style={{ height }}>
@@ -63,7 +67,7 @@ export function Sparkline({
       preserveAspectRatio="none"
       style={{ height }}
       role="img"
-      aria-label="端到端延迟曲线"
+      aria-label={t('a11y.latencyChart')}
     >
       {dashedAt !== undefined ? (
         <line

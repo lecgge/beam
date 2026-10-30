@@ -4,7 +4,7 @@
 
 import { create } from 'zustand'
 
-export type ToastKind = 'info' | 'success' | 'error'
+export type ToastKind = 'info' | 'success' | 'warn' | 'error'
 
 export interface Toast {
   id: number

@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 
 import QRCode from 'qrcode'
 
+import { useI18n } from '../i18n'
+
 interface QrShape {
   path: string
   size: number
@@ -14,6 +16,7 @@ interface QrShape {
  * 由 `get_pairing_code` 返回,扫码后 Android 端发起 SPAKE2 PIN 交换。
  */
 export function QrCode({ text, size = 208 }: { text: string; size?: number }) {
+  const { t } = useI18n()
   const [shape, setShape] = useState<QrShape | null>(null)
 
   useEffect(() => {
@@ -60,7 +63,7 @@ export function QrCode({ text, size = 208 }: { text: string; size?: number }) {
       viewBox={`0 0 ${shape.size} ${shape.size}`}
       shapeRendering="crispEdges"
       role="img"
-      aria-label="配对二维码"
+      aria-label={t('a11y.pairingQr')}
     >
       <rect x="0" y="0" width={shape.size} height={shape.size} fill="#ffffff" />
       <path d={shape.path} fill="#000000" />

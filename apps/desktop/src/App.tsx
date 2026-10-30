@@ -102,8 +102,8 @@ function AppShell() {
     <div className="app">
       <Sidebar current={page} onNavigate={setPage} />
       <main className="app-main">
-        {page === 'home' ? <HomePage /> : null}
-        {page === 'devices' ? <DevicesPage /> : null}
+        {page === 'home' ? <HomePage onNavigate={setPage} /> : null}
+        {page === 'devices' ? <DevicesPage onNavigate={setPage} /> : null}
         {page === 'connect' ? <ConnectPage /> : null}
         {page === 'perf' ? <PerfPage /> : null}
         {page === 'settings' ? <SettingsPage /> : null}

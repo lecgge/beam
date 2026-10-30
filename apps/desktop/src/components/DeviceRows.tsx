@@ -1,4 +1,5 @@
 import type { Device, DiscoveredHost, PairRequest } from '../ipc/types'
+import { useI18n } from '../i18n'
 
 /** 按平台给一个设备图标。 */
 export function deviceIcon(platform: string): string {
@@ -20,16 +21,19 @@ export function DeviceRow({
   statusLabel?: string
   actions?: React.ReactNode
 }) {
+  const { t } = useI18n()
+
   return (
     <div className="device-row">
       <div className="device-icon">{deviceIcon(device.platform)}</div>
       <div className="device-main">
         <div className="device-title">
           <span className="device-name">{device.name}</span>
-          {device.streaming ? <span className="badge ok">串流中</span> : null}
+          {device.streaming ? <span className="badge ok">{t('devices.streaming')}</span> : null}
         </div>
         <div className="sub device-meta">
-          {device.platform} · 指纹 {device.fingerprint} · 配对于 {device.pairedAt}
+          {device.platform} · {t('devices.fingerprint', { fp: device.fingerprint })} ·{' '}
+          {t('devices.pairedAt', { date: device.pairedAt })}
         </div>
       </div>
       {statusLabel ? <div className={`device-status ${device.online ? 'ok' : ''}`}>{statusLabel}</div> : null}
@@ -46,6 +50,8 @@ export function HostRow({
   host: DiscoveredHost
   actions?: React.ReactNode
 }) {
+  const { t } = useI18n()
+
   return (
     <div className="device-row">
       <div className="device-icon">🖥</div>
@@ -53,7 +59,7 @@ export function HostRow({
         <div className="device-title">
           <span className="device-name">{host.name}</span>
           <span className={`badge ${host.trusted ? 'ok' : 'muted'}`}>
-            {host.trusted ? '已配对' : '未配对'}
+            {host.trusted ? t('connect.trusted') : t('connect.untrusted')}
           </span>
         </div>
         <div className="sub device-meta">
@@ -74,16 +80,18 @@ export function PairRequestRow({
   request: PairRequest
   actions?: React.ReactNode
 }) {
+  const { t } = useI18n()
+
   return (
     <div className="device-row">
       <div className="device-icon">{deviceIcon(request.platform)}</div>
       <div className="device-main">
         <div className="device-title">
           <span className="device-name">{request.name}</span>
-          <span className="badge warn">请求配对</span>
+          <span className="badge warn">{t('devices.requestPair')}</span>
         </div>
         <div className="sub device-meta">
-          {request.platform} · {request.address} · 指纹 {request.fingerprint}
+          {request.platform} · {request.address} · {t('devices.fingerprint', { fp: request.fingerprint })}
         </div>
       </div>
       {actions ? <div className="device-actions">{actions}</div> : null}

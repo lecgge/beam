@@ -54,7 +54,15 @@ export function PerfPage() {
 
       {!available && !snapshot ? (
         <Card>
-          <EmptyState icon="🐞" title={t('perf.unavailable')} />
+          <EmptyState
+            icon="🐞"
+            title={t('perf.unavailable')}
+            action={
+              <button type="button" className="btn primary small" onClick={() => void load()}>
+                {t('perf.snapshot')}
+              </button>
+            }
+          />
         </Card>
       ) : null}
 
@@ -78,7 +86,7 @@ export function PerfPage() {
             <StatTile label={t('connect.bitrate')} value={tick.bitrateMbps.toFixed(1)} unit="Mbps" />
             <StatTile label="CPU" value={tick.cpuPct.toFixed(0)} unit="%" />
             <StatTile label="GPU" value={tick.gpuPct.toFixed(0)} unit="%" />
-            <StatTile label="内存" value={String(tick.memoryMb)} unit="MB" />
+            <StatTile label={t('perf.memory')} value={String(tick.memoryMb)} unit="MB" />
           </div>
         </Card>
       ) : null}

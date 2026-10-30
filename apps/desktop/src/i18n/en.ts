@@ -37,6 +37,22 @@ export const en: Dictionary = {
     demo: 'Demo data',
     errorFallback: 'The operation failed; please try again later',
     retryableHint: 'retryable',
+    close: 'Close',
+    // Remaining attempts left (§16 state row: error = red outline + attempts left).
+    attemptsLeft: '{count} attempt(s) left',
+    rescan: 'Search again',
+    // Language names follow the "endonym" convention: they stay the same
+    // in both dictionaries.
+    languageZhCn: '简体中文',
+    languageEn: 'English',
+  },
+  /**
+   * Accessibility labels (§16: every component and state must be readable
+   * by a screen reader).
+   */
+  a11y: {
+    latencyChart: 'End-to-end latency curve',
+    pairingQr: 'Pairing QR code',
   },
   home: {
     title: 'This PC is ready',
@@ -66,6 +82,8 @@ export const en: Dictionary = {
     waiting: 'Waiting for a device…',
     encoder: 'Encoder',
     codec: 'Codec',
+    auto: 'Auto',
+    off: 'Off',
   },
   devices: {
     title: 'Paired devices',
@@ -78,6 +96,8 @@ export const en: Dictionary = {
     wake: 'Wake',
     removeConfirm: 'Removing requires pairing again. Remove "{name}"?',
     removeDone: 'Removed {name}',
+    removeTitle: 'Remove paired device',
+    removeAction: 'Remove',
     online: 'Online',
     offline: 'Offline',
     streaming: 'Streaming',
@@ -122,6 +142,14 @@ export const en: Dictionary = {
     preview: 'Stream preview',
     previewHint:
       'Video frames never cross the IPC boundary; the picture is rendered on the client side. This view shows session state and statistics.',
+    overlayOff: 'The stats overlay is turned off in Settings',
+    lastFrameKept: 'Keeping the last frame',
+    pairTitle: 'Pair with host',
+    pairHint: 'Enter the 4-digit PIN shown on the host screen',
+    pairAction: 'Pair',
+    pairSubmit: 'Pair and connect',
+    pinInvalid: 'The PIN must be exactly 4 digits',
+    pinLocked: 'Too many attempts — locked for 60 seconds',
   },
   settings: {
     title: 'Settings',
@@ -168,6 +196,9 @@ export const en: Dictionary = {
     unavailable: 'Performance statistics are available in Debug builds only (§3.13 perf-stats gate)',
     samples: '{count} samples',
     live: 'Live',
+    memory: 'Memory',
+    openDebug: 'Open the Debug performance panel',
+    debugEntryHint: 'Visible in Debug builds only',
   },
   backend: {
     stub: 'Local stub',

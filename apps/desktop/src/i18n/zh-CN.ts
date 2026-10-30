@@ -43,6 +43,20 @@ export const zhCN = {
     demo: '演示数据',
     errorFallback: '操作失败,请稍后重试',
     retryableHint: '可重试',
+    close: '关闭',
+    // 剩余可试次数(§16 状态行:错误 = 描红 + 剩余次数)。
+    attemptsLeft: '剩余 {count} 次',
+    rescan: '重新搜索',
+    // 语言名按「语言自称」惯例固定,不随界面语言变化(两种语言下都是同一串)。
+    languageZhCn: '简体中文',
+    languageEn: 'English',
+  },
+  /**
+   * 无障碍标签(§16 的组件与状态都要能被读屏软件念出来)。
+   */
+  a11y: {
+    latencyChart: '端到端延迟曲线',
+    pairingQr: '配对二维码',
   },
   home: {
     title: '本机已就绪',
@@ -72,6 +86,8 @@ export const zhCN = {
     waiting: '等待设备…',
     encoder: '编码器',
     codec: '编码格式',
+    auto: '自动',
+    off: '关闭',
   },
   devices: {
     title: '已配对设备',
@@ -84,6 +100,8 @@ export const zhCN = {
     wake: '唤醒',
     removeConfirm: '移除后需要重新配对,确认移除「{name}」?',
     removeDone: '已移除 {name}',
+    removeTitle: '移除已配对设备',
+    removeAction: '确认移除',
     online: '在线',
     offline: '离线',
     streaming: '串流中',
@@ -127,6 +145,14 @@ export const zhCN = {
     bitrate: '码率',
     preview: '串流预览',
     previewHint: '视频帧不经 IPC,画面由客户端侧渲染;此处显示会话状态与统计。',
+    overlayOff: '统计浮层已在设置里关闭',
+    lastFrameKept: '保留最后一帧',
+    pairTitle: '配对主机',
+    pairHint: '请输入主机屏幕上显示的 4 位 PIN 码',
+    pairAction: '配对',
+    pairSubmit: '配对并连接',
+    pinInvalid: 'PIN 码必须是 4 位数字',
+    pinLocked: '尝试次数过多,已锁定 60 秒',
   },
   settings: {
     title: '设置',
@@ -173,6 +199,9 @@ export const zhCN = {
     unavailable: '性能统计仅在 Debug 构建可用(§3.13 perf-stats 门控)',
     samples: '采样 {count} 次',
     live: '实时',
+    memory: '内存',
+    openDebug: '打开 Debug 性能面板',
+    debugEntryHint: '仅 Debug 构建可见',
   },
   backend: {
     stub: '本地桩实现',

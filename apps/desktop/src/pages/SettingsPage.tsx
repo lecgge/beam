@@ -214,8 +214,8 @@ export function SettingsPage() {
                 void apply({ language: next }, t('settings.saved'))
               }}
             >
-              <option value="zh-CN">简体中文</option>
-              <option value="en">English</option>
+              <option value="zh-CN">{t('common.languageZhCn')}</option>
+              <option value="en">{t('common.languageEn')}</option>
             </select>
           </SettingRow>
           <SettingRow label={t('settings.theme')}>

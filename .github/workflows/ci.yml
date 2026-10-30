@@ -210,3 +210,8 @@ jobs:
       - name: src-tauri 主机模式检查（host-platform-wgc）
         shell: pwsh
         run: cargo check --features host-platform-wgc
+      # §16 设计规范门禁：桌面端的颜色 / 字号 / 间距 / 圆角 / 字体栈必须与产品方案
+      # 逐字一致，而且令牌必须真的被用上（防止「定义了却没落地」）。
+      - name: 设计规范令牌核对（§16）
+        shell: pwsh
+        run: python ../tools/ci/check-design-tokens/check_design_tokens.py
