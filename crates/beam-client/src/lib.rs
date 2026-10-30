@@ -62,7 +62,8 @@ pub use adapters::{
     ReadyTransportFactory,
 };
 pub use audio::{
-    default_audio_sink, AudioDatagramSink, AudioReceiveStats, AudioReceiveStatsHandle, AudioReceiver,
+    default_audio_sink, AudioDatagramSink, AudioReceiveStats, AudioReceiveStatsHandle,
+    AudioReceiver,
 };
 /// §3.7 的音频配置类型**转出**给上层（桌面端 L4 不能直接依赖 beam-audio L1，
 /// 见 §4 的分层规则）。
