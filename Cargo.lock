@@ -298,6 +298,7 @@ dependencies = [
  "beam-pair",
  "beam-proto",
  "bytes",
+ "criterion",
  "quinn",
  "reed-solomon-erasure",
  "rustls",

@@ -30,6 +30,14 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+# N-24 性能基准（criterion 已在 workspace 里，不动根 Cargo.toml）。
+criterion = { workspace = true }
+
+# §3.2 性能基准：分包+FEC 编码 / 重组+FEC 恢复。
+# criterion 自带 harness，必须关闭 libtest harness。
+[[bench]]
+name = "packetize"
+harness = false
 
 [lints]
 workspace = true

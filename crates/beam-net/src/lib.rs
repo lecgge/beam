@@ -41,20 +41,49 @@
 //! [`EncodedFrame`] / [`AssembledFrame`] 定义在协议层（beam-proto），
 //! 本 crate 通过 [`beam_proto`] 重导出，避免 §4 禁止的 L1 横向依赖。
 //!
-//! ## 线程模型
+//! ## 线程模型：与 §3.2 的描述不同（登记项，不是缺失）
 //!
-//! tokio 多线程运行时；发送路径专用任务，UDP GSO 批量发包；
-//! 接收重组单任务；FEC 解码在 rayon 或 blocking 线程（当前实现在接收任务内）。
+//! §3.2 写的是「tokio 多线程运行时；发送路径专用任务，UDP GSO 批量发包；
+//! 接收重组单任务；FEC 解码在 rayon 或 blocking 线程」。
+//! 本 crate 的**实际实现方式**与这段描述不同，理由如下（详见 [`endpoint`] 模块文档）：
+//!
+//! - **发送路径**：不额外开任务。`Conn::send_datagram` 是非阻塞的，数据报进入
+//!   quinn 连接自己的发送队列，由 quinn 的 per-connection driver 任务统一发包 ——
+//!   「发送路径专用任务」事实上由 quinn 提供，再叠一层只会多一次队列与一次拷贝；
+//! - **UDP GSO**：quinn 的 GSO 走 `quinn-udp` 的 Linux 路径（`UDP_SEGMENT`），
+//!   Windows 上没有对应能力，而本项目主机侧（capture / encode）本来就是 Windows 专有
+//!   ⇒ 目标平台上不适用；
+//! - **接收重组**：重组器是**同步纯状态机**（无 I/O、无 async），
+//!   [`VideoStream::try_next_frame`] 是**非阻塞轮询**原语，由会话层
+//!   （`beam-session`）的唯一取帧循环驱动 ⇒ 语义上仍是「单任务重组」；
+//! - **FEC 解码**：在接收任务内同步完成。`rayon` 不是 workspace 依赖（引入它违反
+//!   「不新增依赖」）；改用 `spawn_blocking` 需要把 `Reassembler` /
+//!   `try_next_frame` 改成 async，会溢出到 `beam-session` / `beam-host` 等
+//!   本 crate 无权修改的调用方。
+//!
+//! ⇒ 这三条登记为「**实现方式与文档描述不同**」。
+//! FEC 编解码的真实耗时见 `benches/packetize.rs`（§3.2 性能预算的验证基准）。
 //!
 //! ## 错误码
 //!
 //! `E2xxx`（§3.2）：`2001` 连接超时、`2002` 证书拒绝、`2003` datagram 不支持、
 //! `2004` 帧过期丢弃；另有同段扩展 `2005`–`2008`。
 //!
+//! - `E2002`（证书拒绝）有**真实产生路径**：对端证书被本端校验器拒绝时，
+//!   rustls 中止握手、quinn 以 `CRYPTO_ERROR` 结束连接，
+//!   [`endpoint`] 把它翻译成 `E2002`（而不是笼统的 `E2008`）。
+//!
 //! ## 配置
 //!
 //! [`NetConfig`]：`fec_ratio`（默认 0.2，>150 Mbps 降到 0.1）、`max_datagram=1200`、
 //! `jitter_frames`、`bitrate_min/max`。
+//!
+//! - `fec_ratio` 的**自适应规则真的进了发送路径**：[`Conn::current_fec_ratio`]
+//!   按 §5 的规则（码率 >150 Mbps → 0.1；丢包 >2% → 0.3）取值，
+//!   链路估计由 [`Conn::update_link_estimate`] 喂进来。
+//! - `max_datagram` 会被**连接实际能承载的数据报上限夹一刀**
+//!   （[`Conn::effective_max_datagram`]）：路径 MTU 掉下来时 1200 B 的数据报
+//!   直接发不出去，不夹一刀整条视频链路会彻底哑掉。
 //!
 //! ## feature 门控：`fec`
 //!
@@ -112,9 +141,31 @@
 //!
 //! 分包 + FEC 编码 T1 ≤0.8 ms、T2 ≤0.4 ms、T3 ≤0.3 ms；重组 + FEC 恢复同量级。
 //!
+//! **实测（`cargo bench -p beam-net --features fec --bench packetize`，
+//! Windows 11 x64 / rustc 1.86.0 / `bench` profile）当前是超标的**，
+//! 具体数字与原因分析见 `benches/packetize.rs` 的模块文档。
+//!
+//! ## 音频分包：尚未实现（登记项）
+//!
+//! §3.2 的职责写的是「视频/**音频** datagram 分包与重组」，§5 的帧头 `type`
+//! 也留了「1 音频」。本 crate 目前只有**视频**路径：
+//! [`packetize`] 产出的数据片 `type = 0`（视频）、冗余片 `type = 2`。
+//!
+//! 补齐音频路径需要一个 §5 级别的决定，因此**没有擅自实现**：
+//! 冗余片的 `type` 是 `2`，它无法表达「这组冗余属于音频帧」，
+//! 接收端因而无法区分「音频帧的冗余片」与「视频帧的冗余片」——
+//! 除非帧号空间也分开，或者帧头再腾出一个类型位。
+//! 这属于协议语义问题，留给上层裁决。
+//!
 //! ## 测试
 //!
 //! 丢包 / 乱序 / 抖动注入、FEC 恢复率、码率控制仿真。
+//!
+//! - **故障注入**：`tests/support/mod.rs` 是一个**确定性**的 UDP 故障注入代理
+//!   （丢包 / 乱序 / 抖动 / 坏包），`tests/fault_injection.rs` 用它做端到端断言；
+//! - **FEC 恢复率**：`tests/fec_recovery.rs` 按丢片数扫描恢复率，
+//!   实测「丢片数 ≤ 冗余片数 ⇒ 恢复率 100%；超出 ⇒ 0% 且绝不产出坏帧」；
+//! - **性能基准**：`benches/packetize.rs`（criterion）。
 
 #![forbid(unsafe_code)]
 

@@ -43,8 +43,34 @@
 //! ## 负载长度前缀（实现约定）
 //!
 //! RS 要求同组各片等长，因此重组后需要知道原始负载长度。
-//! 发送端在整帧负载最前面加 4 字节大端长度，接收端据此裁掉填充。
+//! 发送端在整帧负载最前面加一个 8 字节大端前缀，接收端据此裁掉填充：
+//!
+//! | 偏移 | 长度 | 含义 |
+//! |---|---|---|
+//! | 0 | 4 | 原始负载字节数 |
+//! | 4 | 4 | 本帧的 FEC 组数（总组数） |
+//!
 //! 数据片内容不会被 RS 改写，所以长度前缀可以被完整还原。
+//!
+//! ### 为什么「组数」也要放进前缀
+//!
+//! 帧头里只有一个数据报带 `LAST_SHARD` 标志（bit1），
+//! 而**这个数据报丢了，接收端就再也判断不出帧在哪里结束** ——
+//! 即使 FEC 的冗余足够、其余分片全都能恢复，整帧也会一直挂在重组器里，
+//! 最后按 `E2004` 丢弃。这是实测出来的真实缺陷（见 `tests/fec_recovery.rs`
+//! 的恢复率扫描：只丢 1 片时恢复率只有 94% 而不是 100%）。
+//!
+//! 把「总组数」放进负载前缀可以根治它：
+//!
+//! - 前缀在**数据片**里，因此它和其它数据片一样**受 FEC 保护**，
+//!   丢了也能恢复出来；
+//! - 它在**组 0 的第 0 片**里，而组 0 的第 0 片丢了也能靠 FEC 恢复，
+//!   于是「帧的跨度」在任何可恢复的丢包下都能拿到；
+//! - 帧头的位宽与语义**完全没有变化**（§5 的表一字未改），
+//!   `LAST_SHARD` 标志照旧发送、照旧被接收端用作快路径与交叉校验。
+//!
+//! 换句话说：**组边界不再依赖「某一个数据报有没有到」**，
+//! 与 D3 裁决的「组号在帧头 flags、组边界不依赖到达顺序」是同一个方向。
 //!
 //! ## 重组
 //!
@@ -62,8 +88,8 @@ use beam_proto::AssembledFrame;
 use crate::error::NetError;
 use crate::fec::{effective_parity_shard_count, FecCodec, FecGroup};
 
-/// 负载长度前缀字节数。
-const LEN_PREFIX: usize = 4;
+/// 负载长度前缀字节数（4 字节负载长度 + 4 字节总组数）。
+const LEN_PREFIX: usize = 8;
 
 /// §5 帧头 `flags` 字节里「组号」所在的位偏移。
 ///
@@ -149,13 +175,25 @@ pub fn packetize(
     let k = ceil_div(ceil_div(total, groups), max_payload).max(1);
     // 每片长度（等长，RS 要求）。
     let shard_len = ceil_div(total, groups * k).max(1);
+    // 负载前缀（长度 + 总组数）必须放得进第 0 片的第 0 片，
+    // 否则接收端读不到「帧在哪里结束」⇒ 直接报错，不发这种帧。
+    if shard_len < LEN_PREFIX {
+        return Err(NetError::ReassemblyFailed {
+            reason: format!(
+                "分片长度 {shard_len} 装不下 {LEN_PREFIX} 字节负载前缀(max_datagram 太小)"
+            ),
+        });
+    }
     // 冗余片数：feature 关闭时恒为 0（MVP 不产生冗余分片）。
     let m = effective_parity_shard_count(k, ratio);
 
     // 构造带长度前缀的填充负载。
     let padded_len = groups * k * shard_len;
     let mut padded = vec![0u8; padded_len];
-    padded[..LEN_PREFIX].copy_from_slice(&(payload.len() as u32).to_be_bytes());
+    padded[..4].copy_from_slice(&(payload.len() as u32).to_be_bytes());
+    // 总组数也写进前缀：它是接收端判断「帧在哪里结束」的唯一可靠依据
+    // （帧头里带 LAST_SHARD 标志的数据报可能丢，见模块文档）。
+    padded[4..8].copy_from_slice(&(groups as u32).to_be_bytes());
     padded[LEN_PREFIX..LEN_PREFIX + payload.len()].copy_from_slice(payload);
 
     let mut codec = FecCodec::new();
@@ -226,6 +264,22 @@ pub struct EncodedFrameView<'a> {
     pub payload: &'a [u8],
 }
 
+/// 从组 0 的第 0 片读出帧的总组数（负载长度前缀的第二段）。
+///
+/// 第 0 片是**数据片**，所以前缀和其它数据片一样受 FEC 保护：
+/// 它丢了可以被恢复出来，因此「帧的跨度」不依赖任何单个数据报是否到达。
+fn group_count_of(group: &FecGroup) -> Option<usize> {
+    let shard = group.shards().first()?.as_ref()?;
+    if shard.len() < LEN_PREFIX {
+        return None;
+    }
+    let n = u32::from_be_bytes([shard[4], shard[5], shard[6], shard[7]]) as usize;
+    if n == 0 || n > MAX_GROUPS_PER_FRAME {
+        return None;
+    }
+    Some(n)
+}
+
 /// 重组中的单帧状态。
 #[derive(Debug)]
 struct FrameAssembly {
@@ -235,7 +289,10 @@ struct FrameAssembly {
     /// 第一片到达的本地单调时刻（微秒），超时判定从这一刻起算。
     arrival_us: u64,
     groups: HashMap<usize, FecGroup>,
+    /// 带 `LAST_SHARD` 标志的数据报所在的组号（帧末组，快路径）。
     last_group: Option<usize>,
+    /// 本帧的总组数（来自负载长度前缀，可靠：受 FEC 保护）。
+    group_count: Option<usize>,
 }
 
 /// 帧重组器（处理乱序 / 丢包 / 重复）。
@@ -317,6 +374,7 @@ impl Reassembler {
                 arrival_us: crate::now_us(),
                 groups: HashMap::new(),
                 last_group: None,
+                group_count: None,
             });
         if entry.k != k || entry.m != m {
             // 同一帧号出现不同分组参数，说明对端状态错乱，丢弃该帧重新开始。
@@ -324,25 +382,51 @@ impl Reassembler {
             return Ok(None);
         }
 
-        let group = entry
-            .groups
-            .entry(group_no)
-            .or_insert_with(|| FecGroup::new(k, m, payload.len().max(1)));
-        // 重复片：直接忽略（§3.2 测试要求「重复检测」）。
-        group.insert(local, payload);
+        {
+            let group = entry
+                .groups
+                .entry(group_no)
+                .or_insert_with(|| FecGroup::new(k, m, payload.len().max(1)));
+            // 重复片：直接忽略（§3.2 测试要求「重复检测」）。
+            group.insert(local, payload);
+        }
 
         if header.flags.is_last_shard() {
             entry.last_group = Some(group_no);
         }
 
-        let last_group = match entry.last_group {
-            Some(g) => g,
-            None => return Ok(None),
+        // 帧的跨度（总组数）：
+        //
+        // 优先取负载长度前缀里的组数 —— 它在**数据片**里，受 FEC 保护，
+        // 丢了也能恢复出来，所以「帧在哪里结束」不再依赖某一个数据报是否到达；
+        // 拿不到时才退回帧头的 `LAST_SHARD` 标志（快路径）。
+        if entry.group_count.is_none() && group_no == 0 {
+            let count = {
+                let group = entry.groups.get_mut(&0).expect("组 0 刚刚插过分片");
+                // 组 0 的第 0 片带着前缀；它丢了就靠 FEC 把它恢复出来。
+                if group.shards()[0].is_none() && crate::fec::FEC_ENABLED && group.is_recoverable()
+                {
+                    let _ = self.codec.reconstruct_group(group);
+                }
+                group_count_of(group)
+            };
+            if let Some(n) = count {
+                entry.group_count = Some(n);
+            }
+        }
+
+        let frame_groups = match entry.group_count {
+            Some(n) => n,
+            None => match entry.last_group {
+                Some(g) => g + 1,
+                // 帧的跨度还未知：等组 0 的第 0 片（或带 `LAST_SHARD` 的数据报）到。
+                None => return Ok(None),
+            },
         };
 
         // 尝试恢复并判断是否完整。
         let mut complete = true;
-        for g in 0..=last_group {
+        for g in 0..frame_groups {
             let group = match entry.groups.get_mut(&g) {
                 Some(group) => group,
                 None => {
@@ -373,7 +457,7 @@ impl Reassembler {
 
         // 拼回原始负载。
         let mut padded = Vec::new();
-        for g in 0..=last_group {
+        for g in 0..frame_groups {
             let group = entry.groups.get(&g).expect("完整性检查已保证存在");
             for shard in group.data_shards() {
                 padded.extend_from_slice(shard);
