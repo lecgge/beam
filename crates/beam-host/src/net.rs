@@ -449,7 +449,7 @@ mod tests {
         // 主机侧写出去的字节，必须与 `beam_net::framing` 写出来的**完全一致**。
         let msg = ControlMsg::Bye;
         let shared = beam_net::framing::encode_frame(&msg).expect("共享实现编码应当成功");
-        let local = encode_frame(&msg).map_err(|e| e).expect("主机侧编码应当成功");
+        let local = encode_frame(&msg).expect("主机侧编码应当成功");
         assert_eq!(local, shared, "主机侧必须与共享实现产出相同字节");
 
         // 并且能通过共享实现的解码器读回来。
