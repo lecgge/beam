@@ -146,48 +146,98 @@ impl AudioSource for WasapiLoopbackSource {
     }
 }
 
-/// 默认 Opus 编码器（未启用原生后端时返回 `E7004`）。
-#[derive(Debug, Default)]
+/// 默认 Opus 编码器。
+///
+/// 真正的编解码在 [`crate::opus::EncoderCore`] 里（ffmpeg 的 libopus 编码器）；
+/// feature 未开启时 `encode` 返回 `E7004`（后端未启用）。
+#[derive(Debug)]
 pub struct OpusEncoderImpl {
-    cfg: Option<AudioConfig>,
+    core: Option<crate::opus::EncoderCore>,
 }
 
 impl OpusEncoderImpl {
+    /// 新建编码器。
+    ///
+    /// feature 未开启时返回 `E7004`。
+    pub fn new(cfg: AudioConfig) -> Result<Self, AudioError> {
+        Ok(Self {
+            core: Some(crate::opus::EncoderCore::new(cfg)?),
+        })
+    }
+
     /// 当前配置。
     pub fn config(&self) -> Option<&AudioConfig> {
-        self.cfg.as_ref()
+        self.core.as_ref().and_then(|core| core.config())
+    }
+}
+
+impl Default for OpusEncoderImpl {
+    /// 默认（无后端）编码器：调用 `encode` 会得到 `E7004`。
+    fn default() -> Self {
+        Self { core: None }
     }
 }
 
 impl OpusEncoder for OpusEncoderImpl {
     fn encode(&mut self, pcm: &PcmFrame) -> Result<Bytes, AudioError> {
-        let _ = pcm;
-        Err(AudioError::BackendDisabled)
+        match self.core.as_mut() {
+            Some(core) => core.encode(pcm),
+            None => Err(AudioError::BackendDisabled),
+        }
     }
 
-    fn reset(&mut self) {}
+    fn reset(&mut self) {
+        if let Some(core) = self.core.as_mut() {
+            core.reset();
+        }
+    }
 }
 
-/// 默认 Opus 解码器（未启用原生后端时返回 `E7004`）。
-#[derive(Debug, Default)]
+/// 默认 Opus 解码器。
+///
+/// 真正的解码在 [`crate::opus::DecoderCore`] 里（ffmpeg 的 libopus 解码器）；
+/// feature 未开启时 `decode` 返回 `E7004`（后端未启用）。
+#[derive(Debug)]
 pub struct OpusDecoderImpl {
-    cfg: Option<AudioConfig>,
+    core: Option<crate::opus::DecoderCore>,
 }
 
 impl OpusDecoderImpl {
+    /// 新建解码器。
+    ///
+    /// feature 未开启时返回 `E7004`。
+    pub fn new(cfg: AudioConfig) -> Result<Self, AudioError> {
+        Ok(Self {
+            core: Some(crate::opus::DecoderCore::new(cfg)?),
+        })
+    }
+
     /// 当前配置。
     pub fn config(&self) -> Option<&AudioConfig> {
-        self.cfg.as_ref()
+        self.core.as_ref().and_then(|core| core.config())
+    }
+}
+
+impl Default for OpusDecoderImpl {
+    /// 默认（无后端）解码器：调用 `decode` 会得到 `E7004`。
+    fn default() -> Self {
+        Self { core: None }
     }
 }
 
 impl OpusDecoder for OpusDecoderImpl {
     fn decode(&mut self, packet: &[u8]) -> Result<PcmFrame, AudioError> {
-        let _ = packet;
-        Err(AudioError::BackendDisabled)
+        match self.core.as_mut() {
+            Some(core) => core.decode(packet),
+            None => Err(AudioError::BackendDisabled),
+        }
     }
 
-    fn reset(&mut self) {}
+    fn reset(&mut self) {
+        if let Some(core) = self.core.as_mut() {
+            core.reset();
+        }
+    }
 }
 
 /// 端到端音频延迟预算（§3.7：端到端目标 ≤40 ms）。

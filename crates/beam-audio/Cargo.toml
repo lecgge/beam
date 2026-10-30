@@ -10,14 +10,21 @@ repository.workspace = true
 
 [features]
 default = []
-# 真实 Opus 编解码（依赖 opus 的原生库）。
-opus = ["dep:opus"]
+# 真实 Opus 编解码。
+#
+# 用 ffmpeg 的**原生** opus 编解码器（`ffmpeg -encoders` 里的 `opus` 那一项，
+# 不是 `libopus` 变体）—— 它**内建**在 ffmpeg 里，不需要外部 libopus，
+# 因此 §7 要求的 LGPL 构建自带它（外部 libopus 绑定需要单独的开发库，本机与 CI 都没有）。
+#
+# 依赖面也不增加：仓库里已经有 ffmpeg-next 的用法（beam-encode）。
+opus = ["dep:ffmpeg-next"]
 
 [dependencies]
 beam-proto = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+ffmpeg-next = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = [
@@ -25,7 +32,6 @@ windows = { workspace = true, features = [
     "Win32_Media_KernelStreaming",
     "Win32_System_Com",
 ] }
-opus = { workspace = true, optional = true }
 
 [lints]
 workspace = true
