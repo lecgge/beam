@@ -20,6 +20,22 @@
 //! - [`InputSink`]：`apply(InputEvent)`。
 //! - [`GamepadHub`]：`attach(slot) -> GamepadHandle`。
 //! - [`RumbleSink`]：震动回传。
+//! - [`InputPermissions`]：按设备（键 / 鼠 / 手柄）的注入权限。
+//!
+//! ## 权限来源
+//!
+//! 本层**不认识**协议侧与配置侧的权限结构（§3.8 边界：只依赖 proto / windows /
+//! vigem-client）。权限位由上层映射过来：
+//!
+//! - 协议侧 `beam_pair::TrustedPeer.perms`（`PeerPerms{view,input,audio,gamepad}`）；
+//! - 配置侧 `beam_config::InputSettings{gamepad, allow_keyboard, allow_mouse}`。
+//!
+//! 映射后交给 [`SendInputSink::set_permissions`]。
+//!
+//! ## unsafe 策略（决策 D1）
+//!
+//! crate 根是 `#![deny(unsafe_code)]`，只在确实要调 Win32 裸 API 的地方局部
+//! `#[allow(unsafe_code)]`（`SendInput` 调用与 `INPUT` union 字段读取）。
 //!
 //! ## 线程模型
 //!
@@ -27,7 +43,7 @@
 //!
 //! ## 错误码
 //!
-//! `E8xxx`：`8001` ViGEmBus 未安装、`8002` 权限拒绝；另有同段扩展 `8003`。
+//! `E8xxx`：`8001` ViGEmBus 未安装、`8002` 权限拒绝；另有同段扩展 `8003`、`8004`。
 //!
 //! ## 性能
 //!
@@ -41,12 +57,13 @@
 //!
 //! `vigem` feature 默认开启（§7）；关闭后手柄挂载返回 `E8001`。
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 pub mod error;
 pub mod sink;
 
 pub use error::{message, InputError};
 pub use sink::{
-    GamepadHandle, GamepadHub, InputSink, RumbleSink, SendInputSink, MAX_GAMEPAD_SLOTS,
+    GamepadHandle, GamepadHub, InputPermissions, InputSink, RumbleSink, SendInputSink,
+    MAX_GAMEPAD_SLOTS,
 };

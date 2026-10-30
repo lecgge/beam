@@ -8,6 +8,11 @@ pub mod code {
     pub const PERMISSION_DENIED: u16 = 8002;
     /// `E8003`：输入后端未启用（§3.8 段内扩展）。
     pub const BACKEND_DISABLED: u16 = 8003;
+    /// `E8004`：按键码无法映射为虚拟键（§3.8 段内扩展）。
+    ///
+    /// 协议侧 `InputEvent::Key.code` 是 USB HID 扫描码；注入前要翻译成 Win32
+    /// 虚拟键码，翻译表里没有的键码就走这个错误（见 `sink.rs` 的 `hid_usage_to_vk`）。
+    pub const UNSUPPORTED_KEY_CODE: u16 = 8004;
 }
 
 /// 由错误码反查人类可读文案（§3.11）。
@@ -16,6 +21,7 @@ pub fn message(code: u16) -> &'static str {
         code::VIGEM_NOT_INSTALLED => "未检测到 ViGEmBus 驱动,手柄功能不可用",
         code::PERMISSION_DENIED => "没有注入输入的权限",
         code::BACKEND_DISABLED => "输入后端未启用",
+        code::UNSUPPORTED_KEY_CODE => "按键码无法映射为虚拟键",
         _ => UNKNOWN_TEXT,
     }
 }
@@ -37,6 +43,10 @@ pub enum InputError {
     /// `E8003`：后端未启用。
     #[error("E8003: 输入后端未启用")]
     BackendDisabled,
+
+    /// `E8004`：按键码无法映射为虚拟键。
+    #[error("E8004: 按键码无法映射为虚拟键")]
+    UnsupportedKeyCode,
 }
 
 impl InputError {
@@ -46,6 +56,7 @@ impl InputError {
             InputError::ViGEmNotInstalled => code::VIGEM_NOT_INSTALLED,
             InputError::PermissionDenied => code::PERMISSION_DENIED,
             InputError::BackendDisabled => code::BACKEND_DISABLED,
+            InputError::UnsupportedKeyCode => code::UNSUPPORTED_KEY_CODE,
         }
     }
 
@@ -79,6 +90,7 @@ mod tests {
         assert_eq!(InputError::ViGEmNotInstalled.code(), 8001);
         assert_eq!(InputError::PermissionDenied.code(), 8002);
         assert_eq!(InputError::BackendDisabled.code(), 8003);
+        assert_eq!(InputError::UnsupportedKeyCode.code(), 8004);
         assert_eq!(message(8099), UNKNOWN_TEXT);
         assert!(is_input_code(8001));
     }
