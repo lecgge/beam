@@ -220,6 +220,39 @@ class RustCheckTests(unittest.TestCase):
             self.assertTrue(hits)
             self.assertGreater(symbol_lines, 0)
 
+    # --- cargo fingerprint：区分「默认构建」与「perf-stats 开启构建」的产物 ---
+
+    def test_artifact_features_reads_cargo_fingerprint(self) -> None:
+        """产物文件用库名（下划线），fingerprint 目录用包名（连字符）——两者要能对上。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "release")
+            deps = os.path.join(target, "deps")
+            os.makedirs(deps)
+            fingerprint = os.path.join(target, ".fingerprint", "beam-perf-abc123")
+            os.makedirs(fingerprint)
+            # cargo 把 features 写成「JSON 数组的字符串」
+            with open(os.path.join(fingerprint, "lib-beam_perf.json"), "w", encoding="utf-8") as fh:
+                fh.write('{"rustc": "x", "features": "[\\"default\\", \\"perf-stats\\"]"}')
+            artifact = os.path.join(deps, "libbeam_perf-abc123.rlib")
+            with open(artifact, "wb") as fh:
+                fh.write(b"x")
+
+            features = rust_no_perf.artifact_features(target, artifact)
+            self.assertIsNotNone(features, "应当能从 cargo fingerprint 读出 feature 集合")
+            self.assertIn("perf-stats", features)
+            self.assertIn("default", features)
+
+    def test_artifact_features_missing_metadata_is_none(self) -> None:
+        """读不到元数据时返回 None（不跳过）——宁可误报也不漏报。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "release")
+            deps = os.path.join(target, "deps")
+            os.makedirs(deps)
+            artifact = os.path.join(deps, "libbeam_perf-abc123.rlib")
+            with open(artifact, "wb") as fh:
+                fh.write(b"x")
+            self.assertIsNone(rust_no_perf.artifact_features(target, artifact))
+
 
 def _make_fake_nm(tmpdir: str, symbol_line: str) -> str:
     """造一个只会打印固定符号行的假 nm，用来验证 nm 通道的代码路径。"""

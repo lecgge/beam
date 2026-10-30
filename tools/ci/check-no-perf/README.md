@@ -104,6 +104,35 @@ python tools/ci/check-no-perf/rust_no_perf.py --target-dir target/tmp/perf-on/re
 | `--no-nm` | 只做字节级扫描 |
 | `--expect clean\|perf\|nm-perf` | `clean`=不许出现（默认，门禁用）；`perf`=必须出现（负样本自检）；`nm-perf`=必须由 `nm -C` 通道检出（Linux 上验证 nm 口径本身有效） |
 
+### 「旧产物残留」与误报
+
+`cargo build --release -p beam-perf --features perf-stats` 产出的是**另一个** rlib，
+它会永久留在 `target/release/deps/` 里 —— cargo 不会清理不同 feature 组合的旧产物。
+之后扫描默认产物时，那个 perf-on 的 rlib 会让门禁**误报**（旧产物残留，不是代码回归）。
+
+脚本按 cargo 的构建元数据区分二者：
+
+- 每个产物在 `<target>/.fingerprint/<包名>-<hash>/lib-<库名>.json` 里记着它**实际**
+  编译时启用的 feature 集合；
+- `--expect clean`（默认 release 门禁）会**跳过**由 `perf-stats` 开启构建出来的产物
+  —— 它们不属于「默认 release 构建」；
+- `--expect perf`（负样本自检）**不**跳过：那里就是要找到 perf-on 产物。
+
+读不到元数据时**不跳过** —— 宁可误报也不漏报。
+
+> 命名差异提醒：产物文件用**库名**（下划线，`libbeam_perf-<hash>.rlib`），
+> fingerprint 目录用**包名**（连字符，`beam-perf-<hash>`）。脚本按 hash 定位，
+> 不靠猜目录名。
+
+**仍然建议**：负样本自检用**独立的 `CARGO_TARGET_DIR`**（CI 已经是这样），
+不要往默认 target 目录里塞 perf-on 产物。
+
+```bash
+# 负样本自检：feature 开启的产物必须被检出（独立 target 目录）
+CARGO_TARGET_DIR=target/tmp/perf-on cargo build --release -p beam-perf --features perf-stats
+python tools/ci/check-no-perf/rust_no_perf.py --target-dir target/tmp/perf-on/release --expect perf
+```
+
 ## 判据是怎么定的（为什么不是 `grep "perf::"`）
 
 `crates/beam-perf` 的采集实现（`collect.rs`、`Span`、`perf_span!` 的实体分支）全部由
@@ -155,10 +184,11 @@ android 侧把性能面板关进 `BuildConfig.PERF_STATS` 之后，可以用 `--
 python tools/ci/check-no-perf/test_check_no_perf.py
 ```
 
-17 个用例，只依赖标准库，不需要 cargo / gradle / APK 产物；覆盖：干净样本不误报、
+19 个用例，只依赖标准库，不需要 cargo / gradle / APK 产物；覆盖：干净样本不误报、
 三个命名空间 + 三个类型名都能抓到、`PerfUiState` 不误报、mapping 两档判定、
 R8 字节扫描的跨块边界、`nm -C` 通道，以及多 flavor 场景下的
-「glob 展开成全部匹配 / mapping 配对规则 / 每个 APK 都要判定」。
+「glob 展开成全部匹配 / mapping 配对规则 / 每个 APK 都要判定」，
+以及 cargo fingerprint 的 feature 集合解析（区分默认构建与 perf-stats 开启构建）。
 
 ## 退出码
 

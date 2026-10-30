@@ -44,6 +44,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
@@ -103,6 +104,92 @@ class SymbolHit:
 
     def __str__(self) -> str:  # pragma: no cover - 展示用
         return f"{self.path} [{self.source}] {self.needle} → {self.context}"
+
+
+def artifact_features(target_dir: str, path: str) -> Optional[List[str]]:
+    """读出某个产物的 cargo feature 集合；读不到返回 ``None``。
+
+    cargo 把构建元数据写在 ``<target>/.fingerprint/<crate>-<hash>/lib-<crate>.json``，
+    里面的 ``features`` 数组就是这个产物**实际**编译时启用的 feature
+    （例如 ``["default", "perf-stats"]``）。产物文件名里的 hash 与 fingerprint
+    目录名一致，所以能一一对应。
+
+    用途：``--expect clean`` 时，**由 perf-stats 开启构建出来的**产物
+    不属于「默认 release 构建」，不该参与门禁判定 —— 否则本地跑过一次
+    ``cargo build --release -p beam-perf --features perf-stats`` 之后，
+    那个 rlib 会永久留在 ``target/release/deps/`` 里，让之后的默认产物
+    扫描**误报**（旧产物残留，不是代码回归）。
+
+    读不到元数据时返回 ``None``（不跳过）—— 宁可误报也不漏报。
+    """
+    name = os.path.basename(path)
+    # 形如 libbeam_perf-5ca55e7eb3a38210.rlib
+    stem = name
+    for suffix in (".rlib", ".rmeta", ".dll", ".exe", ".so", ".a"):
+        if stem.lower().endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
+    if "-" not in stem:
+        return None
+    crate, _, hash_part = stem.rpartition("-")
+    if not crate or not hash_part:
+        return None
+    crate = crate[3:] if crate.startswith("lib") else crate
+
+    # target/release/deps/x.rlib → target/release/.fingerprint/<pkg>-<hash>/
+    #
+    # 注意命名差异：产物文件用的是**库名**（下划线，`libbeam_perf-*.rlib`），
+    # 而 fingerprint 目录用的是**包名**（连字符，`beam-perf-<hash>`）。
+    # 所以这里不猜目录名，直接按 hash 找候选目录。
+    deps_dir = os.path.dirname(os.path.abspath(path))
+    profile_dir = os.path.dirname(deps_dir)
+    fingerprint_root = os.path.join(profile_dir, ".fingerprint")
+    if not os.path.isdir(fingerprint_root):
+        return None
+
+    candidates: List[str] = []
+    for prefix in (crate, crate.replace("_", "-"), crate.replace("-", "_")):
+        candidate = os.path.join(fingerprint_root, f"{prefix}-{hash_part}")
+        if os.path.isdir(candidate):
+            candidates.append(candidate)
+    if not candidates:
+        # 兜底：按 hash 找（hash 是编译单元级的，同一 hash 基本只对应一个目录）。
+        try:
+            candidates = sorted(
+                os.path.join(fingerprint_root, d)
+                for d in os.listdir(fingerprint_root)
+                if d.endswith(f"-{hash_part}")
+                and os.path.isdir(os.path.join(fingerprint_root, d))
+            )
+        except OSError:
+            return None
+
+    for fingerprint in candidates:
+        for meta_name in (f"lib-{crate}.json", f"bin-{crate}.json", f"lib-{crate.replace('_','-')}.json"):
+            meta = os.path.join(fingerprint, meta_name)
+            if not os.path.isfile(meta):
+                continue
+            try:
+                with open(meta, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+            except (OSError, ValueError):
+                continue
+            features = data.get("features")
+            if isinstance(features, str):
+                # cargo 把 features 写成 **JSON 数组的字符串**：`"["default", "perf-stats"]"`。
+                # 先按 JSON 解析；解析不了再退回逗号分隔的旧格式。
+                text = features.strip()
+                if text.startswith("["):
+                    try:
+                        parsed = json.loads(text)
+                    except ValueError:
+                        parsed = None
+                    if isinstance(parsed, list):
+                        return [str(f) for f in parsed]
+                return [f.strip() for f in text.split(",") if f.strip()]
+            if isinstance(features, list):
+                return [str(f) for f in features]
+    return None
 
 
 def iter_artifacts(target_dir: str) -> List[str]:
@@ -241,6 +328,32 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     if not artifacts:
         print(f"::error::{target_dir} 下没有可扫描的产物（rlib/rmeta/dll/exe/so/a）", file=sys.stderr)
         return 2
+
+    # `--expect clean`（默认 release 门禁）：由 **perf-stats 开启** 构建出来的
+    # 产物不属于「默认 release 构建」，跳过它们。
+    #
+    # 为什么需要这一步：本地跑过一次
+    # `cargo build --release -p beam-perf --features perf-stats` 之后，
+    # 那个 rlib 会永久留在 `target/release/deps/` 里（cargo 不会清理不同
+    # feature 组合的旧产物）。之后扫描默认产物就会**误报** ——
+    # 那是旧产物残留，不是代码回归。
+    #
+    # `--expect perf`（负样本自检）**不**跳过：那里就是要找到 perf-on 产物。
+    skipped: List[str] = []
+    if args.expect == "clean":
+        kept: List[str] = []
+        for path in artifacts:
+            features = artifact_features(target_dir, path)
+            if features and "perf-stats" in features:
+                skipped.append(path)
+                continue
+            kept.append(path)
+        artifacts = kept
+        if skipped and not args.quiet:
+            print(
+                f"[beam] 跳过 {len(skipped)} 个由 perf-stats 开启构建的旧产物"
+                f"（不属于默认 release 构建）"
+            )
 
     nm = None
     if not args.no_nm:
