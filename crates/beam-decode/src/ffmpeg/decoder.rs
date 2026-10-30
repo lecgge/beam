@@ -56,6 +56,20 @@ pub struct FfmpegD3D11VaDecoder {
     height: u32,
 }
 
+// SAFETY（`Send`）：ffmpeg 的 `AVCodecContext` 与 `HwDevice` 都不是线程安全的，
+// 但**本类型始终只被一个消费者独占**：
+//
+// - `VideoDecoder::decode(&mut self, ...)` 要求独占引用 ⇒ 同一时刻只有一个线程在用它；
+// - 会话层把解码器整体**移动**进帧消费者（`DecodeRenderConsumer`），
+//   移动之后只在会话的取帧循环那一个线程上调用。
+//
+// 因此「移动所有权」是安全的，「并发使用」不可能发生 —— 后者被 `&mut self` 排除。
+#[allow(
+    unsafe_code,
+    reason = "解码上下文始终被独占借用（&mut self），跨线程只移动所有权，不存在并发使用"
+)]
+unsafe impl Send for FfmpegD3D11VaDecoder {}
+
 /// 自建一个 D3D11 设备（**仅供「单独跑解码器」的场景**）。
 ///
 /// 生产路径必须用 [`FfmpegD3D11VaDecoder::open_on_device`] 复用渲染层的设备。
@@ -142,14 +156,27 @@ impl FfmpegD3D11VaDecoder {
         }
 
         let ret = unsafe {
-            // hw_device_ctx 的所有权交给 libavcodec（打开成功后不再由我们释放）。
-            (*ctx).hw_device_ctx = hw.as_ptr();
-            (*ctx).get_format = Some(get_format_d3d11);
-            ffi::avcodec_open2(ctx, codec_ptr, std::ptr::null_mut())
+            // 把 `AVBufferRef` **加一份引用**交给 libavcodec。
+            //
+            // `avctx->hw_device_ctx` 与 `avci->hw_device_ctx` 各持一份引用，
+            // `avcodec_free_context` 会把它们都 unref 掉。
+            // 如果只是把指针**塞进去**（不加引用），libavcodec 释放的
+            // 就是我们自己那一份 ⇒ 之后 `HwDevice::drop` 再 unref 一次
+            // ⇒ use-after-free ⇒ 堆破坏（实测：退出会话时
+            // STATUS_HEAP_CORRUPTION / ACCESS_VIOLATION）。
+            let new_ref = ffi::av_buffer_ref(hw.as_ptr());
+            if new_ref.is_null() {
+                ffi::AVERROR(ffi::ENOMEM)
+            } else {
+                (*ctx).hw_device_ctx = new_ref;
+                (*ctx).get_format = Some(get_format_d3d11);
+                ffi::avcodec_open2(ctx, codec_ptr, std::ptr::null_mut())
+            }
         };
         if ret < 0 {
+            // `avcodec_free_context` 会 unref `avctx->hw_device_ctx`（上面加的那一份）；
+            // 我们自己那一份由 `HwDevice::drop` 释放。
             unsafe {
-                (*ctx).hw_device_ctx = std::ptr::null_mut();
                 ffi::avcodec_free_context(&mut ctx);
             }
             return Err(DecError::DecoderUnavailable);

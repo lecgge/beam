@@ -69,10 +69,6 @@ struct AvD3D11VaDeviceContext {
 pub struct HwDevice {
     /// `AVBufferRef`，指向 `AVHWDeviceContext`。
     device_ref: *mut ffi::AVBufferRef,
-    /// 我们自己持有的 `ID3D11Device` 引用。
-    ///
-    /// ffmpeg 的释放回调是空的，**它不会**替我们释放这个引用，所以这一份由我们持有。
-    _device: ID3D11Device,
 }
 
 impl std::fmt::Debug for HwDevice {
@@ -99,7 +95,19 @@ impl HwDevice {
             return Err(DecError::DecoderUnavailable);
         }
 
-        // 克隆即 AddRef：ffmpeg 不会释放这个引用（它的释放回调是空的）。
+        // 克隆即 AddRef。这一份引用**归 ffmpeg 所有**。
+        //
+        // ffmpeg 的 `AVD3D11VADeviceContext` 头文件写得很明确：
+        // 「Deallocating the AVHWDeviceContext will always release this interface,
+        //  and it does not matter whether it was user-allocated.」
+        // ⇒ `AVHWDeviceContext` 被释放时，ffmpeg 一定会 Release 这份引用。
+        //
+        // 所以我们**不能**在 Rust 侧再留一份 —— 否则设备被 Release 两次：
+        // 交换链与解码纹理都建在这个设备上，提前释放会让它们踩到野指针
+        // （实测：退出会话时 STATUS_ACCESS_VIOLATION）。
+        //
+        // `mem::forget` 把这一份的所有权**移交**给 ffmpeg（只跳过 Rust 侧的 Release，
+        // COM 引用本身仍然活着，由 ffmpeg 在销毁 `AVHWDeviceContext` 时释放）。
         let owned = device.clone();
 
         let ret = unsafe {
@@ -110,6 +118,7 @@ impl HwDevice {
                 // 只填 ffmpeg 已经分配好的结构体，不覆盖 hwctx 指针本身。
                 let hwfc = (*hwdev).hwctx as *mut AvD3D11VaDeviceContext;
                 (*hwfc).device = owned.as_raw();
+                std::mem::forget(owned);
                 ffi::av_hwdevice_ctx_init(device_ref)
             }
         };
@@ -118,10 +127,7 @@ impl HwDevice {
             return Err(DecError::DecoderUnavailable);
         }
 
-        Ok(Self {
-            device_ref,
-            _device: owned,
-        })
+        Ok(Self { device_ref })
     }
 
     /// `AVBufferRef` 指针（`AVHWDeviceContext`）。
