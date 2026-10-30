@@ -251,7 +251,7 @@
 | AMF / QSV 路径无法在本机验证 | 本机 conda LGPL ffmpeg 只编了 NVENC（已扫 avcodec-60.dll 确认无 *_amf / *_qsv），代码按 §3.6 基线实现完毕 | 需对应硬件 |
 | GPU RGB→NV12（VideoProcessor）未通过 | 本机 CreateVideoProcessorInputView/OutputView 返回 E_INVALIDARG；已验证的替代路径是「NV12 纹理 → D3D11 硬件帧 → NVENC」；文档允许的 compute shader 方案未实现 | 下一批 |
 
-| B5 | 2026-10-30 | 第五批：桌面端主机模式 + 会话层收尾 + 分帧收敛 + perf 埋点接入 | beam-host / beam-session / beam-net / beam-client / beam-perf / 平台层 crate / apps/desktop | 已完成 | cargo fmt --all --check exit 0；cargo check --workspace --all-targets exit 0 / 0 warning；cargo clippy --workspace --all-targets -- -D warnings exit 0 / 0 warning；cargo test --workspace exit 0（41 套件 / 350 passed / 0 failed / 5 ignored）；桌面端 fmt / clippy / check 三种 feature 组合均 exit 0 / 0 warning；gradlew assembleDebug assembleRelease exit 0（6 个变体 APK）；gradlew test --rerun-tasks exit 0（22 套件 / 156 次 / 0 失败）；cargo tree -e features 中 perf-stats 0 命中 |
+| B5 | 2026-10-30 | 第五批：桌面端主机模式 + 会话层收尾 + 分帧收敛 + perf 埋点接入 | beam-host / beam-session / beam-net / beam-client / beam-perf / 平台层 crate / apps/desktop | 已完成 | cargo fmt --all --check exit 0；cargo check --workspace --all-targets exit 0 / 0 warning；cargo clippy --workspace --all-targets -- -D warnings exit 0 / 0 warning；cargo test --workspace exit 0（41 套件 / 350 passed / 0 failed / 5 ignored）；桌面端 fmt / clippy / check 三种 feature 组合均 exit 0 / 0 warning；gradlew assembleDebug assembleRelease exit 0（6 个变体 APK）；gradlew test --rerun-tasks exit 0（22 套件 / 156 次 / 0 失败）；cargo tree -e features 中 perf-stats 0 命中；§7 门禁：rust_no_perf.py（clean 与负样本自检）exit 0、apk_no_perf.py（store+internal release 与 debug 自检）exit 0、门禁单测 19 例全过；android test --rerun-tasks exit 0（22 套件 / 156 次 / 0 失败） |
 
 - **B5-A 桌面端主机模式** — 写入范围：`crates/beam-host/**`、`apps/desktop/**`；覆盖条目 DX-09, CM-02, CM-06
 - **B5-B 会话层收尾** — 写入范围：`crates/beam-session/**`；覆盖条目 T-19, S-05, N-18
@@ -300,6 +300,7 @@
 | 2026-10-30 |  | beam-host/src/net.rs 原先自带一份 FRAME_LEN_PREFIX / MAX_FRAME_LEN / FrameDecoder / encode_frame，与 beam-client 各存一份（改一边忘另一边就线上不通）。改为调用 beam_net::framing（beam-net 是 L2，host/client 都依赖它，不构成 L3 横向依赖）；对外错误码保持 E9005 不变，收敛的是实现不是语义 | beam-host / beam-net / beam-client 测试全绿；新增「主机侧必须与共享实现产出相同字节」断言 |
 | 2026-10-30 |  | part-6（Tauri 桌面端）复用了 part-4 的 S-xx / T-xx 前缀，part-4 的 X-xx 又与 part-3 重名，台账按 ID 查状态会串台（38 个 ID 冲突）。重命名：part-6 的 T-01..T-24 → CM-01..CM-24、S-01..S-05 → TK-01..TK-05；part-4 的 X-01..X-10 → DX-01..DX-10。判定列与说明列未动 | 616 行 / 578 个唯一 ID，跨分片重名 0；verify_refs 0 无效引用 |
 | 2026-10-30 |  | android/app/build.gradle.kts 新增 channel 维度与 store / internal 两个 productFlavors；同步 CI 与门禁脚本路径（产物路径是 apk/<flavor>/<buildType>/）。门禁脚本 --apk 改为可给多个且 glob 展开成全部匹配 —— 旧版只取第一个匹配，单 flavor 时看不出问题，两个 flavor 之后会静默漏检一个 | 6 个变体 APK 构建成功；release 门禁（store+internal）exit 0；debug 负样本自检 exit 0；门禁单测 17 例全过 |
+| 2026-10-30 |  | cargo build --release -p beam-perf --features perf-stats 产出的 rlib 会永久留在 target/release/deps（cargo 不清理不同 feature 组合的旧产物），之后扫描默认产物就会误报。脚本改按 cargo 的构建元数据区分：每个产物的 <target>/.fingerprint/<包名>-<hash>/lib-<库名>.json 记着它实际启用的 feature 集合，--expect clean 跳过 perf-stats 开启构建的产物，--expect perf 不跳过；读不到元数据时不跳过（宁可误报不漏报）。踩到的两个坑：产物文件用库名（下划线）而 fingerprint 目录用包名（连字符）；cargo 把 features 写成「JSON 数组的字符串」 | rust 门禁 clean 模式 exit 0（跳过 2 个 perf-on 旧产物）、perf 模式 exit 0（仍检出 2 处）；门禁单测 19 例全过 |
 
 ---
 
