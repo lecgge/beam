@@ -47,15 +47,15 @@
 
 | 审计判定 | 条数 | 已完成 | 进行中 | 已排期 | 未开始 |
 |---|---|---|---|---|---|
-| 已实现 | 364 | 9 | 0 | 0 | 355 |
-| 占位 | 43 | 30 | 1 | 0 | 11 |
-| 缺失 | 111 | 53 | 2 | 0 | 43 |
-| 偏差 | 76 | 52 | 0 | 0 | 24 |
+| 已实现 | 364 | 10 | 0 | 0 | 354 |
+| 占位 | 43 | 33 | 1 | 0 | 8 |
+| 缺失 | 111 | 54 | 2 | 0 | 42 |
+| 偏差 | 76 | 54 | 0 | 0 | 22 |
 | 超出 | 3 | 0 | 0 | 0 | 3 |
-| **合计** | **597** | **144** | **3** | **0** | **436** |
+| **合计** | **597** | **151** | **3** | **0** | **429** |
 
 - 审计判定为**未达成**（占位+缺失+偏差）：**230** 条
-- 其中**已落地**：**152** 条；**仍未排期**：**78** 条
+- 其中**已落地**：**158** 条；**仍未排期**：**72** 条
 
 > 「未开始」不代表这一条没人管，而是**还没排进任何一批**。排期后的条目会出现在「落地进度台账」一节，带批次号与验收方式。
 
@@ -157,7 +157,7 @@
 |---|---|
 | 未开始 | 0 |
 | 进行中 | 3 |
-| 已完成 | 145 |
+| 已完成 | 152 |
 | 已阻塞 | 12 |
 | 暂不做 | 1 |
 | 偏差 | 1 |
@@ -317,6 +317,22 @@
 | Android 侧未暴露重连信息 | beam-session 已有 SessionHandle::reconnecting()，但 uniffi 导出面还没有对应映射 | 下一批 |
 | §3.9 转移表缺 Negotiating → Reconnecting | 协商期传输失败只能进 Error 态；改转移表属于改文档语义，未擅自改 | 待裁决 |
 
+| B9 | 2026-10-31 | 第九批：音频进产品链路 + 桌面端真实统计 + FEC 矩阵复用 + uniffi 暴露重连与汇总 | crates/beam-audio / crates/beam-host / crates/beam-client / crates/beam-net / crates/beam-ffi / apps/desktop / android | 已完成 | cargo fmt --all --check exit 0；cargo check --workspace --all-targets exit 0 / 0 warning；cargo clippy --workspace --all-targets -- -D warnings exit 0 / 0 warning；cargo test --workspace exit 0（45 套件 / 453 passed / 0 failed / 9 ignored）；cargo test -p beam-net --features fec exit 0（76 例 / 0 失败）；cargo bench -p beam-net --features fec --bench packetize exit 0（T3 达标、T1/T2 仍超预算，见 N-24）；cargo check -p beam-ffi --features uniffi --all-targets exit 0；桌面端 clippy --all-targets -- -D warnings exit 0；gradlew assembleDebug assembleRelease test --rerun-tasks exit 0（28 测试类 / 184 次 / 0 失败）；apk_no_perf.py 门禁 exit 0（2 个 release APK 的 dex 中无 perf 类） |
+
+- **B9-A 音频进产品链路** — 写入范围：`crates/beam-audio/**`、`crates/beam-host/**`、`crates/beam-client/**`；覆盖条目 DX-02, A-14
+- **B9-B FEC 矩阵复用（主会话自办）** — 写入范围：`crates/beam-net/**`；覆盖条目 N-24
+- **B9-C uniffi 暴露重连与汇总（主会话自办）** — 写入范围：`crates/beam-ffi/**`、`android/**`；覆盖条目 
+- **B9-D 桌面端真实统计（主会话自办）** — 写入范围：`apps/desktop/**`；覆盖条目 EV-02, EV-05, EV-08, CM-13, CM-14
+
+**B9 追加项（审计中顺带发现，不在原 551 条内）**
+
+| 项 | 说明 | 归属 |
+|---|---|---|
+| B8 追加项「Android 侧未暴露重连信息」已收口 | uniffi 导出面新增 `Session::reconnecting()` / `Session::summary()`（**查询式**，不是新增 `SessionEvent` 变体 —— 变体会同时打破 beam-session / beam-ffi / 桌面端三处穷尽匹配）；Android 侧 `NativeMappings` 映射 + `Session` 接口 + `StreamViewModel` 按 500 ms 轮询真实重连状态（原先 `SessionEvent.Reconnecting` 变体 Rust 从不发出，断线遮罩是死代码） | 已收口 |
+| FEC 预算：T1/T2 仍超 1.8~1.9 倍 | 矩阵重建这个根因已消除，剩下的是标量 GF 乘加本身。再降要动协议口径或换依赖 —— 登记为待决 S14 | 待裁决 |
+| 音频真实出声与音画同步仍未验证 | B9-A 把采集→Opus→datagram→解码→WASAPI 输出整条接通，但本机无声卡回环条件，**「声音真的能出来」未验证**；音画同步也未测（两个时钟不同源）。§3.7 的采集→编码 ≤6 ms / 端到端 ≤40 ms / 同步 <30 ms 三个指标仍未测 | 需真机人工验证 |
+| Android 端到端运行时行为仍未验证 | 无 Android 真机 ⇒ 真机上的建连、输入回传、重连恢复、音频播放全部未实测 | 需真机人工验证 |
+
 ### 已裁决事项
 
 | # | 议题 | 裁决 | 裁决日期 | 说明 | 解锁范围 |
@@ -345,6 +361,7 @@
 | S11 | 桌面端 PIN 没有端到端校验 | 前端做格式校验 + 尝试预算 + 完整 UI，但后端 connect(host_id) 命令没有 PIN 参数 —— 填对填错都能连上。要闭环需 Rust 侧给 connect 加 PIN 参数 |  |
 | S12 | 通用 UI 组件放在 :core-data 的 ui 包 | §3.12 固定 12 个模块且没有 :core-ui；BeamDialog/BeamToast 放在 :core-data/ui（BeamTokens 已在此）。若要单列 UI 模块，需先改 §3.12 的模块表 |  |
 | S13 | 音频帧的 FEC 冗余片无法与视频区分 | 帧头 type=2 是「FEC 冗余」通用类型，接收端分不清「音频帧的冗余片」与「视频帧的冗余片」。补齐音频分包需要 §5 级别的决定：帧号空间分开，或帧头再腾出一个类型位 |  |
+| S14 | §3.2 的 FEC 预算：T1/T2 仍超标 1.8~1.9 倍，要不要动拆组阈值或换编码 | 「每帧重建 RS 矩阵」这个根因已消除（见 N-24），T3 档位已达标；剩下的 1.5 ms 是标量 GF 乘加本身（代价正比于每组片数 k）。三条路都不是「消除重复计算」能解决的：(a) 调小 k —— 但 k 的取值正是 §5 自相矛盾之处（待决 S3），属于改文档口径；(b) 开 `reed-solomon-erasure` 的 `simd-accel` —— 上游 build.rs 在 `target_env="msvc"` 下不编译 SIMD 代码，Windows 上等于白开，还要多一个 `cc` 构建依赖；(c) 换编码（LDPC / 折叠码）—— 要换依赖。本轮未擅自实施 | §3.2, §5 |
 
 ### 本轮修复与提交记录
 
@@ -372,6 +389,8 @@
 | 2026-10-30 |  | 路径 MTU 在黑洞检测时可能掉到 1200 以下，此时 1200 字节的数据报直接发不出去。修法：max_datagram 被连接实际能承载的上限夹一刀（Conn::effective_max_datagram） | beam-net 双 feature 状态测试全绿 |
 | 2026-10-30 |  | B3-A 记下「每帧一次 D3D11 纹理创建，是否落在 1.5ms/1ms 预算内未实测」。perf_span!("capture") 包住的正是这一整段，用已有探针即可测。本机 RTX 3070 / 1920×1080 / release：239 帧，均值 32.4 µs、p50/p95 25/25 µs、p99 75 µs、最大 273.4 µs，而 §3.5 预算 T1 ≤ 1.5 ms ⇒ p99 只占 5% | 数字与口径写进 crates/beam-capture/examples/perf_probe.rs 的模块文档 |
 | 2026-10-30 |  | B3 记过 main 返回后 NVIDIA 驱动侧 atexit 回调访问已释放对象 → 0xC0000005。本轮做了对照实验：「先 drop 设备再让 main 正常返回」与「保持设备存活」两种写法**都是 exit 0** ⇒ 当前驱动版本下复现不出来。因此代码只改成更稳妥的写法（不再用 process::exit(0) 绕过 CRT 收尾、让设备活到进程结束），**不能声称已修复** | cargo run --release -p beam-encode --example perf_probe --features ffmpeg,perf-stats → exit 0 |
+| 2026-10-31 | FEC 编码超 §3.2 预算的根因：每帧重建 RS 矩阵 | 分段实测定位：`ReedSolomon::new(k,m)` 要在 GF(2^8) 上求逆 k×k 矩阵（O(k^3)），T1 档位单次 4.894 ms，占整帧 6.635 ms 的 74%，而真正的 GF 乘加只有 0.773 ms。而 `packetize()` 每帧 `FecCodec::new()` ⇒ 矩阵缓存永不跨帧存活。改法：`FecCodec` 缓存表改成 `Arc<Mutex<HashMap>>`（克隆体共享同一张表），发送端挂 `Conn`、接收端挂 `Reassembler`，新增 `packetize_with_codec`。**帧头与线上格式一字未改**（有单测 `shared_codec_produces_identical_packets` 钉住逐字节一致） | T1 6.635 → 1.553 ms（4.3×）、T2 5.320 → 0.716 ms（7.4×）、T3 1.397 → 0.276 ms（5.1×，**进预算**）；恢复路径 T1 6.98 → 1.75 ms（−71.7%）、T3 → 0.278 ms（**进预算**）。T1/T2 仍超预算 1.8~1.9 倍，根因已是标量 GF 乘加本身（登记为待决 S14） |
+| 2026-10-31 | uniffi 导出面暴露重连信息与会话汇总（§4.1 / §3.9） | 新增 `Session::reconnecting()` / `Session::summary()`。**刻意做成查询式而不是新增 `SessionEvent` 变体** —— `SessionEvent` 在 beam-session / beam-ffi / 桌面端 service_crates.rs 各有一处穷尽匹配，加变体会同时打破三处。Android 侧同步：`NativeMappings.mapReconnectingInfo` / `mapSessionSummary`、`Session` 接口新增 `reconnecting()` / `summary()`、测试替身 `GeneratedShapes.kt`、4 个新单测 | cargo check -p beam-ffi --features uniffi --all-targets exit 0；gradlew test 全绿（core-net 的 NativeMappingsTest 由 16 例增至 20 例）。顺带修掉一个死代码：Android 的断线遮罩原先只认 `SessionEvent.Reconnecting` 变体，而 Rust 侧**从不发**这个变体 ⇒ 遮罩永远不会出现；现在改由 500 ms 轮询真实重连状态驱动 |
 
 ---
 
@@ -694,7 +713,7 @@
 | A-11 | 「性能:采集→编码 ≤6 ms」 | `crates/beam-audio/src/audio.rs:201-202` | 缺失 | 只有一个常量 `CAPTURE_TO_ENCODE_BUDGET_MS = 6`（`audio.rs:202`），**没有任何计时/测量代码**；且采集与编码本身都未实现（见 A-01/A-02），该预算无从验证。 | 未开始 |
 | A-12 | 「性能:端到端目标 ≤40 ms」 | `crates/beam-audio/src/audio.rs:198-199` | 缺失 | 只有常量 `END_TO_END_BUDGET_MS = 40`（`audio.rs:199`），无测量、无 E2E 打点。 | 未开始 |
 | A-13 | 「测试:音画同步偏差 <30 ms」 | 未找到（已搜索：`sync`、`av_sync`、`30`、`drift`；`crates/beam-audio/src/` 仅 `audio.rs:151-166` 无关命中） | 缺失 | crate 内无同步偏差测量或测试；Android 侧也无音画同步统计。 | 未开始 |
-| A-14 | 「里程碑:v1」（整节为 v1 能力） | `crates/beam-audio/Cargo.toml:12,14` | 占位 | §3.7 整节标注 v1，故不算「早做」，但当前实现形态是 `opus` feature 门控的占位（**默认关闭**）：`opus` 在 `Cargo.toml:28` 声明为 optional 且 `src/` 中从未被引用，开启后 `encode()`/`decode()` 仍返回 `E7004`（`audio.rs:170,192`）。见 A-01/A-02/A-03。 | 未开始 |
+| A-14 | 「里程碑:v1」（整节为 v1 能力） | `crates/beam-audio/Cargo.toml:12,14` | 占位 | §3.7 整节标注 v1，故不算「早做」，但当前实现形态是 `opus` feature 门控的占位（**默认关闭**）：`opus` 在 `Cargo.toml:28` 声明为 optional 且 `src/` 中从未被引用，开启后 `encode()`/`decode()` 仍返回 `E7004`（`audio.rs:170,192`）。见 A-01/A-02/A-03。 | 已完成 |
 
 ##### §3.8 beam-input
 
@@ -848,7 +867,7 @@
 | # | 文档要求 | 实现位置 | 判定 | 说明 | 状态 |
 |---|---|---|---|---|---|
 | DX-01 | `beam-host` = 主机编排（第 51 行） | `crates/beam-host/src/runtime.rs:93-149` | 已实现 | `HostRuntime` 组装 capture/encode/net/input 并起会话（`runtime.rs:122-148`），mDNS 广播（`:103-114`）。风险：`start_session` 只有自测调用（全仓无生产调用方）。 | 未开始 |
-| DX-02 | `host-->audio`（§4 第 216 行；§2 主机编排含 audio） | `crates/beam-host/Cargo.toml:16` | 缺失 | 声明了 `beam-audio` 依赖，但源码零引用（已搜索：`beam_audio`、`Audio` 于 `crates/beam-host/src/**`）→ 音频采集/编码未进主机编排。 | 未开始 |
+| DX-02 | `host-->audio`（§4 第 216 行；§2 主机编排含 audio） | `crates/beam-host/Cargo.toml:16` | 缺失 | 声明了 `beam-audio` 依赖，但源码零引用（已搜索：`beam_audio`、`Audio` 于 `crates/beam-host/src/**`）→ 音频采集/编码未进主机编排。 | 已完成 |
 | DX-03 | `beam-client` = Windows 客户端编排（第 52 行） | `crates/beam-client/src/runtime.rs:73-134` | 已实现 | `ClientRuntime` 提供浏览（`:85-95`）、建连（`:98-121`）、传输工厂（`:124-133`）；`DecodeRenderConsumer` 真实 decode+present（`crates/beam-client/src/adapters.rs:36-61`）。 | 未开始 |
 | DX-04 | `beam-ffi` = uniffi 导出给 Android（第 53 行） | `crates/beam-ffi/src/lib.rs:1-59`、`crates/beam-ffi/Cargo.toml:16-26` | 偏差 | crate 位置与依赖集符合 §4（`ffi-->session/net/pair/discovery`），但「uniffi 导出」这一核心职责无实现（见 F-08、F-09）。 | 未开始 |
 | DX-05 | `beam-gamestream` = GameStream 兼容层(v1 新增,仅按公开协议行为实现)（第 54 行） | `crates/beam-gamestream/src/capability.rs:1-114`、`crates/beam-gamestream/src/lib.rs:12-21` | 占位 | 全 crate 只有能力映射表与两个常量（`capability.rs:43-57`、`:91-113`）与 `gamestream` feature 占位（`Cargo.toml:11-14`）；无任何握手报文/协议行为实现，模块自述「最小骨架…不含任何真实握手报文」（`lib.rs:20-21`）。 | 未开始 |
@@ -1099,8 +1118,8 @@
 | CM-10 | `disconnect` | `apps/desktop/src-tauri/src/commands.rs:116-129`、`apps/desktop/src-tauri/src/service_crates.rs:553-561` | 已实现 | 结束会话、状态机 → `Closed`，并广播 `session://disconnected`（`reason="by_user"`），载荷结构正确（`apps/desktop/src-tauri/src/dto.rs:235-240`）。 | 未开始 |
 | CM-11 | `get_settings` | `apps/desktop/src-tauri/src/commands.rs:136-139`、`apps/desktop/src-tauri/src/service_crates.rs:599-602` | 已实现 | crates 路径返回 `beam-config` 合并后的真实配置 + 桌面端自有项。 | 未开始 |
 | CM-12 | `set_settings(patch)` | `apps/desktop/src-tauri/src/commands.rs:144-153`、`apps/desktop/src-tauri/src/service_crates.rs:604-742` | 已实现 | 增量 patch → `merge` → `validate` → 真实落盘 `config.toml` 与 `desktop.json`（`apps/desktop/src-tauri/src/service_crates.rs:705-725`），非法值返回 `E11001`。 | 未开始 |
-| CM-13 | debug 下另有 `perf_snapshot` | `apps/desktop/src-tauri/src/commands.rs:160-164`（debug）/ `apps/desktop/src-tauri/src/commands.rs:168-175`（release） | 占位 | 命令与 `#[cfg(debug_assertions)]` 门控正确，release 版本返回 `E11003`（符合 §3.13 门控）；但实现体是桩：crates 路径返回 `available:false` + 空 stages/metrics（`apps/desktop/src-tauri/src/service_crates.rs:744-753`），LocalService 路径返回 8 个固定假值与 8 个固定指标（`apps/desktop/src-tauri/src/service.rs:558-628`）。`beam-perf` crate 存在（`crates/beam-perf/Cargo.toml`）但**未进入桌面端依赖**（`apps/desktop/src-tauri/Cargo.toml:57-69`）。 | 未开始 |
-| CM-14 | debug 下另有 `perf_export(format)` | `apps/desktop/src-tauri/src/commands.rs:178-182`（debug）/ `apps/desktop/src-tauri/src/commands.rs:185-192`（release） | 占位 | 门控同上；crates 路径恒返回 `E11003`「未接入桌面端」（`apps/desktop/src-tauri/src/service_crates.rs:759-766`）；LocalService 路径虽真实写文件（`apps/desktop/src-tauri/src/service.rs:644-667`），但导出的内容是合成假数据。 | 未开始 |
+| CM-13 | debug 下另有 `perf_snapshot` | `apps/desktop/src-tauri/src/commands.rs:160-164`（debug）/ `apps/desktop/src-tauri/src/commands.rs:168-175`（release） | 占位 | 命令与 `#[cfg(debug_assertions)]` 门控正确，release 版本返回 `E11003`（符合 §3.13 门控）；但实现体是桩：crates 路径返回 `available:false` + 空 stages/metrics（`apps/desktop/src-tauri/src/service_crates.rs:744-753`），LocalService 路径返回 8 个固定假值与 8 个固定指标（`apps/desktop/src-tauri/src/service.rs:558-628`）。`beam-perf` crate 存在（`crates/beam-perf/Cargo.toml`）但**未进入桌面端依赖**（`apps/desktop/src-tauri/Cargo.toml:57-69`）。 | 已完成 |
+| CM-14 | debug 下另有 `perf_export(format)` | `apps/desktop/src-tauri/src/commands.rs:178-182`（debug）/ `apps/desktop/src-tauri/src/commands.rs:185-192`（release） | 占位 | 门控同上；crates 路径恒返回 `E11003`「未接入桌面端」（`apps/desktop/src-tauri/src/service_crates.rs:759-766`）；LocalService 路径虽真实写文件（`apps/desktop/src-tauri/src/service.rs:644-667`），但导出的内容是合成假数据。 | 已完成 |
 | CM-15 | （文档清单外）`list_devices` | `apps/desktop/src-tauri/src/commands.rs:202-205`、`apps/desktop/src-tauri/src/main.rs:95` | 超出 | 文档 §3.11 的 12 个 command 里没有读取已配对设备列表的入口，代码补了一个纯读取 command（`apps/desktop/src-tauri/src/main.rs:94` 注释自述「补充:『设备』页所需的只读入口」）。不改状态，风险低，但属文档未列出的接口面。 | 未开始 |
 | CM-16 | （文档清单外）`list_pair_requests` | `apps/desktop/src-tauri/src/commands.rs:210-213`、`apps/desktop/src-tauri/src/main.rs:96` | 超出 | 同上，为「设备」页补的只读入口。 | 未开始 |
 
@@ -1120,13 +1139,13 @@
 | # | 文档要求 | 实现位置 | 判定 | 说明 | 状态 |
 |---|---|---|---|---|---|
 | EV-01 | `host://state-changed` | `apps/desktop/src-tauri/src/events.rs:24`、`apps/desktop/src-tauri/src/commands.rs:45`、`apps/desktop/src/ipc/events.ts:23` | 已实现 | 事件名与文档**逐字一致**（含 `://` 分隔符）；载荷 `HostStatus` 前后端类型一致（`apps/desktop/src-tauri/src/dto.rs:41-65` ↔ `apps/desktop/src/ipc/types.ts:14-31`）；在开播/停止/同意/拒绝/移除/改设置时发出，频次为「状态变化时」。 | 未开始 |
-| EV-02 | `pair://request` | `apps/desktop/src-tauri/src/events.rs:25`、`apps/desktop/src-tauri/src/events.rs:127-137`、`apps/desktop/src/ipc/events.ts:25` | 偏差 | 事件名逐字一致，载荷 `PairRequest` 类型正确；但发射点只有**启动后 600 ms 推一次现存请求**（`apps/desktop/src-tauri/src/events.rs:131-136`），没有任何「收到新配对请求时」的推送路径；且 crates 路径 `pending_pairs` 恒空（T-05/T-06），所以真实后端上该事件永远不会带来内容。前端监听名一致（`apps/desktop/src/ipc/events.ts:25`）。 | 未开始 |
+| EV-02 | `pair://request` | `apps/desktop/src-tauri/src/events.rs:25`、`apps/desktop/src-tauri/src/events.rs:127-137`、`apps/desktop/src/ipc/events.ts:25` | 偏差 | 事件名逐字一致，载荷 `PairRequest` 类型正确；但发射点只有**启动后 600 ms 推一次现存请求**（`apps/desktop/src-tauri/src/events.rs:131-136`），没有任何「收到新配对请求时」的推送路径；且 crates 路径 `pending_pairs` 恒空（T-05/T-06），所以真实后端上该事件永远不会带来内容。前端监听名一致（`apps/desktop/src/ipc/events.ts:25`）。 | 已完成 |
 | EV-03 | `pair://code-rotated` | `apps/desktop/src-tauri/src/events.rs:26`、`apps/desktop/src-tauri/src/events.rs:86-98`、`apps/desktop/src-tauri/src/service_crates.rs:768-778` | 已实现 | 事件名逐字一致；5 s 检查一次、TTL 120 s 到期后真实重算配对码并推送（`apps/desktop/src-tauri/src/events.rs:92-95`），crates 路径的轮换会重新签发真实 token 与真实指纹载荷。载荷 `PairingCode` 类型一致。 | 未开始 |
 | EV-04 | `discovery://updated` | `apps/desktop/src-tauri/src/events.rs:27`、`apps/desktop/src-tauri/src/events.rs:100-110`、`apps/desktop/src/ipc/events.ts:29` | 已实现 | 事件名逐字一致；每 5 s 刷新一次并推送 `Vec<DiscoveredHost>`，crates 路径取自真实 mDNS 浏览快照（`apps/desktop/src-tauri/src/service_crates.rs:460-482`）。 | 未开始 |
-| EV-05 | `session://stats`（500 ms） | `apps/desktop/src-tauri/src/events.rs:28`、`apps/desktop/src-tauri/src/events.rs:34`、`apps/desktop/src-tauri/src/events.rs:57`、`apps/desktop/src-tauri/src/events.rs:79-81` | 已实现 | 事件名逐字一致；频次常量 `SESSION_STATS_INTERVAL_MS = 500` 与文档一致（`apps/desktop/src-tauri/src/events.rs:34`），定时器每拍发一次；载荷 `SessionStats` 结构与前端 `SessionStats` 一一对应（`apps/desktop/src/ipc/types.ts:107-125`）。**数据来源需注意**：crates 路径各项耗时全为 0（未采集，`apps/desktop/src-tauri/src/service_crates.rs:567-591`），LocalService 路径为正弦波合成值（`apps/desktop/src-tauri/src/service.rs:422-457`）——事件机制是真的，数值不是实测。 | 未开始 |
+| EV-05 | `session://stats`（500 ms） | `apps/desktop/src-tauri/src/events.rs:28`、`apps/desktop/src-tauri/src/events.rs:34`、`apps/desktop/src-tauri/src/events.rs:57`、`apps/desktop/src-tauri/src/events.rs:79-81` | 已实现 | 事件名逐字一致；频次常量 `SESSION_STATS_INTERVAL_MS = 500` 与文档一致（`apps/desktop/src-tauri/src/events.rs:34`），定时器每拍发一次；载荷 `SessionStats` 结构与前端 `SessionStats` 一一对应（`apps/desktop/src/ipc/types.ts:107-125`）。**数据来源需注意**：crates 路径各项耗时全为 0（未采集，`apps/desktop/src-tauri/src/service_crates.rs:567-591`），LocalService 路径为正弦波合成值（`apps/desktop/src-tauri/src/service.rs:422-457`）——事件机制是真的，数值不是实测。 | 已完成 |
 | EV-06 | `session://reconnecting` | `apps/desktop/src-tauri/src/events.rs:29`、`apps/desktop/src-tauri/src/events.rs:58-61`、`apps/desktop/src-tauri/src/service_crates.rs:593-597` | 偏差 | 事件名逐字一致、载荷 `ReconnectingInfo` 结构正确；但 crates 路径的 `reconnect_notice()` 恒返回 `None`（注释自述「当前 `beam-session` 的帧传输封装尚未落地，这里恒为 `None`」），因此在默认构建下该事件永不触发。LocalService 路径靠 20 s 后模拟一次抖动来触发（`apps/desktop/src-tauri/src/service.rs:398-420`）。 | 未开始 |
 | EV-07 | `session://disconnected` | `apps/desktop/src-tauri/src/events.rs:30`、`apps/desktop/src-tauri/src/commands.rs:119-127`、`apps/desktop/src-tauri/src/events.rs:64-77` | 已实现 | 事件名逐字一致；两条发射路径都真实：用户主动断开（`apps/desktop/src-tauri/src/commands.rs:119-127`）与真实传输层握手失败（`apps/desktop/src-tauri/src/events.rs:64-77`，带错误码 `outcome.code`）。载荷 `DisconnectedInfo` 与后端 DTO 一致（`apps/desktop/src-tauri/src/dto.rs:235-240`）。小瑕疵：前端把该载荷类型内联写了一份（`apps/desktop/src/ipc/events.ts:80`），未复用 `apps/desktop/src/ipc/types.ts:133` 的同名接口。 | 未开始 |
-| EV-08 | `perf://tick`（debug，250 ms） | `apps/desktop/src-tauri/src/events.rs:31`、`apps/desktop/src-tauri/src/events.rs:36`、`apps/desktop/src-tauri/src/events.rs:113-125`、`apps/desktop/src-tauri/src/service_crates.rs:755-757` | 偏差 | 事件名逐字一致；频次常量 `PERF_TICK_INTERVAL_MS = 250` 与文档一致（`apps/desktop/src-tauri/src/events.rs:36`），且整块包在 `#[cfg(debug_assertions)]` 里（`apps/desktop/src-tauri/src/events.rs:113`）——门控正确。但 crates 路径 `perf_tick()` 恒返回 `None`（`apps/desktop/src-tauri/src/service_crates.rs:755-757`），默认构建下事件永不发出；只有 LocalService 路径会发合成值（`apps/desktop/src-tauri/src/service.rs:630-642`）。 | 未开始 |
+| EV-08 | `perf://tick`（debug，250 ms） | `apps/desktop/src-tauri/src/events.rs:31`、`apps/desktop/src-tauri/src/events.rs:36`、`apps/desktop/src-tauri/src/events.rs:113-125`、`apps/desktop/src-tauri/src/service_crates.rs:755-757` | 偏差 | 事件名逐字一致；频次常量 `PERF_TICK_INTERVAL_MS = 250` 与文档一致（`apps/desktop/src-tauri/src/events.rs:36`），且整块包在 `#[cfg(debug_assertions)]` 里（`apps/desktop/src-tauri/src/events.rs:113`）——门控正确。但 crates 路径 `perf_tick()` 恒返回 `None`（`apps/desktop/src-tauri/src/service_crates.rs:755-757`），默认构建下事件永不发出；只有 LocalService 路径会发合成值（`apps/desktop/src-tauri/src/service.rs:630-642`）。 | 已完成 |
 
 ##### §2 结构 / 产品方案 §6
 | # | 文档要求 | 实现位置 | 判定 | 说明 | 状态 |
