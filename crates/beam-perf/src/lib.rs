@@ -23,6 +23,36 @@
 //! - [`perf_span!`]：作用域计时宏。
 //! - [`Perf::sample_system_usage`]：采样一次系统资源占用（CPU / GPU / 内存）。
 //!
+//! ## 接入方式（§4 分层规则）
+//!
+//! §4 规定「perf 可被任意层以 feature 可选依赖」。平台 crate 的标准接法是：
+//!
+//! ```toml
+//! [features]
+//! perf-stats = ["dep:beam-perf", "beam-perf/perf-stats"]
+//!
+//! [dependencies]
+//! beam-perf = { workspace = true, optional = true }
+//! ```
+//!
+//! - `dep:beam-perf`：把本 crate 变成**可选依赖**（默认不进依赖树，
+//!   release 产物里不会有任何 perf 符号）；
+//! - `beam-perf/perf-stats`：打开本 crate 自己的采集实现
+//!   （**必须一起打开**，否则 [`perf_span!`] 仍然展开为空、采集器不存在）。
+//!
+//! 当前已接入的平台层（各自的 `perf-stats` feature 默认关闭）：
+//!
+//! | crate | 采集的阶段 |
+//! |---|---|
+//! | `beam-capture` | [`Stage::Capture`]（抓屏） |
+//! | `beam-encode` | [`Stage::ColorConvert`]（颜色转换）、[`Stage::Encode`]（编码） |
+//! | `beam-decode` | [`Stage::Decode`]（解码） |
+//! | `beam-render` | [`Stage::Render`]（渲染） |
+//!
+//! [`Stage::Packetize`] / [`Stage::Rtt`] / [`Stage::Loss`] / [`Stage::FecRecover`] /
+//! [`Stage::Jitter`] 属网络层（`beam-net`）的职责；
+//! [`Stage::E2E`] 需要跨主机的时钟偏移（见 [`clock`]），入口在会话层。
+//!
 //! ## 子模块
 //!
 //! - [`stage`]：采集阶段枚举（含端到端 `Stage::E2E`）。
@@ -294,9 +324,20 @@ impl Drop for Span {
     }
 }
 
+/// `perf-stats` 关闭时 `perf_span!` 的展开结果。
+///
+/// 零大小、无字段、**什么都不做**：不读时钟、不分配、不加锁。
+///
+/// 为什么不是直接展开成 `()`：`()` 在语句位置会被 clippy 的
+/// `unused_unit` / `unneeded_unit_expression`（该 lint 在 clippy
+/// 版本之间改过名）盯上，而这个宏必须**跨 clippy 版本**都零告警 ——
+/// CI 的 clippy 用 `-D warnings`，一条告警就会红。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoopSpan;
+
 /// 作用域计时宏：`perf_span!("encode")`。
 ///
-/// `perf-stats` 关闭时展开为空（`()`），调用方无需条件编译。
+/// `perf-stats` 关闭时展开为 [`NoopSpan`]（空实现），调用方无需条件编译。
 #[cfg(feature = "perf-stats")]
 #[macro_export]
 macro_rules! perf_span {
@@ -307,11 +348,13 @@ macro_rules! perf_span {
 }
 
 /// 作用域计时宏：`perf_span!("encode")`（feature 关闭时为空实现）。
+///
+/// 关闭时展开成 [`NoopSpan`]：**零开销** —— 不读时钟、不分配、不加锁。
 #[cfg(not(feature = "perf-stats"))]
 #[macro_export]
 macro_rules! perf_span {
     ($stage:literal) => {{
-        ()
+        $crate::NoopSpan
     }};
 }
 
@@ -342,17 +385,19 @@ mod tests {
 
     #[test]
     fn perf_span_macro_compiles_in_both_modes() {
-        let guard = crate::perf_span!("encode");
-        let _ = guard;
+        // `let _ = …` 而不是 `let guard = …; let _ = guard;`：
+        // 后者在 feature 关闭时会把 `()` 绑到具名变量上，触发 clippy 的
+        // `let_unit_value`。两种模式下这里都只需要「能编译」。
+        let _ = crate::perf_span!("encode");
     }
 
-    /// §3.13 要求：`perf_span!` 在 feature 关闭时必须展开为空。
-    /// 用类型标注断言展开结果确实是 `()`，防止宏被误改成有开销的实现。
+    /// §3.13 要求：`perf_span!` 在 feature 关闭时必须**什么都不做**。
+    /// 用类型标注断言展开结果确实是零大小占位值，防止宏被误改成有开销的实现。
     #[cfg(not(feature = "perf-stats"))]
     #[test]
-    fn perf_span_expands_to_unit_when_feature_disabled() {
-        let _: () = crate::perf_span!("encode");
-        let _: () = crate::perf_span!("e2e");
+    fn perf_span_expands_to_noop_when_feature_disabled() {
+        let _: crate::NoopSpan = crate::perf_span!("encode");
+        let _: crate::NoopSpan = crate::perf_span!("e2e");
     }
 
     /// feature 开启时展开为作用域计时守卫。
@@ -364,8 +409,7 @@ mod tests {
 
     #[test]
     fn perf_span_e2e_macro_compiles() {
-        let guard = crate::perf_span!("e2e");
-        let _ = guard;
+        let _ = crate::perf_span!("e2e");
     }
 
     #[test]

@@ -254,6 +254,9 @@ impl Renderer for D3D11Renderer {
                 });
             };
 
+            // §3.13「渲染」阶段：解码纹理拷进后备缓冲 + 交换链 Present。
+            let _render_span = perf_span!("render");
+
             // `DecodedFrame::surface` 按 §4 分层说明承载平台指针：
             // 解码纹理的指针由渲染层解释成 D3D11 纹理，并且只借用、不接管所有权。
             backend.present(f.surface.raw)?;

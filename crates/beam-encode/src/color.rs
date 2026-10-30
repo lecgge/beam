@@ -188,6 +188,10 @@ impl RgbToNv12 {
         reason = "VideoProcessorBlt 与输入视图创建都是 unsafe 的 D3D11 调用"
     )]
     pub fn convert(&mut self, src: &ID3D11Texture2D) -> Result<ID3D11Texture2D, EncError> {
+        // §3.13「颜色转换」阶段：GPU 上的 RGB→NV12。
+        // 源纹理本来就是 NV12 时这里是一次**透传**（直接返回源纹理），
+        // 记下来的耗时同样是真实测量值（调用本身的耗时），不填 0 冒充。
+        let _color_span = perf_span!("color_convert");
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         unsafe { src.GetDesc(&mut desc) };
 

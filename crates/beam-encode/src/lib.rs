@@ -63,6 +63,12 @@
 //! 真实硬编依赖原生 ffmpeg（LGPL 动态链接），因此放在 `ffmpeg` feature 后面且**默认关闭**；
 //! 默认构建下 `probe()` 返回空列表、`encode()` 返回 `E6004`。
 //!
+//! ## 性能埋点（§3.13）
+//!
+//! `perf-stats` feature **默认关闭**（§7：release 禁止开启）。开启后本层通过
+//! 可选依赖 `beam-perf` 采集**「颜色转换」与「编码」阶段**的耗时（见 [`perf`] 模块），
+//! 数据汇进 `beam_perf::Perf::snapshot()`；关闭时埋点**零开销**。
+//!
 //! ## 验证状态
 //!
 //! - ✅ **「NVENC 出码流」已在本机真机验证**（§9 M-1 验证点②）：
@@ -83,6 +89,10 @@
 // 决策 D1：平台层局部放开 unsafe。crate 根用 `deny`，
 // 真正需要 unsafe 的地方（FFmpeg 的 FFI、D3D11 的 COM 指针）逐个 `#[allow]` 并写明原因。
 #![deny(unsafe_code)]
+
+// 性能埋点宏（§3.13）：必须声明在使用它的模块之前（`#[macro_use]` 是文本作用域）。
+#[macro_use]
+mod perf;
 
 pub mod encoder;
 pub mod error;

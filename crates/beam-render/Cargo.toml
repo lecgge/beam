@@ -12,8 +12,14 @@ repository.workspace = true
 default = []
 # 真实 D3D11 flip-model 交换链实现（引入 windows 的 D3D11 / DXGI 绑定）。
 d3d11 = ["dep:windows"]
+# §3.13 / §7：性能统计（perf-stats）默认关闭，release 禁止开启。
+# 开启后本 crate 的关键路径会通过 beam-perf 采集「渲染」阶段耗时；
+# `beam-perf/perf-stats` 必须一起打开，否则采集宏仍然展开为空（§3.13 门控）。
+perf-stats = ["dep:beam-perf", "beam-perf/perf-stats"]
 
 [dependencies]
+# §3.13：perf 可被任意层以 feature 可选依赖接入（§4 分层规则）。
+beam-perf = { workspace = true, optional = true }
 beam-proto = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

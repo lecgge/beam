@@ -208,6 +208,10 @@ impl DxgiBackend {
             }
         };
 
+        // §3.13「抓屏」阶段：从这里开始的 GPU 拷贝才是真正的抓屏开销。
+        // （`AcquireNextFrame` 超时返回 `None` 时没有抓屏发生，不该进统计。）
+        let _capture_span = perf_span!("capture");
+
         let destination = match self.create_destination(&source) {
             Ok(texture) => texture,
             Err(err) => {

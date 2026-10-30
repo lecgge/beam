@@ -274,14 +274,18 @@ impl FfmpegVideoEncoder {
         native: &mut NativeEncoder,
         f: &CapturedFrame,
     ) -> Result<EncodedFrame, EncError> {
-        // 1) GPU 颜色转换：RGB → NV12。
+        // 1) GPU 颜色转换：RGB → NV12（耗时在 `RgbToNv12::convert` 里单独计入
+        //    §3.13 的「颜色转换」阶段，不混进下面的「编码」阶段）。
         if native.converter.is_none() {
             native.converter = Some(RgbToNv12::new(&f.tex)?);
         }
         let converter = native.converter.as_mut().expect("converter 已建立");
         let nv12 = converter.convert(&f.tex)?.clone();
 
-        // 2) 组帧。
+        // 2) 组帧 + 送帧收包：§3.13 的「编码」阶段。
+        //    一次性的编码器上下文建立（`open_native`）不在计时范围内——
+        //    那是一次性开销，不是每帧耗时，混进来会污染直方图。
+        let _encode_span = perf_span!("encode");
         let frame = self.build_frame(native, f, &nv12)?;
 
         // 3) 送帧 + 收包。

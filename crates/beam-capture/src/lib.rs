@@ -71,6 +71,12 @@
 //! 默认 feature 下提供可编译的类型与 trait 实现；真实 WGC / DXGI 调用在 `wgc` feature 后面，
 //! 未开启时 `start` 返回 `E5004`，`latest` 恒为 `None`。
 //!
+//! ## 性能埋点（§3.13）
+//!
+//! `perf-stats` feature **默认关闭**（§7：release 禁止开启）。开启后本层通过
+//! 可选依赖 `beam-perf` 采集**「抓屏」阶段**的耗时（见 [`perf`] 模块），
+//! 数据汇进 `beam_perf::Perf::snapshot()`；关闭时埋点**零开销**。
+//!
 //! ## unsafe 策略（决策 D1）
 //!
 //! crate 根是 `#![deny(unsafe_code)]`，只在确实需要裸指针 / COM 的地方
@@ -80,6 +86,10 @@
 //! - `wgc` / `dxgi`：D3D11 / DXGI 的 COM 调用与纹理拷贝。
 
 #![deny(unsafe_code)]
+
+// 性能埋点宏（§3.13）：必须声明在使用它的模块之前（`#[macro_use]` 是文本作用域）。
+#[macro_use]
+mod perf;
 
 pub mod error;
 mod slot;

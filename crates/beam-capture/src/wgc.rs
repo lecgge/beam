@@ -198,6 +198,9 @@ impl GraphicsCaptureApiHandler for WgcHandler {
         _control: InternalCaptureControl,
     ) -> Result<(), Self::Error> {
         let ts_us = now_us();
+        // §3.13「抓屏」阶段：这个回调只在**真的有新帧**时触发，
+        // 所以整段回调（GPU→GPU 拷贝 + 纹理发布）就是一次真实的抓屏开销。
+        let _capture_span = perf_span!("capture");
         // SAFETY: `as_raw_texture` 返回的引用在 `frame` 存活期间有效；
         // 这里只借用它做一次 GPU 拷贝，不把引用带出回调。
         let source = unsafe { frame.as_raw_texture() };

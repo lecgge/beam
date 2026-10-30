@@ -12,9 +12,15 @@ repository.workspace = true
 default = []
 # 真实 WGC 抓屏实现（依赖 windows-capture）。
 wgc = ["dep:windows-capture"]
+# §3.13 / §7：性能统计（perf-stats）默认关闭，release 禁止开启。
+# 开启后本 crate 的抓屏路径会通过 beam-perf 采集「抓屏」阶段耗时；
+# `beam-perf/perf-stats` 必须一起打开，否则采集宏仍然展开为空（§3.13 门控）。
+perf-stats = ["dep:beam-perf", "beam-perf/perf-stats"]
 
 [dependencies]
 beam-config = { workspace = true }
+# §3.13：perf 可被任意层以 feature 可选依赖接入（§4 分层规则）。
+beam-perf = { workspace = true, optional = true }
 beam-proto = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
@@ -39,6 +45,12 @@ windows_legacy = { package = "windows", version = "0.61.3", features = [
     "Win32_Graphics_Direct3D11",
 ] }
 windows-capture = { workspace = true, optional = true }
+
+# 抓屏阶段埋点验证入口（§3.13）：真的用 WGC 抓屏，打印 Perf::snapshot()。
+# 需要真实显示器与交互式桌面会话，以及 perf-stats（要真的采集）。
+[[example]]
+name = "perf_probe"
+required-features = ["wgc", "perf-stats"]
 
 [lints]
 workspace = true

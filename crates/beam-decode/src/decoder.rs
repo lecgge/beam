@@ -213,6 +213,8 @@ impl D3D11VaDecoder {
     #[cfg(feature = "ffmpeg")]
     pub fn decode_output(&mut self, f: AssembledFrame) -> Result<DecodedOutput, DecError> {
         let backend = self.backend.as_mut().ok_or(DecError::DecoderUnavailable)?;
+        // §3.13「解码」阶段：D3D11VA 硬解一帧的真实耗时。
+        let _decode_span = perf_span!("decode");
         let out = backend.decode(&f)?;
         self.surface = out.surface.clone();
         Ok(out)

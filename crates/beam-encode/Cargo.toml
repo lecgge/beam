@@ -15,9 +15,15 @@ default = []
 ffmpeg = ["dep:ffmpeg-next"]
 # §7：AV1 是 v2 能力，默认关闭。
 av1 = []
+# §3.13 / §7：性能统计（perf-stats）默认关闭，release 禁止开启。
+# 开启后本 crate 的关键路径会通过 beam-perf 采集「颜色转换 / 编码」阶段耗时；
+# `beam-perf/perf-stats` 必须一起打开，否则采集宏仍然展开为空（§3.13 门控）。
+perf-stats = ["dep:beam-perf", "beam-perf/perf-stats"]
 
 [dependencies]
 beam-config = { workspace = true }
+# §3.13：perf 可被任意层以 feature 可选依赖接入（§4 分层规则）。
+beam-perf = { workspace = true, optional = true }
 beam-proto = { workspace = true }
 # EncodedFrame.slices 用 bytes::Bytes（协议层类型，零拷贝共享）。
 bytes = { workspace = true }
@@ -39,6 +45,12 @@ ffmpeg-next = { workspace = true, optional = true }
 [[example]]
 name = "nvenc_encode_smoke"
 required-features = ["ffmpeg"]
+
+# 性能埋点验证入口（§3.13）：真的编一段码，打印 Perf::snapshot() 的阶段耗时。
+# 需要真实 ffmpeg 后端（要真的编码）与 perf-stats（要真的采集）。
+[[example]]
+name = "perf_probe"
+required-features = ["ffmpeg", "perf-stats"]
 
 [lints]
 workspace = true
