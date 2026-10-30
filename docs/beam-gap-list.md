@@ -43,19 +43,19 @@
 
 ### 落地进度总览（还剩多少）
 
-逐行统计共 **574** 条。下表把「审计当时的判定」与「当前落地状态」交叉起来——**左三列是当时缺什么，右边是现在做到哪了**。
+逐行统计共 **597** 条。下表把「审计当时的判定」与「当前落地状态」交叉起来——**左三列是当时缺什么，右边是现在做到哪了**。
 
 | 审计判定 | 条数 | 已完成 | 进行中 | 已排期 | 未开始 |
 |---|---|---|---|---|---|
-| 已实现 | 349 | 8 | 0 | 0 | 341 |
-| 占位 | 41 | 21 | 1 | 0 | 18 |
-| 缺失 | 110 | 35 | 0 | 0 | 62 |
-| 偏差 | 73 | 16 | 1 | 0 | 56 |
-| 超出 | 1 | 0 | 0 | 0 | 1 |
-| **合计** | **574** | **80** | **2** | **0** | **478** |
+| 已实现 | 364 | 8 | 0 | 0 | 356 |
+| 占位 | 43 | 23 | 1 | 0 | 18 |
+| 缺失 | 111 | 38 | 0 | 0 | 60 |
+| 偏差 | 76 | 21 | 1 | 0 | 54 |
+| 超出 | 3 | 0 | 0 | 0 | 3 |
+| **合计** | **597** | **90** | **2** | **0** | **491** |
 
-- 审计判定为**未达成**（占位+缺失+偏差）：**224** 条
-- 其中**已落地**：**88** 条；**仍未排期**：**136** 条
+- 审计判定为**未达成**（占位+缺失+偏差）：**230** 条
+- 其中**已落地**：**98** 条；**仍未排期**：**132** 条
 
 > 「未开始」不代表这一条没人管，而是**还没排进任何一批**。排期后的条目会出现在「落地进度台账」一节，带批次号与验收方式。
 
@@ -155,9 +155,9 @@
 
 | 状态 | 条目数 |
 |---|---|
-| 未开始 | 2 |
+| 未开始 | 1 |
 | 进行中 | 2 |
-| 已完成 | 81 |
+| 已完成 | 91 |
 | 已阻塞 | 12 |
 | 暂不做 | 1 |
 | 偏差 | 1 |
@@ -251,6 +251,21 @@
 | AMF / QSV 路径无法在本机验证 | 本机 conda LGPL ffmpeg 只编了 NVENC（已扫 avcodec-60.dll 确认无 *_amf / *_qsv），代码按 §3.6 基线实现完毕 | 需对应硬件 |
 | GPU RGB→NV12（VideoProcessor）未通过 | 本机 CreateVideoProcessorInputView/OutputView 返回 E_INVALIDARG；已验证的替代路径是「NV12 纹理 → D3D11 硬件帧 → NVENC」；文档允许的 compute shader 方案未实现 | 下一批 |
 
+| B5 | 2026-10-30 | 第五批：桌面端主机模式 + 会话层收尾 + 分帧收敛 + perf 埋点接入 | beam-host / beam-session / beam-net / beam-client / beam-perf / 平台层 crate / apps/desktop | 已完成 | cargo fmt --all --check exit 0；cargo check --workspace --all-targets exit 0 / 0 warning；cargo clippy --workspace --all-targets -- -D warnings exit 0 / 0 warning；cargo test --workspace exit 0（41 套件 / 350 passed / 0 failed / 5 ignored）；桌面端 fmt / clippy / check 三种 feature 组合均 exit 0 / 0 warning；gradlew assembleDebug assembleRelease exit 0（6 个变体 APK）；gradlew test --rerun-tasks exit 0（22 套件 / 156 次 / 0 失败）；cargo tree -e features 中 perf-stats 0 命中 |
+
+- **B5-A 桌面端主机模式** — 写入范围：`crates/beam-host/**`、`apps/desktop/**`；覆盖条目 DX-09, CM-02, CM-06
+- **B5-B 会话层收尾** — 写入范围：`crates/beam-session/**`；覆盖条目 T-19, S-05, N-18
+- **B5-C 分帧编解码单一实现** — 写入范围：`crates/beam-net/**`、`crates/beam-client/**`；覆盖条目 
+- **B5-D perf 埋点接入平台层** — 写入范围：`crates/beam-perf/**`、`crates/beam-capture/**`、`crates/beam-encode/**`、`crates/beam-decode/**`、`crates/beam-render/**`；覆盖条目 X13-15
+
+**B5 追加项（审计中顺带发现，不在原 551 条内）**
+
+| 项 | 说明 | 归属 |
+|---|---|---|
+| 主机侧输入注入器未实现 | 桌面端作为主机时用 beam_host::NoopInputSink 接收输入流（读走但不注入）；beam-input 的 Windows SendInput 分支本身仍是空实现。§4 禁止桌面端直接依赖 beam-input | 下一批 |
+| 桌面端 host-platform 未进 CI | apps/desktop/src-tauri 的 host-platform feature（beam-host/platform → WGC + NVENC）本地构建 exit 0，但 CI 的 cargo check 不开它：需要 ffmpeg 开发库，而 §7 要求 LGPL 构建，CI 需引入 lgpl-shared 发行版 | CI 跟进 |
+| 分帧编解码的线上字节未双端互验 | beam_net::framing 的固定字节常量只覆盖单端自洽；两端同时改错时往返测试发现不了。已加「主机侧必须与共享实现产出相同字节」的断言，但真正的互验需要独立实现 | 下一批 |
+
 ### 已裁决事项
 
 | # | 议题 | 裁决 | 裁决日期 | 说明 | 解锁范围 |
@@ -262,6 +277,15 @@
 | D5 | 跨 crate 的 D3D11 设备契约由谁保证 | **设备由串流编排层 beam-host（L3）统一创建，并注入 capture / encode / decode / render；平台 crate 之间不横向依赖** | 2026-10-29 | 文档 §4 规定 L1 之间不可横向依赖（唯一例外 net→pair），§6 规定「D3D11 纹理用引用计数 COM 指针，capture→encode 同一设备上零拷贝」。用平台类型 ID3D11Device 作契约参数、由 L3 注入，是唯一同时满足这两条的形状。B3-D 已落地 D3D11VaDecoder::open_with_device(cfg, &ID3D11Device)；B3-A 的 D3D11Renderer::device() 已做运行期设备校验（不匹配则该帧清屏并告警，不静默拷错）。**未改文档语义。** |  |
 | D6 | NVENC 一帧流水线延迟在 host 侧如何处理 | **host 侧显式容忍 E6005（视作「本轮暂无输出」），且不在 host 侧再缓存一帧** | 2026-10-29 | 文档 §3.6 未规定 NVENC 延迟；§4.1 时序允许首帧晚一点到（客户端会等到 IDR）。在 host 侧缓存一帧会让主机比真实画面多持有一帧，把延迟做大，与 §4.1「上屏等待含 vsync 整帧量化、目标须留 1 帧余量」相悖。E6005 是段内扩展码，不进错误槽；真错误继续冒泡，不静默吞掉。**未改文档语义。** 仍缺：桌面端主机侧尚未消费该错误通道（start_hosting 未起 QUIC 监听）。 |  |
 
+### 待决策（阻塞后续批次）
+
+| # | 议题 | 影响 | 阻塞范围 |
+|---|---|---|---|
+| S1 | 设备平台字段（platform）缺失 | §3.4 的 mDNS TXT 不带平台字段、§5 协议也无设备信息消息 → 信任库里的设备平台恒为「未知平台」。补齐必须**改协议语义**：要么 beam-discovery 的 TXT 加 plat 字段，要么 §5 增加一条 DeviceInfo 控制消息。 | §3.4, §5 |
+| S2 | 帧头缺少独立的 pts 字段 | §5 的 16 字节帧头只有 capture_ts(48 位)，接收端 pts_us = capture_ts_us。若要求 pts 与 capture_ts 分开，须**改帧头布局**（16 字节已占满），属协议语义变更。 | §5 |
+| S3 | §5 自身矛盾：k ≤ 200 与「单帧超过 255 片拆多组」 | 两条互斥规则。实现按 200 拆组、255 只限 k+m。文档需统一口径 —— 这是**改文档**而非改实现。 | §5 |
+| S4 | JNI DirectByteBuffer 零拷贝 | §3.12 要求热路径走 JNI 直接 ByteBuffer 避免 uniffi 拷贝，当前是 Vec<u8> 拷贝路径。补齐需**新增外部依赖 jni**，属依赖引入决策，需拍板。 | §3.12, §6 |
+
 ### 本轮修复与提交记录
 
 | 日期 | 事项 | 说明 | 结果 |
@@ -270,6 +294,12 @@
 | 2026-10-29 | cargo fmt --all 归位 | B4-B 遗留的 beam-host/src/{adapters,runtime}.rs 格式偏差导致 fmt exit 1；执行 cargo fmt --all 只重排了这 2 个文件。 | root 与 desktop 两处 cargo fmt --check 均 exit 0 |
 | 2026-10-29 | 裁决 D4 / D5 / D6 | 三项均按「只改实现方式、不改文档语义」裁决，理由与影响已记入「已裁决事项」表，并在 beam-capture / beam-host / beam-encode 的模块文档里各加一段「决策备注」。 | 文档语义未变 |
 | 2026-10-29 | 拆分提交 86 项悬空改动 | ① d1393e0 平台层（capture/render/decode/encode + Cargo.lock + 技术设计文档）；② 95d5378 协议与网络（net/ffi）；③ 9e7632b 编排与主机（session/client/host）；④ f9c20ef Android 与桌面端。E6005 半成品的产生侧在 ①、消费侧在 ③，按 hunk 无法拆成独立提交（会留下编译不过的中间提交），故在 ③ 的提交信息里明确标注了完成度与未接通点。 | git status 干净，工作区无残留 |
+| 2026-10-30 |  | B5-A/B5-B/B5-C/B5-D 四个临时 worker 全部在收尾阶段命中 Token Plan 上限（2056），代码已落盘但验收未跑完。由主会话接手：复核全部落盘代码、补完 B5-A 未做的桌面端主机模式、跑完整验收并补 clippy 清零 | cargo fmt/check/clippy(-D warnings)/test 全绿 |
+| 2026-10-30 |  | 根工作区 15 条（beam-perf 新增 8 + 预存 7：derivable_impls / needless_update / manual_range_patt / unnecessary_cast / repeat_n）+ 桌面端 9 条（duplicated_attributes / manual_range_contains / needless_as_bytes / field_reassign_with_default / clone_on_copy / redundant_closure）。注意 CI 的 clippy 带 -D warnings，这些告警会直接让流水线变红 | 根工作区与桌面端（默认 / --no-default-features / --features host-platform 三种组合）clippy 均 0 warning |
+| 2026-10-30 |  | 关闭态展开成 () 会被 clippy 的 unused_unit / unneeded_unit_expression（该 lint 在 clippy 版本之间改过名）盯上，跨版本必炸。改为展开成零大小占位类型 NoopSpan：语义不变（仍然零开销），但任何 clippy 版本都不告警 | cargo clippy --workspace --all-targets -- -D warnings exit 0 |
+| 2026-10-30 |  | beam-host/src/net.rs 原先自带一份 FRAME_LEN_PREFIX / MAX_FRAME_LEN / FrameDecoder / encode_frame，与 beam-client 各存一份（改一边忘另一边就线上不通）。改为调用 beam_net::framing（beam-net 是 L2，host/client 都依赖它，不构成 L3 横向依赖）；对外错误码保持 E9005 不变，收敛的是实现不是语义 | beam-host / beam-net / beam-client 测试全绿；新增「主机侧必须与共享实现产出相同字节」断言 |
+| 2026-10-30 |  | part-6（Tauri 桌面端）复用了 part-4 的 S-xx / T-xx 前缀，part-4 的 X-xx 又与 part-3 重名，台账按 ID 查状态会串台（38 个 ID 冲突）。重命名：part-6 的 T-01..T-24 → CM-01..CM-24、S-01..S-05 → TK-01..TK-05；part-4 的 X-01..X-10 → DX-01..DX-10。判定列与说明列未动 | 616 行 / 578 个唯一 ID，跨分片重名 0；verify_refs 0 无效引用 |
+| 2026-10-30 |  | android/app/build.gradle.kts 新增 channel 维度与 store / internal 两个 productFlavors；同步 CI 与门禁脚本路径（产物路径是 apk/<flavor>/<buildType>/）。门禁脚本 --apk 改为可给多个且 glob 展开成全部匹配 —— 旧版只取第一个匹配，单 flavor 时看不出问题，两个 flavor 之后会静默漏检一个 | 6 个变体 APK 构建成功；release 门禁（store+internal）exit 0；debug 负样本自检 exit 0；门禁单测 17 例全过 |
 
 ---
 
@@ -433,7 +463,7 @@
 | N-15 | 错误码 2001 连接超时 | crates/beam-net/src/endpoint.rs:113-118；crates/beam-net/src/error.rs:8、44-48 | 已实现 | connect 用 `tokio::time::timeout` 真实产出 `NetError::ConnectTimeout` → 2001 | 未开始 |
 | N-16 | 错误码 2002 证书拒绝 | crates/beam-net/src/error.rs:10、51-55；实际产生点 crates/beam-net/src/endpoint.rs:58、64、89、95 | 偏差 | `CertRejected` 只用于「装载本机证书失败 / 构造 QUIC TLS 配置失败」；对端证书被拒时 TLS 握手失败被归为 `NetError::Io`（crates/beam-net/src/endpoint.rs:119-121）→ 上报 E2008，UI 拿不到 E2002 | 未开始 |
 | N-17 | 错误码 2003 datagram 不支持 | crates/beam-net/src/endpoint.rs:207-208；crates/beam-net/src/error.rs:12、58-59 | 已实现 | quinn `UnsupportedByPeer` / `Disabled` 均映射到 `DatagramUnsupported` → 2003 | 未开始 |
-| N-18 | 错误码 2004 帧过期丢弃 | crates/beam-net/src/error.rs:14、62-66；crates/beam-net/src/datagram.rs:316-328 | 占位 | 变体与码值齐全，但生产代码无处构造：`Reassembler::expire()` 只返回过期帧号数组，doc 注释写「调用方应记为 E2004」而 beam-net 内无此调用方；`NetError::FrameExpired` 全文仅出现在 crates/beam-net/src/error.rs 与其单测（crates/beam-net/src/error.rs:163） | 未开始 |
+| N-18 | 错误码 2004 帧过期丢弃 | crates/beam-net/src/error.rs:14、62-66；crates/beam-net/src/datagram.rs:316-328 | 占位 | 变体与码值齐全，但生产代码无处构造：`Reassembler::expire()` 只返回过期帧号数组，doc 注释写「调用方应记为 E2004」而 beam-net 内无此调用方；`NetError::FrameExpired` 全文仅出现在 crates/beam-net/src/error.rs 与其单测（crates/beam-net/src/error.rs:163） | 已完成 |
 | N-19 | 配置：`fec_ratio`（默认 0.2…） | crates/beam-net/src/config.rs:19、81 | 已实现 | `DEFAULT_FEC_RATIO = 0.2`，`NetConfig::default().fec_ratio = 0.2`，并有默认值单测 crates/beam-net/src/config.rs:126 | 未开始 |
 | N-20 | 配置：`fec_ratio`（…码率>150 Mbps 时下调到 0.1） | 规则函数 crates/beam-net/src/config.rs:109-116；发送路径 crates/beam-net/src/endpoint.rs:255 | 偏差 | `adaptive_fec_ratio` 实现正确且有单测（crates/beam-net/src/config.rs:134-141），但发送路径直接使用 `self.cfg.fec_ratio`，从不调用该函数；全仓 `adaptive_fec_ratio` 仅出现在 crates/beam-net/src/config.rs | 未开始 |
 | N-21 | 配置：`max_datagram=1200` | crates/beam-net/src/config.rs:22、82；净负载 crates/beam-net/src/config.rs:98-101 | 已实现 | 默认 1200，扣 16 字节帧头后 1184（§5 负载上限） | 未开始 |
@@ -682,7 +712,7 @@
 | S-02 | 串联 capture→encode→net | `crates/beam-session/src/host.rs:163-180`、`crates/beam-host/src/adapters.rs:50-83`、`crates/beam-host/src/adapters.rs:116-133` | 已实现 | `HostRunner::pump()` 真实调用 `pipeline.poll()` → `sender.send_frame()`；`CaptureEncodePipeline::poll` 真实调用 `capture.latest()` + `encoder.encode()`（`beam-host/src/adapters.rs:63-74`）。 | 未开始 |
 | S-03 | 串联 net→decode→render | `crates/beam-session/src/client.rs:197-221`、`crates/beam-client/src/adapters.rs:105-107`、`crates/beam-client/src/adapters.rs:41-60` | 偏差 | 会话层结构在（`recv_frame()` → `consumer.consume()` → `decode()`+`present()`），但生产用的 `NetTransport::recv_frame` 恒返回 `None`（`beam-client/src/adapters.rs:105-107`），端到端收帧链路不可用；`send_control`/`send_input` 同样是空实现（`beam-client/src/adapters.rs:82-85`、`:96-99`）。 | 未开始 |
 | S-04 | 能力协商 | 未找到（已搜索：`negotiate`、`beam_proto::negotiate`、`Hello`、`HelloAck` 于 `crates/beam-session/**`、`beam-host/**`、`beam-client/**`、`beam-ffi/**`） | 缺失 | session 只接受外部塞进来的 `SessionInput::Negotiated(StreamConfig)`（`crates/beam-session/src/event.rs:69`），从不调用 `beam_proto::negotiate`（`crates/beam-proto/src/caps.rs:214`），也不收发 `Hello`/`HelloAck`。 | 未开始 |
-| S-05 | IDR 请求 | `crates/beam-session/src/event.rs:92`、`crates/beam-host/src/adapters.rs:76-78` | 占位 | `FramePipeline::request_idr()` 契约存在，host 适配器真实转发到 `encoder.request_idr()`；但 session 内无任何触发路径（`SessionInput` 无 IDR 变体，`ControlMsg::RequestIdr` 未被处理），全仓仅测试代码调用（`beam-host/src/adapters.rs:240`）。 | 未开始 |
+| S-05 | IDR 请求 | `crates/beam-session/src/event.rs:92`、`crates/beam-host/src/adapters.rs:76-78` | 占位 | `FramePipeline::request_idr()` 契约存在，host 适配器真实转发到 `encoder.request_idr()`；但 session 内无任何触发路径（`SessionInput` 无 IDR 变体，`ControlMsg::RequestIdr` 未被处理），全仓仅测试代码调用（`beam-host/src/adapters.rs:240`）。 | 已完成 |
 | S-06 | 重连（里程碑:MVP(无重连)/v1） | `crates/beam-session/src/host.rs:136-145`、`crates/beam-session/src/client.rs:174-183` | 缺失 | 只有 `SessionInput::Stalled`/`Reconnected` 两个外部输入驱动的状态边；没有任何重新建连、定时器或 `Resume` 发送逻辑（已搜索：`Resume`、`reconnect`、`Instant`、`timer`、`timeout(` 于 `crates/beam-session/**`）。 | 未开始 |
 | S-07 | 统计汇总 | `crates/beam-session/src/event.rs:30` | 占位 | `SessionEvent::Stats(StatsReport)` 变体存在，但全仓无任何 `SessionEvent::Stats` 的构造/发射点（已搜索：`SessionEvent::Stats`），host/client 也不做汇总。 | 未开始 |
 | S-08 | 状态:`Idle → Discovering → Pairing → Connecting → Negotiating → Streaming ⇄ Reconnecting → Closed` | `crates/beam-session/src/state.rs:58-75` | 已实现 | 9 条状态边逐条落地：Idle→{Discovering,Pairing,Connecting,Closed}(:58-63)、Discovering→{Pairing,Connecting,Closed}(:64-68)、Pairing→{Connecting,Closed}(:69)、Connecting→{Negotiating,Closed}(:70)、Negotiating→{Streaming,Closed}(:71)、Streaming→{Reconnecting,Closed}(:72)、Reconnecting→{Streaming,Closed}(:73)、Closed→∅(:74)、Error→{Closed}(:75)。 | 未开始 |
@@ -721,7 +751,7 @@
 | T-16 | 时序:`PairOk(双方固定指纹)` | 未找到（已搜索：`PairOk` 于 `crates/beam-{session,host,client,ffi}/**`） | 缺失 | 类型在 `crates/beam-proto/src/message.rs:89-92`；5 个 crate 内无处理、也不写信任库（`BeamClient::trust_store()` 返回只读引用，`crates/beam-ffi/src/client.rs:134-136`）。 | 已完成 |
 | T-17 | 时序:`Hello{ver,caps}` | 未找到（已搜索：`Hello`、`HelloAck` 于 `crates/beam-{session,host,client,ffi}/**`） | 缺失 | 协议类型在 `crates/beam-proto/src/message.rs:72`；5 个 crate 内既不发送也不解析（`Transport::recv_control` 全仓无调用点）。 | 已完成 |
 | T-18 | 时序:`HelloAck{agreed StreamConfig}` | 未找到（已搜索：`HelloAck` 于 `crates/beam-{session,host,client,ffi}/**`） | 缺失 | 类型在 `crates/beam-proto/src/message.rs:74-77`；无协商实现（见 S-04）。 | 已完成 |
-| T-19 | 时序:视频 datagram 首帧 IDR | 未找到（已搜索：`request_idr`、`is_key`、`IDR` 于 `crates/beam-session/**`、`crates/beam-host/**`） | 缺失 | 主机侧推帧不保证首帧为 IDR，也不主动请求 IDR（`crates/beam-session/src/host.rs:174-179` 只做 `poll` + `send_frame`）；`request_idr` 无生产调用点。 | 未开始 |
+| T-19 | 时序:视频 datagram 首帧 IDR | 未找到（已搜索：`request_idr`、`is_key`、`IDR` 于 `crates/beam-session/**`、`crates/beam-host/**`） | 缺失 | 主机侧推帧不保证首帧为 IDR，也不主动请求 IDR（`crates/beam-session/src/host.rs:174-179` 只做 `poll` + `send_frame`）；`request_idr` 无生产调用点。 | 已完成 |
 | T-20 | 时序:输入 stream / Feedback | `crates/beam-client/src/adapters.rs:96-99` | 缺失 | `Transport::send_input` 契约在 `crates/beam-session/src/event.rs:124`，但 `NetTransport::send_input` 是空实现（`beam-client/src/adapters.rs:96-99`）；主机侧 `HostDeps.input` 声明后从未被调用（已搜索 `deps.input`、`\.input\.` 于 `crates/beam-session/src/**`），`Feedback` 无任何发送路径。 | 已完成 |
 | T-21 | 时序:新连接/迁移 + `Resume{session_id}` | 未找到（已搜索：`Resume`、`session_id` 于 `crates/beam-{session,host,client,ffi}/**`） | 缺失 | 类型存在：`crates/beam-proto/src/message.rs:125-128`（`Resume{session_id:u64}`）；但 5 个 crate 内既不构造也不处理该消息，重连续传未实现。 | 已完成 |
 | T-22 | 时序:重连后主机发 IDR | 未找到（已搜索：`request_idr`、`Reconnected` 于 `crates/beam-session/**`） | 缺失 | `SessionInput::Reconnected` 只把状态改回 `Streaming`（`crates/beam-session/src/client.rs:179-183`），不触发 IDR 请求。 | 已完成 |
@@ -745,16 +775,16 @@
 ##### §2 / §3.11 相关
 | # | 文档要求 | 实现位置 | 判定 | 说明 | 状态 |
 |---|---|---|---|---|---|
-| X-01 | `beam-host` = 主机编排（第 51 行） | `crates/beam-host/src/runtime.rs:93-149` | 已实现 | `HostRuntime` 组装 capture/encode/net/input 并起会话（`runtime.rs:122-148`），mDNS 广播（`:103-114`）。风险：`start_session` 只有自测调用（全仓无生产调用方）。 | 未开始 |
-| X-02 | `host-->audio`（§4 第 216 行；§2 主机编排含 audio） | `crates/beam-host/Cargo.toml:16` | 缺失 | 声明了 `beam-audio` 依赖，但源码零引用（已搜索：`beam_audio`、`Audio` 于 `crates/beam-host/src/**`）→ 音频采集/编码未进主机编排。 | 未开始 |
-| X-03 | `beam-client` = Windows 客户端编排（第 52 行） | `crates/beam-client/src/runtime.rs:73-134` | 已实现 | `ClientRuntime` 提供浏览（`:85-95`）、建连（`:98-121`）、传输工厂（`:124-133`）；`DecodeRenderConsumer` 真实 decode+present（`crates/beam-client/src/adapters.rs:36-61`）。 | 未开始 |
-| X-04 | `beam-ffi` = uniffi 导出给 Android（第 53 行） | `crates/beam-ffi/src/lib.rs:1-59`、`crates/beam-ffi/Cargo.toml:16-26` | 偏差 | crate 位置与依赖集符合 §4（`ffi-->session/net/pair/discovery`），但「uniffi 导出」这一核心职责无实现（见 F-08、F-09）。 | 未开始 |
-| X-05 | `beam-gamestream` = GameStream 兼容层(v1 新增,仅按公开协议行为实现)（第 54 行） | `crates/beam-gamestream/src/capability.rs:1-114`、`crates/beam-gamestream/src/lib.rs:12-21` | 占位 | 全 crate 只有能力映射表与两个常量（`capability.rs:43-57`、`:91-113`）与 `gamestream` feature 占位（`Cargo.toml:11-14`）；无任何握手报文/协议行为实现，模块自述「最小骨架…不含任何真实握手报文」（`lib.rs:20-21`）。 | 未开始 |
-| X-06 | 兼容策略:不参考 GPL 代码（第 279 行 / §5 第 261 行） | `crates/beam-gamestream/src/lib.rs:5-10`、`crates/beam-gamestream/src/capability.rs:1-4` | 已实现 | 从代码本身看：crate 内只有能力结构体、映射函数与常量，无从 Sunshine/Moonlight 引入的协议常量表或报文模板；净室声明写在 `lib.rs:5-10`。 | 未开始 |
-| X-07 | §3.11 设置→运行参数 `HostConfig::from_resolved` | `crates/beam-host/src/runtime.rs:62-83` | 已实现 | 真实把 `ResolvedConfig` 的分辨率/帧率/码率/codec/音频模式映射到 `StreamConfig` + `CaptureConfig`。 | 未开始 |
-| X-08 | §3.11 设置→运行参数 `ClientConfig::from_resolved` | `crates/beam-client/src/runtime.rs:47-64` | 已实现 | 同上映射到 `StreamConfig`。 | 未开始 |
-| X-09 | 桌面端开播路径使用 host/client 编排（§3.11 `start_hosting`） | `apps/desktop/src-tauri/src/service_crates.rs:255`、`apps/desktop/src-tauri/src/service_crates.rs:319`、`apps/desktop/src-tauri/src/service_crates.rs:341` | 偏差 | 桌面端只用了 `HostConfig::from_resolved` 取参数，并**直接**调 `Advertiser::start`，未调用 `HostRuntime::start_session` / `ClientRuntime::connect`（已搜索：`start_session`、`HostRuntime`、`ClientRuntime`、`transport_factory` 于 `apps/desktop/**`）→ 编排层的会话装配能力当前没有生产调用方。 | 未开始 |
-| X-10 | §3.11 Events:`session://stats`(500 ms) | `crates/beam-session/src/event.rs:30` | 缺失 | `SessionEvent::Stats` 无产生点（见 S-07），host/client 不做 500 ms 统计节拍。 | 未开始 |
+| DX-01 | `beam-host` = 主机编排（第 51 行） | `crates/beam-host/src/runtime.rs:93-149` | 已实现 | `HostRuntime` 组装 capture/encode/net/input 并起会话（`runtime.rs:122-148`），mDNS 广播（`:103-114`）。风险：`start_session` 只有自测调用（全仓无生产调用方）。 | 未开始 |
+| DX-02 | `host-->audio`（§4 第 216 行；§2 主机编排含 audio） | `crates/beam-host/Cargo.toml:16` | 缺失 | 声明了 `beam-audio` 依赖，但源码零引用（已搜索：`beam_audio`、`Audio` 于 `crates/beam-host/src/**`）→ 音频采集/编码未进主机编排。 | 未开始 |
+| DX-03 | `beam-client` = Windows 客户端编排（第 52 行） | `crates/beam-client/src/runtime.rs:73-134` | 已实现 | `ClientRuntime` 提供浏览（`:85-95`）、建连（`:98-121`）、传输工厂（`:124-133`）；`DecodeRenderConsumer` 真实 decode+present（`crates/beam-client/src/adapters.rs:36-61`）。 | 未开始 |
+| DX-04 | `beam-ffi` = uniffi 导出给 Android（第 53 行） | `crates/beam-ffi/src/lib.rs:1-59`、`crates/beam-ffi/Cargo.toml:16-26` | 偏差 | crate 位置与依赖集符合 §4（`ffi-->session/net/pair/discovery`），但「uniffi 导出」这一核心职责无实现（见 F-08、F-09）。 | 未开始 |
+| DX-05 | `beam-gamestream` = GameStream 兼容层(v1 新增,仅按公开协议行为实现)（第 54 行） | `crates/beam-gamestream/src/capability.rs:1-114`、`crates/beam-gamestream/src/lib.rs:12-21` | 占位 | 全 crate 只有能力映射表与两个常量（`capability.rs:43-57`、`:91-113`）与 `gamestream` feature 占位（`Cargo.toml:11-14`）；无任何握手报文/协议行为实现，模块自述「最小骨架…不含任何真实握手报文」（`lib.rs:20-21`）。 | 未开始 |
+| DX-06 | 兼容策略:不参考 GPL 代码（第 279 行 / §5 第 261 行） | `crates/beam-gamestream/src/lib.rs:5-10`、`crates/beam-gamestream/src/capability.rs:1-4` | 已实现 | 从代码本身看：crate 内只有能力结构体、映射函数与常量，无从 Sunshine/Moonlight 引入的协议常量表或报文模板；净室声明写在 `lib.rs:5-10`。 | 未开始 |
+| DX-07 | §3.11 设置→运行参数 `HostConfig::from_resolved` | `crates/beam-host/src/runtime.rs:62-83` | 已实现 | 真实把 `ResolvedConfig` 的分辨率/帧率/码率/codec/音频模式映射到 `StreamConfig` + `CaptureConfig`。 | 未开始 |
+| DX-08 | §3.11 设置→运行参数 `ClientConfig::from_resolved` | `crates/beam-client/src/runtime.rs:47-64` | 已实现 | 同上映射到 `StreamConfig`。 | 未开始 |
+| DX-09 | 桌面端开播路径使用 host/client 编排（§3.11 `start_hosting`） | `apps/desktop/src-tauri/src/service_crates.rs:255`、`apps/desktop/src-tauri/src/service_crates.rs:319`、`apps/desktop/src-tauri/src/service_crates.rs:341` | 偏差 | 桌面端只用了 `HostConfig::from_resolved` 取参数，并**直接**调 `Advertiser::start`，未调用 `HostRuntime::start_session` / `ClientRuntime::connect`（已搜索：`start_session`、`HostRuntime`、`ClientRuntime`、`transport_factory` 于 `apps/desktop/**`）→ 编排层的会话装配能力当前没有生产调用方。 | 已完成 |
+| DX-10 | §3.11 Events:`session://stats`(500 ms) | `crates/beam-session/src/event.rs:30` | 缺失 | `SessionEvent::Stats` 无产生点（见 S-07），host/client 不做 500 ms 统计节拍。 | 未开始 |
 
 #### 文档未覆盖但代码里有的
 
@@ -889,7 +919,7 @@
 | # | 文档要求 | 实现位置 | 判定 | 说明 | 状态 |
 |---|---|---|---|---|---|
 | AB-01 | buildType debug/release | `android/app/build.gradle.kts:23` | 已实现 | `buildTypes { debug { … } release { … } }`（`:23-39`）：debug `isMinifyEnabled=false` + `PERF_STATS=true`（`:27`），release `isMinifyEnabled=true` + `isShrinkResources=true` + `PERF_STATS=false`（`:30-37`），符合 §3.13 门控。 | 未开始 |
-| AB-02 | flavor `store`/`internal` | — | 缺失 | **未找到**。对 `android/` 下全部 `*.gradle.kts`/`*.gradle` 搜索 `flavorDimensions`、`productFlavors`、`flavor` **命中 0**（`app/build.gradle.kts` 全文 104 行，只有 `buildTypes` 无 `flavors {}` 块）。无 `store`/`internal` 两个变体，发布渠道差异无从配置。搜索关键词：`flavorDimensions`、`productFlavors`、`flavor`、`create("store")`、`create("internal")`。 | 未开始 |
+| AB-02 | flavor `store`/`internal` | — | 缺失 | **未找到**。对 `android/` 下全部 `*.gradle.kts`/`*.gradle` 搜索 `flavorDimensions`、`productFlavors`、`flavor` **命中 0**（`app/build.gradle.kts` 全文 104 行，只有 `buildTypes` 无 `flavors {}` 块）。无 `store`/`internal` 两个变体，发布渠道差异无从配置。搜索关键词：`flavorDimensions`、`productFlavors`、`flavor`、`create("store")`、`create("internal")`。 | 已完成 |
 | AB-03 | `:feature-perf` 只在 debug | `android/app/build.gradle.kts:86` | 已实现 | 依赖图层面成立：全仓仅 `debugImplementation(project(":feature-perf"))`（`:86`，`:84-85` 注释说明 release 变体不含本行），release 变体用空实现 `app/src/release/java/dev/beam/app/perf/PerfEntry.kt:16-33`。**但** perf 类型仍进 release APK，且 §7:276 的 APK 检查 grep 模式漏匹配（详见 AN-25）。 | 未开始 |
 | AB-04 | cargo-ndk 构建 arm64-v8a(+ x86_64 给模拟器) | `android/core-net/README.md:57` | 偏差 | 目录与命令已就位但**构建未接线**：`core-net/src/main/jniLibs/arm64-v8a/` 与 `jniLibs/x86_64/` 存在（各含占位 README，`.gitignore` 忽略 `*.so`），cargo-ndk 命令写在 `core-net/README.md:57-75`；但对 `android/` 全部 `*.gradle.kts` 搜 `cargo`/`ndk`/`abiFilters`/`jniLibs` **命中 0** —— `core-net/build.gradle.kts` 无 Exec 任务、无 `MergeSourceSetFolders` 依赖，README §2.4（`:83-94`）给出的接线片段明确标注为「可选，推荐」且未落地；`app/build.gradle.kts` 也无 `ndk { abiFilters }` 或 splits 配置。产物因此只能手工复制，且当前不存在。 | 已完成 |
 
@@ -985,34 +1015,34 @@
 ##### §3.11 Commands
 | # | 文档要求 | 实现位置 | 判定 | 说明 | 状态 |
 |---|---|---|---|---|---|
-| T-01 | `get_host_status` | `apps/desktop/src-tauri/src/commands.rs:30-33`、`apps/desktop/src-tauri/src/main.rs:76`、`apps/desktop/src-tauri/src/service_crates.rs:273-275` | 已实现 | 已注册；返回真实 `HostStatus`（真实主机名、真实本机 IPv4、真实端口与生效配置）。`gpu` 恒 `None`（无采集后端探测），但文档未要求该字段取值。 | 已完成 |
-| T-02 | `start_hosting(opts)` | `apps/desktop/src-tauri/src/commands.rs:38-48`、`apps/desktop/src-tauri/src/service_crates.rs:277-359` | 偏差 | 命令存在、签名正确、会广播 `host://state-changed` 并同步托盘（`apps/desktop/src-tauri/src/commands.rs:45-46`）；但 crates 路径只做了配置合并校验 + 真实 mDNS 广播（`apps/desktop/src-tauri/src/service_crates.rs:310-353`），**没有启动任何主机会话/采集/编码/QUIC 监听**，即「已开播」的主机不会真的接受客户端接入。`host_stream_config()` 这个唯一调用 `beam-host` 的封装是死代码（`apps/desktop/src-tauri/src/service_crates.rs:254-256`，无调用点）。 | 已完成 |
-| T-03 | `stop_hosting` | `apps/desktop/src-tauri/src/commands.rs:53-59`、`apps/desktop/src-tauri/src/service_crates.rs:361-376` | 已实现 | 真实停止 mDNS 广播（`advertiser = None`）、状态归 `Idle`、广播事件并同步托盘。 | 未开始 |
-| T-04 | `get_pairing_code` | `apps/desktop/src-tauri/src/commands.rs:68-71`、`apps/desktop/src-tauri/src/service_crates.rs:378-381`、`apps/desktop/src-tauri/src/service_crates.rs:890-919` | 已实现 | crates 路径真实：`Identity` 自签证书指纹 + `PairingToken::issue(120s)` + `beam://pair?h=..&fp=..&t=..` 载荷。LocalService 路径为合成 PIN/指纹/token（`apps/desktop/src-tauri/src/service.rs:764-778`）。 | 未开始 |
-| T-05 | `approve_pair(id)` | `apps/desktop/src-tauri/src/commands.rs:74-79`、`apps/desktop/src-tauri/src/service_crates.rs:383-417` | 已实现 | crates 路径真实写入信任库并 `save` 落盘（`apps/desktop/src-tauri/src/service_crates.rs:411-413`）。**但** `pending_pairs` 从未被写入（`apps/desktop/src-tauri/src/service_crates.rs:238` 初始化为空后只有 `retain`/`iter`），所以设备名与平台必然回落为「未知设备」「未知平台」（`apps/desktop/src-tauri/src/service_crates.rs:394-401`）——落库是真的，来路是假的。 | 未开始 |
-| T-06 | `reject_pair(id)` | `apps/desktop/src-tauri/src/commands.rs:82-87`、`apps/desktop/src-tauri/src/service_crates.rs:419-430` | 偏差 | crates 路径下 `pending_pairs` 恒空 → `retain` 长度不变 → 任何 id 都返回 `E9101`「配对请求不存在」（`apps/desktop/src-tauri/src/service_crates.rs:423-427`）。命令在真实后端上不可用。 | 未开始 |
-| T-07 | `remove_device(id)` | `apps/desktop/src-tauri/src/commands.rs:90-95`、`apps/desktop/src-tauri/src/service_crates.rs:432-449` | 已实现 | 真实从信任库移除并写回文件（`apps/desktop/src-tauri/src/service_crates.rs:440-447`）。 | 未开始 |
-| T-08 | `list_hosts` | `apps/desktop/src-tauri/src/commands.rs:102-105`、`apps/desktop/src-tauri/src/service_crates.rs:460-482`、`apps/desktop/src-tauri/src/service_crates.rs:1033-1057` | 已实现 | crates 路径为真实 mDNS 浏览（独立线程驱动 `Browser::start()` 流，`Found`/`Lost` 增删）；`trusted` 由信任库指纹比对得出。LocalService 路径为 2 台合成主机（`apps/desktop/src-tauri/src/service.rs:887-910`）。 | 已完成 |
-| T-09 | `connect(host_id)` | `apps/desktop/src-tauri/src/commands.rs:108-111`、`apps/desktop/src-tauri/src/service_crates.rs:484-551`、`apps/desktop/src-tauri/src/transport.rs:42-73` | 偏差 | 命令与状态机推进是真的（`Discovering→Pairing→Connecting→Negotiating`，`apps/desktop/src-tauri/src/service_crates.rs:514-524`），QUIC/TLS 握手也是真的（`apps/desktop/src-tauri/src/transport.rs:62-69`）；但握手成功后这条连接**立即被关闭**（`apps/desktop/src-tauri/src/transport.rs:72` `conn.close(0, b"probe")`，注释自述「只用于探测」），没有帧传输、没有解码/渲染通道，语义上不构成「建立一次串流会话」。 | 已完成 |
-| T-10 | `disconnect` | `apps/desktop/src-tauri/src/commands.rs:116-129`、`apps/desktop/src-tauri/src/service_crates.rs:553-561` | 已实现 | 结束会话、状态机 → `Closed`，并广播 `session://disconnected`（`reason="by_user"`），载荷结构正确（`apps/desktop/src-tauri/src/dto.rs:235-240`）。 | 未开始 |
-| T-11 | `get_settings` | `apps/desktop/src-tauri/src/commands.rs:136-139`、`apps/desktop/src-tauri/src/service_crates.rs:599-602` | 已实现 | crates 路径返回 `beam-config` 合并后的真实配置 + 桌面端自有项。 | 未开始 |
-| T-12 | `set_settings(patch)` | `apps/desktop/src-tauri/src/commands.rs:144-153`、`apps/desktop/src-tauri/src/service_crates.rs:604-742` | 已实现 | 增量 patch → `merge` → `validate` → 真实落盘 `config.toml` 与 `desktop.json`（`apps/desktop/src-tauri/src/service_crates.rs:705-725`），非法值返回 `E11001`。 | 未开始 |
-| T-13 | debug 下另有 `perf_snapshot` | `apps/desktop/src-tauri/src/commands.rs:160-164`（debug）/ `apps/desktop/src-tauri/src/commands.rs:168-175`（release） | 占位 | 命令与 `#[cfg(debug_assertions)]` 门控正确，release 版本返回 `E11003`（符合 §3.13 门控）；但实现体是桩：crates 路径返回 `available:false` + 空 stages/metrics（`apps/desktop/src-tauri/src/service_crates.rs:744-753`），LocalService 路径返回 8 个固定假值与 8 个固定指标（`apps/desktop/src-tauri/src/service.rs:558-628`）。`beam-perf` crate 存在（`crates/beam-perf/Cargo.toml`）但**未进入桌面端依赖**（`apps/desktop/src-tauri/Cargo.toml:57-69`）。 | 未开始 |
-| T-14 | debug 下另有 `perf_export(format)` | `apps/desktop/src-tauri/src/commands.rs:178-182`（debug）/ `apps/desktop/src-tauri/src/commands.rs:185-192`（release） | 占位 | 门控同上；crates 路径恒返回 `E11003`「未接入桌面端」（`apps/desktop/src-tauri/src/service_crates.rs:759-766`）；LocalService 路径虽真实写文件（`apps/desktop/src-tauri/src/service.rs:644-667`），但导出的内容是合成假数据。 | 已完成 |
-| T-15 | （文档清单外）`list_devices` | `apps/desktop/src-tauri/src/commands.rs:202-205`、`apps/desktop/src-tauri/src/main.rs:95` | 超出 | 文档 §3.11 的 12 个 command 里没有读取已配对设备列表的入口，代码补了一个纯读取 command（`apps/desktop/src-tauri/src/main.rs:94` 注释自述「补充:『设备』页所需的只读入口」）。不改状态，风险低，但属文档未列出的接口面。 | 已完成 |
-| T-16 | （文档清单外）`list_pair_requests` | `apps/desktop/src-tauri/src/commands.rs:210-213`、`apps/desktop/src-tauri/src/main.rs:96` | 超出 | 同上，为「设备」页补的只读入口。 | 已完成 |
+| CM-01 | `get_host_status` | `apps/desktop/src-tauri/src/commands.rs:30-33`、`apps/desktop/src-tauri/src/main.rs:76`、`apps/desktop/src-tauri/src/service_crates.rs:273-275` | 已实现 | 已注册；返回真实 `HostStatus`（真实主机名、真实本机 IPv4、真实端口与生效配置）。`gpu` 恒 `None`（无采集后端探测），但文档未要求该字段取值。 | 未开始 |
+| CM-02 | `start_hosting(opts)` | `apps/desktop/src-tauri/src/commands.rs:38-48`、`apps/desktop/src-tauri/src/service_crates.rs:277-359` | 偏差 | 命令存在、签名正确、会广播 `host://state-changed` 并同步托盘（`apps/desktop/src-tauri/src/commands.rs:45-46`）；但 crates 路径只做了配置合并校验 + 真实 mDNS 广播（`apps/desktop/src-tauri/src/service_crates.rs:310-353`），**没有启动任何主机会话/采集/编码/QUIC 监听**，即「已开播」的主机不会真的接受客户端接入。`host_stream_config()` 这个唯一调用 `beam-host` 的封装是死代码（`apps/desktop/src-tauri/src/service_crates.rs:254-256`，无调用点）。 | 已完成 |
+| CM-03 | `stop_hosting` | `apps/desktop/src-tauri/src/commands.rs:53-59`、`apps/desktop/src-tauri/src/service_crates.rs:361-376` | 已实现 | 真实停止 mDNS 广播（`advertiser = None`）、状态归 `Idle`、广播事件并同步托盘。 | 未开始 |
+| CM-04 | `get_pairing_code` | `apps/desktop/src-tauri/src/commands.rs:68-71`、`apps/desktop/src-tauri/src/service_crates.rs:378-381`、`apps/desktop/src-tauri/src/service_crates.rs:890-919` | 已实现 | crates 路径真实：`Identity` 自签证书指纹 + `PairingToken::issue(120s)` + `beam://pair?h=..&fp=..&t=..` 载荷。LocalService 路径为合成 PIN/指纹/token（`apps/desktop/src-tauri/src/service.rs:764-778`）。 | 未开始 |
+| CM-05 | `approve_pair(id)` | `apps/desktop/src-tauri/src/commands.rs:74-79`、`apps/desktop/src-tauri/src/service_crates.rs:383-417` | 已实现 | crates 路径真实写入信任库并 `save` 落盘（`apps/desktop/src-tauri/src/service_crates.rs:411-413`）。**但** `pending_pairs` 从未被写入（`apps/desktop/src-tauri/src/service_crates.rs:238` 初始化为空后只有 `retain`/`iter`），所以设备名与平台必然回落为「未知设备」「未知平台」（`apps/desktop/src-tauri/src/service_crates.rs:394-401`）——落库是真的，来路是假的。 | 未开始 |
+| CM-06 | `reject_pair(id)` | `apps/desktop/src-tauri/src/commands.rs:82-87`、`apps/desktop/src-tauri/src/service_crates.rs:419-430` | 偏差 | crates 路径下 `pending_pairs` 恒空 → `retain` 长度不变 → 任何 id 都返回 `E9101`「配对请求不存在」（`apps/desktop/src-tauri/src/service_crates.rs:423-427`）。命令在真实后端上不可用。 | 已完成 |
+| CM-07 | `remove_device(id)` | `apps/desktop/src-tauri/src/commands.rs:90-95`、`apps/desktop/src-tauri/src/service_crates.rs:432-449` | 已实现 | 真实从信任库移除并写回文件（`apps/desktop/src-tauri/src/service_crates.rs:440-447`）。 | 未开始 |
+| CM-08 | `list_hosts` | `apps/desktop/src-tauri/src/commands.rs:102-105`、`apps/desktop/src-tauri/src/service_crates.rs:460-482`、`apps/desktop/src-tauri/src/service_crates.rs:1033-1057` | 已实现 | crates 路径为真实 mDNS 浏览（独立线程驱动 `Browser::start()` 流，`Found`/`Lost` 增删）；`trusted` 由信任库指纹比对得出。LocalService 路径为 2 台合成主机（`apps/desktop/src-tauri/src/service.rs:887-910`）。 | 未开始 |
+| CM-09 | `connect(host_id)` | `apps/desktop/src-tauri/src/commands.rs:108-111`、`apps/desktop/src-tauri/src/service_crates.rs:484-551`、`apps/desktop/src-tauri/src/transport.rs:42-73` | 偏差 | 命令与状态机推进是真的（`Discovering→Pairing→Connecting→Negotiating`，`apps/desktop/src-tauri/src/service_crates.rs:514-524`），QUIC/TLS 握手也是真的（`apps/desktop/src-tauri/src/transport.rs:62-69`）；但握手成功后这条连接**立即被关闭**（`apps/desktop/src-tauri/src/transport.rs:72` `conn.close(0, b"probe")`，注释自述「只用于探测」），没有帧传输、没有解码/渲染通道，语义上不构成「建立一次串流会话」。 | 已完成 |
+| CM-10 | `disconnect` | `apps/desktop/src-tauri/src/commands.rs:116-129`、`apps/desktop/src-tauri/src/service_crates.rs:553-561` | 已实现 | 结束会话、状态机 → `Closed`，并广播 `session://disconnected`（`reason="by_user"`），载荷结构正确（`apps/desktop/src-tauri/src/dto.rs:235-240`）。 | 未开始 |
+| CM-11 | `get_settings` | `apps/desktop/src-tauri/src/commands.rs:136-139`、`apps/desktop/src-tauri/src/service_crates.rs:599-602` | 已实现 | crates 路径返回 `beam-config` 合并后的真实配置 + 桌面端自有项。 | 未开始 |
+| CM-12 | `set_settings(patch)` | `apps/desktop/src-tauri/src/commands.rs:144-153`、`apps/desktop/src-tauri/src/service_crates.rs:604-742` | 已实现 | 增量 patch → `merge` → `validate` → 真实落盘 `config.toml` 与 `desktop.json`（`apps/desktop/src-tauri/src/service_crates.rs:705-725`），非法值返回 `E11001`。 | 未开始 |
+| CM-13 | debug 下另有 `perf_snapshot` | `apps/desktop/src-tauri/src/commands.rs:160-164`（debug）/ `apps/desktop/src-tauri/src/commands.rs:168-175`（release） | 占位 | 命令与 `#[cfg(debug_assertions)]` 门控正确，release 版本返回 `E11003`（符合 §3.13 门控）；但实现体是桩：crates 路径返回 `available:false` + 空 stages/metrics（`apps/desktop/src-tauri/src/service_crates.rs:744-753`），LocalService 路径返回 8 个固定假值与 8 个固定指标（`apps/desktop/src-tauri/src/service.rs:558-628`）。`beam-perf` crate 存在（`crates/beam-perf/Cargo.toml`）但**未进入桌面端依赖**（`apps/desktop/src-tauri/Cargo.toml:57-69`）。 | 未开始 |
+| CM-14 | debug 下另有 `perf_export(format)` | `apps/desktop/src-tauri/src/commands.rs:178-182`（debug）/ `apps/desktop/src-tauri/src/commands.rs:185-192`（release） | 占位 | 门控同上；crates 路径恒返回 `E11003`「未接入桌面端」（`apps/desktop/src-tauri/src/service_crates.rs:759-766`）；LocalService 路径虽真实写文件（`apps/desktop/src-tauri/src/service.rs:644-667`），但导出的内容是合成假数据。 | 未开始 |
+| CM-15 | （文档清单外）`list_devices` | `apps/desktop/src-tauri/src/commands.rs:202-205`、`apps/desktop/src-tauri/src/main.rs:95` | 超出 | 文档 §3.11 的 12 个 command 里没有读取已配对设备列表的入口，代码补了一个纯读取 command（`apps/desktop/src-tauri/src/main.rs:94` 注释自述「补充:『设备』页所需的只读入口」）。不改状态，风险低，但属文档未列出的接口面。 | 未开始 |
+| CM-16 | （文档清单外）`list_pair_requests` | `apps/desktop/src-tauri/src/commands.rs:210-213`、`apps/desktop/src-tauri/src/main.rs:96` | 超出 | 同上，为「设备」页补的只读入口。 | 未开始 |
 
 ##### §3.11 职责 / 托盘 / 错误
 | # | 文档要求 | 实现位置 | 判定 | 说明 | 状态 |
 |---|---|---|---|---|---|
-| T-17 | 职责:UI | `apps/desktop/src/App.tsx:35-113`、`apps/desktop/src/pages/HomePage.tsx:25` | 已实现 | 5 个页面 + 侧栏导航 + 全局事件订阅，页面只读 store、不直接碰 IPC（`apps/desktop/src/App.tsx:32-33`）。 | 已完成 |
-| T-18 | 职责:托盘 | `apps/desktop/src-tauri/src/tray.rs:27-61`、`apps/desktop/src-tauri/src/tray.rs:76-113` | 已实现 | 托盘图标 + 4 个菜单项齐全：「▶ 一键开播」（`apps/desktop/src-tauri/src/tray.rs:28`）、「■ 停止串流」（`apps/desktop/src-tauri/src/tray.rs:29`）、「显示主窗口」（`apps/desktop/src-tauri/src/tray.rs:30`、`apps/desktop/src-tauri/src/tray.rs:105-110`）、「退出 Beam」（`apps/desktop/src-tauri/src/tray.rs:31`、`apps/desktop/src-tauri/src/tray.rs:111`）；开播/停止复用同一套服务状态并回广播 `host://state-changed`。 | 已完成 |
-| T-19 | 职责:通知 | 未找到（已搜索：`notification`、`Notification`、`通知` 于 `apps/desktop/src-tauri/src/**`、`apps/desktop/src/**`） | 缺失 | 全仓只有文档性提及（`apps/desktop/src-tauri/src/main.rs:4`、`apps/desktop/README.md:6`），没有任何系统通知实现（无 `tauri-plugin-notification`、无 `NotificationExt`、无 Windows toast 调用）。`Cargo.toml` 也未引入通知插件（`apps/desktop/src-tauri/Cargo.toml:35-42`）。 | 未开始 |
-| T-20 | 只通过 commands/events 与 Rust 交互 | `apps/desktop/src/ipc/commands.ts:29-35`、`apps/desktop/src/ipc/events.ts:21-38`、`apps/desktop/src-tauri/capabilities/default.json:6` | 已实现 | 前端 Rust 交互只有 `invoke` 与 `listen` 两个入口（`apps/desktop/src/ipc/commands.ts:11`、`apps/desktop/src/ipc/events.ts:8`）；权限只开 `core:default`，未开文件系统/Shell（`apps/desktop/src-tauri/capabilities/default.json:6`）。 | 已完成 |
-| T-21 | 视频帧不经 IPC | `apps/desktop/src-tauri/src/dto.rs:3-4`、`apps/desktop/src/ipc/events.ts:21-38`、`apps/desktop/src-tauri/src/events.rs:24-31` | 已实现 | 8 个事件的载荷全是控制面/统计面结构（`apps/desktop/src-tauri/src/dto.rs:199-240`），没有任何帧/像素/缓冲区类型；前端亦无帧通道（已搜索 `frame`、`pixel`、`buffer`、`video` 于 `apps/desktop/src/**`）。**符合**文档要求。 | 已完成 |
-| T-22 | 错误:command 返回 `{code:"E2001", message, retryable}` | `apps/desktop/src-tauri/src/error.rs:56-65` | 已实现 | `BeamError` 三个字段与文档逐字一致，`#[serde(rename_all = "camelCase")]` 不改变这三个键名。 | 已完成 |
-| T-23 | 前端按 code 显示中文文案 | `apps/desktop/src/ipc/errors.ts:27-104` | 已实现 | `ERROR_TEXT` 按码查表，`errorText()` 命中即返回中文文案，未登记码回退兜底文案并附后端 message（`apps/desktop/src/ipc/errors.ts:99-104`）；`toBeamError` 兼容 Tauri 把 `Err` 序列化成 JSON 字符串的情况（`apps/desktop/src/ipc/errors.ts:68-88`）。 | 已完成 |
-| T-24 | 文案表覆盖后端会返回的错误码 | `apps/desktop/src/ipc/errors.ts:27-62`、`apps/desktop/src-tauri/src/error.rs:14-53` | 缺失 | 前端表覆盖了 `error.rs` 自己定义的 25 个码，但**没有覆盖 crates 侧会真实透传过来的码**：`transport.rs` 把 `beam-net` 的 `err.code_str()` 直接当作 code 上报（`apps/desktop/src-tauri/src/transport.rs:64-69`），而 `beam-net` 定义了 `E2005`/`E2006`/`E2007`/`E2008`（`crates/beam-net/src/error.rs:15-19`、`crates/beam-net/src/error.rs:88-89`，`E2007` 正是 `apps/desktop/src-tauri/src/transport.rs:53` 注释提到的缺 TLS 身份错误）；`beam-input` 的 `E8001`/`E8002`（`crates/beam-input/src/error.rs:29`）、`beam-decode` 的 `E10001`（`crates/beam-decode/src/error.rs:35`）、`beam-render` 的 `E10011`–`E10014`（`crates/beam-render/src/error.rs:36-51`）同样无文案。命中的码一律落到兜底文案「操作失败,请稍后重试」。 | 未开始 |
+| CM-17 | 职责:UI | `apps/desktop/src/App.tsx:35-113`、`apps/desktop/src/pages/HomePage.tsx:25` | 已实现 | 5 个页面 + 侧栏导航 + 全局事件订阅，页面只读 store、不直接碰 IPC（`apps/desktop/src/App.tsx:32-33`）。 | 未开始 |
+| CM-18 | 职责:托盘 | `apps/desktop/src-tauri/src/tray.rs:27-61`、`apps/desktop/src-tauri/src/tray.rs:76-113` | 已实现 | 托盘图标 + 4 个菜单项齐全：「▶ 一键开播」（`apps/desktop/src-tauri/src/tray.rs:28`）、「■ 停止串流」（`apps/desktop/src-tauri/src/tray.rs:29`）、「显示主窗口」（`apps/desktop/src-tauri/src/tray.rs:30`、`apps/desktop/src-tauri/src/tray.rs:105-110`）、「退出 Beam」（`apps/desktop/src-tauri/src/tray.rs:31`、`apps/desktop/src-tauri/src/tray.rs:111`）；开播/停止复用同一套服务状态并回广播 `host://state-changed`。 | 未开始 |
+| CM-19 | 职责:通知 | 未找到（已搜索：`notification`、`Notification`、`通知` 于 `apps/desktop/src-tauri/src/**`、`apps/desktop/src/**`） | 缺失 | 全仓只有文档性提及（`apps/desktop/src-tauri/src/main.rs:4`、`apps/desktop/README.md:6`），没有任何系统通知实现（无 `tauri-plugin-notification`、无 `NotificationExt`、无 Windows toast 调用）。`Cargo.toml` 也未引入通知插件（`apps/desktop/src-tauri/Cargo.toml:35-42`）。 | 未开始 |
+| CM-20 | 只通过 commands/events 与 Rust 交互 | `apps/desktop/src/ipc/commands.ts:29-35`、`apps/desktop/src/ipc/events.ts:21-38`、`apps/desktop/src-tauri/capabilities/default.json:6` | 已实现 | 前端 Rust 交互只有 `invoke` 与 `listen` 两个入口（`apps/desktop/src/ipc/commands.ts:11`、`apps/desktop/src/ipc/events.ts:8`）；权限只开 `core:default`，未开文件系统/Shell（`apps/desktop/src-tauri/capabilities/default.json:6`）。 | 未开始 |
+| CM-21 | 视频帧不经 IPC | `apps/desktop/src-tauri/src/dto.rs:3-4`、`apps/desktop/src/ipc/events.ts:21-38`、`apps/desktop/src-tauri/src/events.rs:24-31` | 已实现 | 8 个事件的载荷全是控制面/统计面结构（`apps/desktop/src-tauri/src/dto.rs:199-240`），没有任何帧/像素/缓冲区类型；前端亦无帧通道（已搜索 `frame`、`pixel`、`buffer`、`video` 于 `apps/desktop/src/**`）。**符合**文档要求。 | 未开始 |
+| CM-22 | 错误:command 返回 `{code:"E2001", message, retryable}` | `apps/desktop/src-tauri/src/error.rs:56-65` | 已实现 | `BeamError` 三个字段与文档逐字一致，`#[serde(rename_all = "camelCase")]` 不改变这三个键名。 | 未开始 |
+| CM-23 | 前端按 code 显示中文文案 | `apps/desktop/src/ipc/errors.ts:27-104` | 已实现 | `ERROR_TEXT` 按码查表，`errorText()` 命中即返回中文文案，未登记码回退兜底文案并附后端 message（`apps/desktop/src/ipc/errors.ts:99-104`）；`toBeamError` 兼容 Tauri 把 `Err` 序列化成 JSON 字符串的情况（`apps/desktop/src/ipc/errors.ts:68-88`）。 | 未开始 |
+| CM-24 | 文案表覆盖后端会返回的错误码 | `apps/desktop/src/ipc/errors.ts:27-62`、`apps/desktop/src-tauri/src/error.rs:14-53` | 缺失 | 前端表覆盖了 `error.rs` 自己定义的 25 个码，但**没有覆盖 crates 侧会真实透传过来的码**：`transport.rs` 把 `beam-net` 的 `err.code_str()` 直接当作 code 上报（`apps/desktop/src-tauri/src/transport.rs:64-69`），而 `beam-net` 定义了 `E2005`/`E2006`/`E2007`/`E2008`（`crates/beam-net/src/error.rs:15-19`、`crates/beam-net/src/error.rs:88-89`，`E2007` 正是 `apps/desktop/src-tauri/src/transport.rs:53` 注释提到的缺 TLS 身份错误）；`beam-input` 的 `E8001`/`E8002`（`crates/beam-input/src/error.rs:29`）、`beam-decode` 的 `E10001`（`crates/beam-decode/src/error.rs:35`）、`beam-render` 的 `E10011`–`E10014`（`crates/beam-render/src/error.rs:36-51`）同样无文案。命中的码一律落到兜底文案「操作失败,请稍后重试」。 | 未开始 |
 
 ##### §3.11 Events
 | # | 文档要求 | 实现位置 | 判定 | 说明 | 状态 |
@@ -1099,11 +1129,11 @@
 
 | # | 内容 | 实现位置 | 说明 |
 |---|---|---|---|
-| S-01 | `list_devices` 只读 command | `apps/desktop/src-tauri/src/commands.rs:202-205`、`apps/desktop/src-tauri/src/main.rs:95` | §3.11 的 12 个命令里没有读取已配对设备列表的入口，代码补了一个（main.rs 注释已自述）。不改状态，风险低。 | 未开始 |
-| S-02 | `list_pair_requests` 只读 command | `apps/desktop/src-tauri/src/commands.rs:210-213`、`apps/desktop/src-tauri/src/main.rs:96` | 同上，为「设备」页补的只读入口。 | 未开始 |
-| S-03 | 托盘「关闭窗口收进托盘」行为 | `apps/desktop/src-tauri/src/main.rs:59-73` | 文档 §3.11 只说「托盘」，未规定关闭语义；代码按 `settings.minimizeToTray` 决定是否 `prevent_close` + `hide()`。属合理补充。 | 未开始 |
-| S-04 | `BackendKind` 后端来源标记与「演示数据」提示条 | `apps/desktop/src-tauri/src/dto.rs:17-22`、`apps/desktop/src/components/BackendNotice.tsx:9-27` | 文档未要求，但这是本仓的诚实性约定（桩数据必须标注），与文档「不编造实测数据」的基调一致，不算风险。 | 未开始 |
-| S-05 | `--pri-strong: #6d5bff` 额外令牌 | `apps/desktop/src/styles.css:16`、`apps/desktop/src/styles.css:35` | 文档 §16 无此令牌，且被主按钮渐变使用，导致主按钮不再是文档规定的纯色 —— 已在 UX-11 记为偏差，此处登记来源。 | 未开始 |
+| TK-01 | `list_devices` 只读 command | `apps/desktop/src-tauri/src/commands.rs:202-205`、`apps/desktop/src-tauri/src/main.rs:95` | §3.11 的 12 个命令里没有读取已配对设备列表的入口，代码补了一个（main.rs 注释已自述）。不改状态，风险低。 | 未开始 |
+| TK-02 | `list_pair_requests` 只读 command | `apps/desktop/src-tauri/src/commands.rs:210-213`、`apps/desktop/src-tauri/src/main.rs:96` | 同上，为「设备」页补的只读入口。 | 未开始 |
+| TK-03 | 托盘「关闭窗口收进托盘」行为 | `apps/desktop/src-tauri/src/main.rs:59-73` | 文档 §3.11 只说「托盘」，未规定关闭语义；代码按 `settings.minimizeToTray` 决定是否 `prevent_close` + `hide()`。属合理补充。 | 未开始 |
+| TK-04 | `BackendKind` 后端来源标记与「演示数据」提示条 | `apps/desktop/src-tauri/src/dto.rs:17-22`、`apps/desktop/src/components/BackendNotice.tsx:9-27` | 文档未要求，但这是本仓的诚实性约定（桩数据必须标注），与文档「不编造实测数据」的基调一致，不算风险。 | 未开始 |
+| TK-05 | `--pri-strong: #6d5bff` 额外令牌 | `apps/desktop/src/styles.css:16`、`apps/desktop/src/styles.css:35` | 文档 §16 无此令牌，且被主按钮渐变使用，导致主按钮不再是文档规定的纯色 —— 已在 UX-11 记为偏差，此处登记来源。 | 未开始 |
 
 #### 最该优先补的（最多 3 条）
 1. **Windows 客户端的「画面」整条链路缺失**：桌面端只有一个 WebView 窗口，客户端画面区是 CSS 占位；`connect` 只做到 QUIC/TLS 握手探针就立即关连接；`beam-render`/`beam-decode` 未接入桌面端依赖。这是产品方案第 45 行与 §3.10 的直接验收项，也连带导致 EV-06（重连）、UX-38（保留最后一帧）、UX-35 永远无法真正落地。
