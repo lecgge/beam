@@ -27,10 +27,21 @@ tracing = { workspace = true }
 ffmpeg-next = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dependencies]
+# WASAPI 需要这些模块：
+# - Win32_Media_Audio：IMMDeviceEnumerator / IAudioClient / WAVEFORMATEX …
+# - Win32_System_Com：CoInitializeEx / CoCreateInstance（COM 套间）。
+# - Win32_System_Com_StructuredStorage + Win32_System_Variant：
+#   IMMDevice::Activate 的激活参数类型（PROPVARIANT）。
+# - Win32_System_Threading：采集侧的事件句柄（CreateEventW / WaitForSingleObject）。
+# - Win32_Security：CreateEventW 的 SECURITY_ATTRIBUTES 参数类型。
 windows = { workspace = true, features = [
     "Win32_Media_Audio",
     "Win32_Media_KernelStreaming",
+    "Win32_Security",
     "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
 ] }
 
 [lints]

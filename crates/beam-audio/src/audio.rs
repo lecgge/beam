@@ -101,11 +101,28 @@ pub trait AudioOutput: Send {
     fn play(&mut self, pcm: &PcmFrame) -> Result<(), AudioError>;
 }
 
-/// 默认采集源（未启用原生音频后端时返回 `E7004`）。
-#[derive(Debug, Default)]
+/// 默认采集源：Windows 上是 **WASAPI loopback**（采「系统正在播放的声音」）。
+///
+/// - Windows：真机实现（见 [`crate::wasapi`]）。设备打不开 ⇒ `E7001`。
+/// - 其它平台：没有原生后端 ⇒ `E7004`。
+///
+/// `next_frame()` 是**非阻塞**语义：没有攒够 5 ms 就返回 `None`，
+/// 调用方自己决定轮询节奏（不要在采集侧 spin）。
+#[derive(Default)]
 pub struct WasapiLoopbackSource {
+    inner: Option<crate::wasapi::LoopbackInner>,
     cfg: Option<AudioConfig>,
     running: bool,
+}
+
+impl std::fmt::Debug for WasapiLoopbackSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WasapiLoopbackSource")
+            .field("backend", &self.inner.is_some())
+            .field("cfg", &self.cfg)
+            .field("running", &self.running)
+            .finish()
+    }
 }
 
 impl WasapiLoopbackSource {
@@ -122,27 +139,74 @@ impl WasapiLoopbackSource {
 
 impl AudioSource for WasapiLoopbackSource {
     fn start(&mut self, cfg: AudioConfig) -> Result<(), AudioError> {
-        #[cfg(feature = "opus")]
-        {
-            let _ = cfg;
-            self.cfg = Some(cfg);
-            self.running = true;
-            Ok(())
-        }
-        #[cfg(not(feature = "opus"))]
-        {
-            let _ = cfg;
-            Err(AudioError::BackendDisabled)
-        }
+        let inner = crate::wasapi::LoopbackInner::open(cfg.clone())?;
+        self.inner = Some(inner);
+        self.cfg = Some(cfg);
+        self.running = true;
+        Ok(())
     }
 
     fn next_frame(&mut self) -> Option<PcmFrame> {
-        None
+        self.inner.as_mut().and_then(|inner| inner.next_frame())
     }
 
     fn stop(&mut self) {
+        // 关掉 inner 就会停掉采集线程（`close` 内部 join）。
+        if let Some(inner) = self.inner.take() {
+            inner.close();
+        }
         self.running = false;
         self.cfg = None;
+    }
+}
+
+/// 客户端侧音频输出：Windows 上是 **WASAPI**。
+///
+/// 写缓冲在**专用线程**里做（§6「播放用专用 OS 线程」）：
+/// `play()` 只投递命令并等回执，所以写失败能如实返回 `E7003`，
+/// 而不是「投进去就不管了」。
+pub struct WasapiAudioOutput {
+    inner: Option<crate::wasapi::OutputInner>,
+}
+
+impl std::fmt::Debug for WasapiAudioOutput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WasapiAudioOutput")
+            .field("backend", &self.inner.is_some())
+            .finish()
+    }
+}
+
+impl WasapiAudioOutput {
+    /// 打开默认渲染端点（Windows）或返回 `E7004`（其它平台）。
+    ///
+    /// 设备打不开 ⇒ `E7001`；设备混音格式没法协商（既不能直接用 i16，
+    /// 也转不了）⇒ `E7003`，原因写清楚了。
+    pub fn new(cfg: AudioConfig) -> Result<Self, AudioError> {
+        Ok(Self {
+            inner: Some(crate::wasapi::OutputInner::open(cfg)?),
+        })
+    }
+
+    /// 是否已打开输出端。
+    pub fn is_open(&self) -> bool {
+        self.inner.is_some()
+    }
+
+    /// 关闭输出端（停止写缓冲线程）。
+    pub fn close(&mut self) {
+        if let Some(inner) = self.inner.take() {
+            inner.close();
+        }
+    }
+}
+
+impl AudioOutput for WasapiAudioOutput {
+    fn play(&mut self, pcm: &PcmFrame) -> Result<(), AudioError> {
+        match self.inner.as_mut() {
+            Some(inner) => inner.play(pcm),
+            None => Err(AudioError::BackendDisabled),
+        }
     }
 }
 
@@ -265,18 +329,93 @@ mod tests {
     }
 
     #[test]
-    fn capture_without_backend_reports_e7004() {
+    fn capture_source_is_idle_before_start() {
         let mut src = WasapiLoopbackSource::new();
-        #[cfg(not(feature = "opus"))]
-        {
-            let err = src.start(AudioConfig::default()).expect_err("必须失败");
-            assert_eq!(err.code(), 7004);
+        assert!(!src.is_running());
+        // 没启动就没有帧（非阻塞语义）。
+        assert!(src.next_frame().is_none());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn capture_on_non_windows_reports_e7004() {
+        let mut src = WasapiLoopbackSource::new();
+        let err = src.start(AudioConfig::default()).expect_err("必须失败");
+        assert_eq!(err.code(), 7004);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn output_on_non_windows_reports_e7004() {
+        let err = WasapiAudioOutput::new(AudioConfig::default()).expect_err("必须失败");
+        assert_eq!(err.code(), 7004);
+    }
+
+    /// 真机测试的开关：除了 `#[ignore]` 之外还要这个环境变量，
+    /// 免得有人一把 `--ignored` 就把设备测试全跑了。
+    #[cfg(windows)]
+    fn device_test_enabled() -> bool {
+        std::env::var("BEAM_AUDIO_DEVICE_TEST").as_deref() == Ok("1")
+    }
+
+    /// 真机测试：打开 loopback 采集，看能不能拿到 5 ms 帧。
+    ///
+    /// 默认**不跑**；要跑得显式开：
+    /// `BEAM_AUDIO_DEVICE_TEST=1 cargo test -p beam-audio -- --ignored`
+    ///
+    /// 注意：系统没在播声音时**一帧都没有**是正常的（loopback 只采渲染流），
+    /// 所以这里不把「没拿到帧」当失败。
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "需要真实音频设备：BEAM_AUDIO_DEVICE_TEST=1 cargo test -p beam-audio -- --ignored"]
+    fn wasapi_loopback_captures_5ms_frames() {
+        if !device_test_enabled() {
+            eprintln!("跳过：需要 BEAM_AUDIO_DEVICE_TEST=1");
+            return;
         }
-        #[cfg(feature = "opus")]
-        {
-            src.start(AudioConfig::default()).expect("应当成功");
-            assert!(src.is_running());
+        let mut src = WasapiLoopbackSource::new();
+        src.start(AudioConfig {
+            mode: AudioMode::HostAndStream,
+            ..AudioConfig::default()
+        })
+        .expect("应当能打开 loopback 设备");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut got = 0usize;
+        while std::time::Instant::now() < deadline && got < 4 {
+            match src.next_frame() {
+                Some(frame) => {
+                    assert_eq!(frame.sample_rate, 48_000);
+                    assert_eq!(frame.channels, 2);
+                    // §3.7：5 ms = 240 采样 @ 48 kHz，双声道交错 i16。
+                    assert_eq!(frame.samples.len(), 240 * 2 * 2);
+                    got += 1;
+                }
+                None => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
         }
+        src.stop();
+        eprintln!("loopback 取到 {got} 帧（设备在播放时才会有帧）");
+    }
+
+    /// 真机测试：输出端**只写静音**，不会发出任何可听声音。
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "需要真实音频设备：BEAM_AUDIO_DEVICE_TEST=1 cargo test -p beam-audio -- --ignored"]
+    fn wasapi_output_accepts_a_silent_frame() {
+        if !device_test_enabled() {
+            eprintln!("跳过：需要 BEAM_AUDIO_DEVICE_TEST=1");
+            return;
+        }
+        let mut out = WasapiAudioOutput::new(AudioConfig::default()).expect("应当能打开输出设备");
+        assert!(out.is_open());
+        let pcm = PcmFrame {
+            samples: Bytes::from(vec![0u8; 240 * 2 * 2]),
+            sample_rate: 48_000,
+            channels: 2,
+        };
+        // 全零 ⇒ 静音，不会打扰用户。
+        out.play(&pcm).expect("写静音帧应当成功");
     }
 
     #[test]
