@@ -48,14 +48,14 @@
 | 审计判定 | 条数 | 已完成 | 进行中 | 已排期 | 未开始 |
 |---|---|---|---|---|---|
 | 已实现 | 364 | 9 | 0 | 0 | 355 |
-| 占位 | 43 | 24 | 1 | 0 | 17 |
-| 缺失 | 111 | 40 | 0 | 0 | 58 |
-| 偏差 | 76 | 23 | 0 | 0 | 53 |
+| 占位 | 43 | 26 | 2 | 0 | 14 |
+| 缺失 | 111 | 47 | 0 | 0 | 51 |
+| 偏差 | 76 | 45 | 0 | 0 | 31 |
 | 超出 | 3 | 0 | 0 | 0 | 3 |
-| **合计** | **597** | **96** | **1** | **0** | **486** |
+| **合计** | **597** | **127** | **2** | **0** | **454** |
 
 - 审计判定为**未达成**（占位+缺失+偏差）：**230** 条
-- 其中**已落地**：**102** 条；**仍未排期**：**128** 条
+- 其中**已落地**：**134** 条；**仍未排期**：**96** 条
 
 > 「未开始」不代表这一条没人管，而是**还没排进任何一批**。排期后的条目会出现在「落地进度台账」一节，带批次号与验收方式。
 
@@ -156,8 +156,8 @@
 | 状态 | 条目数 |
 |---|---|
 | 未开始 | 0 |
-| 进行中 | 1 |
-| 已完成 | 97 |
+| 进行中 | 2 |
+| 已完成 | 128 |
 | 已阻塞 | 12 |
 | 暂不做 | 1 |
 | 偏差 | 1 |
@@ -283,6 +283,22 @@
 | §3.8 的注入线程与 1 ms 指标未落地 | I-10（输入 stream 接收任务 → 有界通道 → 注入线程 + MMCSS Games 优先级）与 I-13（接收→注入 ≤1 ms）仍未做；当前注入在调用方线程同步执行 | 下一批 |
 | 桌面端系统通知未做 | CM-19 仍是缺失：需要 tauri-plugin-notification（新依赖），本批未引入 | 下一批 |
 
+| B7 | 2026-10-30 | 第七批：设计规范落地 + Android 状态页 + 输入线程与延迟指标 + Opus 编解码 | apps/desktop/src / android / crates/beam-input / crates/beam-host / crates/beam-audio / tools/ci/check-design-tokens | 已完成 | cargo fmt --all --check exit 0；cargo check --workspace --all-targets exit 0 / 0 warning；cargo clippy --workspace --all-targets -- -D warnings exit 0 / 0 warning；cargo test --workspace exit 0；cargo test -p beam-input exit 0（27 例）；cargo bench -p beam-input --bench inject_latency exit 0（入队→注入 p99 0.9 µs / 预算 1 ms PASS，MMCSS/Games 注册成功）；cargo check/clippy/test -p beam-audio 在默认与 --features opus 两种状态下均 exit 0（opus 态 6 例全过）；npm --prefix apps/desktop run build exit 0；设计规范门禁 exit 0（54 项）；gradlew assembleDebug assembleRelease test --rerun-tasks exit 0（974 任务全执行，28 测试类 / 176 次 / 0 失败） |
+
+- **B7-A 桌面端设计规范** — 写入范围：`apps/desktop/src/**`、`tools/ci/check-design-tokens/**`；覆盖条目 UX-05, UX-06, UX-11, UX-13, UX-14, UX-15, UX-18, UX-19, UX-20, UX-21, UX-22, UX-31, UX-34, UX-35, UX-37, UX-38, UX-41
+- **B7-B Android 状态页** — 写入范围：`android/**`；覆盖条目 DS-07, DS-12, DS-19, DS-23, DS-24, DS-27, PP-04, AN-23, AN-28, AN-52
+- **B7-C 输入线程与延迟指标** — 写入范围：`crates/beam-input/**`、`crates/beam-host/**`；覆盖条目 I-10, I-13
+- **B7-D Opus 编解码（主会话自办）** — 写入范围：`crates/beam-audio/**`；覆盖条目 A-02, A-03
+
+**B7 追加项（审计中顺带发现，不在原 551 条内）**
+
+| 项 | 说明 | 归属 |
+|---|---|---|
+| WASAPI loopback 采集与 WASAPI 输出未做 | §3.7 的 A-01（主机侧采集）与 A-04（客户端侧输出）仍是占位：它们要处理设备混音格式协商（设备原生格式常常是 f32，与本 crate 的 i16 交错 PCM 不同） | 下一批 |
+| 音频还没进产品链路 | beam-audio 的编解码虽然真的了，但 beam-host / beam-client 都没有调用它 —— 采集→编码→发送→解码→输出这一整条还没接通 | 下一批 |
+| 真实 SendInput 注入未自动验证 | 注入有真实副作用（会真的按键），单测与基准都只测「构造 + 入队 + 出队 + 调度」，不含真实 SendInput 调用 | 需真机人工验证 |
+| AN-36 / AN-45 未做 | AN-36（Surface 管理归 :core-renderer）要重构；AN-45（:core-audio 用 AAudio 而不是 AudioTrack）要 NDK/JNI 封装 —— 两者都是 v1 范围 | 下一批 |
+
 ### 已裁决事项
 
 | # | 议题 | 裁决 | 裁决日期 | 说明 | 解锁范围 |
@@ -306,6 +322,10 @@
 | S6 | Android 侧键码无法编码成 USB HID | 协议侧 InputEvent::Key.code 是 u16 HID 扫描码，但 Android 的 DOM 风格键名（BrowserBack / BrowserHome / ContextMenu）在 HID Keyboard page 没有对应 usage，采不上来 |  |
 | S7 | 滚轮的物理单位未定义 | proto 只说 Scroll 的 dx/dy 是 Q16.16，§3.8 没说物理单位。实现口径取「Q16.16 的整数部分 = 滚轮刻度，Win32 一格 = 120」，属实现选择；若文档另有约定需改实现 |  |
 | S8 | E8004 是 E8xxx 段内扩展码，文档未列 | beam-input 新增 UnsupportedKeyCode（HID 键码无法映射为 VK）。与既有 8003 同口径的段内扩展，没有新增错误段、没有改 §3.8 的 8001/8002 语义，但 §3.8 的错误码清单里没有它 |  |
+| S9 | §16 内部张力：「间距 4 的倍数」与「卡片内边距 14」 | 14 不是 4 的倍数。实现按 §16 的逐字表（卡片内边距 = 14px），设计规范门禁也只校验逐字表，没有额外强制「所有间距都是 4 的倍数」—— 否则会和同一行规范打架。建议产品方案 §16 加一句说明 |  |
+| S10 | §16 的「手机外框 30」在桌面端没有使用点 | 手机外框是 Android 端手机模型的圆角，桌面端没有这个形状。令牌保留（两端共用同一刻度）但不引用，门禁脚本因此把它排除在「必须被用到」清单外 |  |
+| S11 | 桌面端 PIN 没有端到端校验 | 前端做格式校验 + 尝试预算 + 完整 UI，但后端 connect(host_id) 命令没有 PIN 参数 —— 填对填错都能连上。要闭环需 Rust 侧给 connect 加 PIN 参数 |  |
+| S12 | 通用 UI 组件放在 :core-data 的 ui 包 | §3.12 固定 12 个模块且没有 :core-ui；BeamDialog/BeamToast 放在 :core-data/ui（BeamTokens 已在此）。若要单列 UI 模块，需先改 §3.12 的模块表 |  |
 
 ### 本轮修复与提交记录
 
@@ -326,6 +346,9 @@
 | 2026-10-30 |  | B6-B 初版按任务书的「相对移动」实现，但 proto 的字段文档写的是「移动到归一化坐标（Q16.16）」、模块头写「屏幕宽/高各映射到 0..=65535」—— 那是 Win32 MOUSEEVENTF_ABSOLUTE 的口径，相对移动在协议层没有表达力（客户端只知道「移动到哪」）。已改为绝对移动 | beam-input 20 例单测全过；clippy -D warnings exit 0 |
 | 2026-10-30 |  | crates/beam-client/src/runtime.rs:120 的文档注释写「解码会返回 E10005」，而 beam-decode 实际定义的是 E10004（BACKEND_DISABLED）。已改正 | cargo check --workspace exit 0 |
 | 2026-10-30 |  | B5-B 在 Rust 侧加了 SessionEvent::FramesDropped，B6-A 把它加进 uniffi 导出面，但 Android 侧还停在「when 兜底 null」—— sealed interface 的穷尽 when 加变体后必须同步补映射与消费分支，否则丢帧到不了 UI。已补 SessionEvent.FramesDropped + NativeMappings 映射 + StreamViewModel 消费（不改相位，只累加统计）+ 单测 | gradlew assembleDebug assembleRelease test exit 0（22 套件 / 158 次 / 0 失败） |
+| 2026-10-30 |  | ffmpeg 的原生 opus 编码器 capabilities 带 exp（experimental），avcodec_open2 直接拒绝（-733130664 = AVERROR_EXPERIMENTAL），而且只支持 fltp 采样格式；libopus 变体支持 s16 且非 experimental。§7 要求 LGPL 构建 —— libopus 是 BSD 许可，LGPL 构建带 --enable-libopus 允许，本仓库的 LGPL 构建确实带了 | 5 ms 帧（240 采样 @ 48 kHz）编解码往返互相关 > 0.9（真机实测） |
+| 2026-10-30 |  | 编码器有一帧流水线延迟（首次取包返回 EAGAIN → 返回空包，调用方跳过）；解码器首包是 pre-skip 静音。测试因此改成「连送连解多帧 + 互相关找最佳对齐」，而不是逐点比对或固定相位比对（后者会因相位差拿到假阴性） | 单测 6 例全过 |
+| 2026-10-30 |  | 正确约定是先 AvSetMmThreadCharacteristicsW("Games", &index) 拿到 task index，再用 AvSetMmThreadPriority(index, THREAD_PRIORITY_GAMES)；反过来会拿到 ERROR_INVALID_TASK_INDEX（1551）。task index 还可能失效（服务重启），需要自愈路径（重新注册）。注册失败时退回 SetThreadPriority，并如实把用了哪种方式与错误码记进统计 | 基准实测：注入线程优先级 = MMCSS/Games，注册无报错 |
 
 ---
 
@@ -636,13 +659,13 @@
 | # | 文档要求 | 实现位置 | 判定 | 说明 | 状态 |
 |---|---|---|---|---|---|
 | A-01 | 「主机 WASAPI loopback 48 kHz → Opus 5 ms 帧」（WASAPI loopback 采集） | `crates/beam-audio/src/audio.rs:111-152` | 占位 | `WasapiLoopbackSource` 只存 `cfg`/`running` 两个字段（`audio.rs:111-114`）。`start()` 在默认 feature 下返回 `E7004`（`audio.rs:137-141`）；开了 `opus` feature 的分支也只是置标志后 `Ok(())`（`audio.rs:130-136`）。**全 crate 没有任何 WASAPI 调用**（已搜索 `Wasapi`/`WASAPI`/`loopback`，仅命中注释与类型名；`windows` 依赖虽启用了 `Win32_Media_Audio`/`Win32_Media_KernelStreaming`（`crates/beam-audio/Cargo.toml:23-26`）但未被使用）。`next_frame()` 恒返回 `None`（`audio.rs:144-146`）。 | 未开始 |
-| A-02 | 「Opus 5 ms 帧」（Opus 编码） | `crates/beam-audio/src/audio.rs:16-20,167-174` | 占位 | 帧长常量正确（`FRAME_DURATION_MS = 5`，`audio.rs:17`；`SAMPLES_PER_FRAME = 240`，`audio.rs:20`），但 `OpusEncoderImpl::encode()` 恒返回 `Err(AudioError::BackendDisabled)`（`audio.rs:170`），且**无论 `opus` feature 开或关都如此**。`opus` 依赖（`Cargo.toml:28`）在 `src/` 中从未被引用。 | 未开始 |
-| A-03 | 「Windows 客户端 Opus 解码 + WASAPI 输出」（Opus 解码部分） | `crates/beam-audio/src/audio.rs:189-196` | 占位 | `OpusDecoderImpl::decode()` 恒返回 `Err(AudioError::BackendDisabled)`（`audio.rs:192`），feature 开或关都一样。无任何真实解码。 | 未开始 |
+| A-02 | 「Opus 5 ms 帧」（Opus 编码） | `crates/beam-audio/src/audio.rs:16-20,167-174` | 占位 | 帧长常量正确（`FRAME_DURATION_MS = 5`，`audio.rs:17`；`SAMPLES_PER_FRAME = 240`，`audio.rs:20`），但 `OpusEncoderImpl::encode()` 恒返回 `Err(AudioError::BackendDisabled)`（`audio.rs:170`），且**无论 `opus` feature 开或关都如此**。`opus` 依赖（`Cargo.toml:28`）在 `src/` 中从未被引用。 | 已完成 |
+| A-03 | 「Windows 客户端 Opus 解码 + WASAPI 输出」（Opus 解码部分） | `crates/beam-audio/src/audio.rs:189-196` | 占位 | `OpusDecoderImpl::decode()` 恒返回 `Err(AudioError::BackendDisabled)`（`audio.rs:192`），feature 开或关都一样。无任何真实解码。 | 已完成 |
 | A-04 | 「Windows 客户端 Opus 解码 + WASAPI 输出」（WASAPI 输出部分） | `crates/beam-audio/src/audio.rs:104-107` | 缺失 | 只有 `trait AudioOutput { fn play(&mut self, pcm:&PcmFrame) -> Result<(), AudioError>; }` 的**接口声明**，**没有任何实现**（已搜索 `impl AudioOutput`：`crates/beam-audio/src/` 零命中；`impl AudioSource` / `impl OpusEncoder` / `impl OpusDecoder` 均有实现，唯独 `AudioOutput` 没有）。也没有 `WasapiAudioOutput` 之类的类型。 | 未开始 |
 | A-05 | 「Android 由 core-audio 解码」 | `android/core-audio/src/main/java/dev/beam/core/audio/LowLatencyAudioPlayer.kt:136-148,150-178` | 已实现 | Android 侧是**真实实现**：`MediaCodec.createDecoderByType("audio/opus")` 解码 → `AudioTrack` 低延迟输出（`LowLatencyAudioPlayer.kt:136-148`、`:150-178`），并有 `PcmRingBuffer.kt` 与单测 `src/test/java/dev/beam/core/audio/PcmRingBufferTest.kt`。注：这是 Kotlin 侧实现，超出本次 6 个 Rust crate 的审计范围，在此仅作 §3.7 要求的对照。 | 未开始 |
 | A-06 | 「(可复用 ffi 中的 Opus 解码)」 | 未找到（已搜索：`opus`、`Opus`；`crates/beam-ffi/src/` 零命中） | 缺失 | beam-ffi 的导出面只有 `BeamClient` / `ClientConfig` / `DiscoveryListener` / `FrameSink` / `PeerInfo`（`crates/beam-ffi/src/lib.rs:58`），**不含任何 Opus 解码能力**。Android 侧实际是各自用 `MediaCodec` 自行解码，与文档建议的「复用 ffi 解码」不符。 | 未开始 |
 | A-07 | 「边界:不做混音/回声消除」 | `crates/beam-audio/Cargo.toml:16-28`；`crates/beam-audio/src/` | 已实现 | crate 内无混音/AEC/回声处理代码；依赖仅 `beam-proto` / `bytes` / `thiserror` / `tracing`（+ optional `opus` / `windows`）。Android 侧 `android/core-audio/README.md:44` 亦明确「只解码与直通输出」。 | 未开始 |
-| A-08 | 「错误码 `E7xxx`」 | `crates/beam-audio/src/error.rs:6-12,33-55` | 占位 | 四个错误码常量与变体齐备（7001 设备打开失败 / 7002 Opus 编解码失败 / 7003 音频输出失败 / 7004 后端未启用，`error.rs:6-12`、`33-55`），但**7001/7002/7003 无任何产生路径**：唯一会被抛出的是 `BackendDisabled`。 | 未开始 |
+| A-08 | 「错误码 `E7xxx`」 | `crates/beam-audio/src/error.rs:6-12,33-55` | 占位 | 四个错误码常量与变体齐备（7001 设备打开失败 / 7002 Opus 编解码失败 / 7003 音频输出失败 / 7004 后端未启用，`error.rs:6-12`、`33-55`），但**7001/7002/7003 无任何产生路径**：唯一会被抛出的是 `BackendDisabled`。 | 进行中 |
 | A-09 | 「配置:`audio_mode=host+stream\|stream_only\|off`」 | `crates/beam-audio/src/audio.rs:27-34,44-53`；`crates/beam-config/src/model.rs:19-26,220-229` | 已实现 | 两侧都齐：crate 内 `AudioMode` 三值枚举（`audio.rs:27-34`，默认 `Off`，`audio.rs:36-40`）+ `AudioConfig.mode`（`audio.rs:45`）；全局配置模型 `AudioMode` 枚举（`model.rs:19-26`）、`AudioSettings.mode`（`model.rs:284`）、CLI `--audio`（`model.rs:151`）、环境变量 `BEAM_AUDIO`（`model.rs:187-189`）、字符串解析 `parse_audio_mode`（`model.rs:220-229`，三个取值 `host+stream`/`stream_only`/`off` 全部覆盖）。 | 未开始 |
 | A-10 | 「配置:`bitrate=128k`」 | `crates/beam-audio/src/audio.rs:22-23,48`；`crates/beam-config/src/model.rs:286,331` | 已实现 | `DEFAULT_BITRATE_BPS = 128_000`（`audio.rs:23`）+ `AudioConfig.bitrate_bps`（`audio.rs:48`）；配置模型 `AudioSettings.bitrate_bps` 默认 `128_000`（`model.rs:286,331`）。 | 未开始 |
 | A-11 | 「性能:采集→编码 ≤6 ms」 | `crates/beam-audio/src/audio.rs:201-202` | 缺失 | 只有一个常量 `CAPTURE_TO_ENCODE_BUDGET_MS = 6`（`audio.rs:202`），**没有任何计时/测量代码**；且采集与编码本身都未实现（见 A-01/A-02），该预算无从验证。 | 未开始 |
@@ -663,10 +686,10 @@
 | I-07 | 「边界:禁止依赖 capture/encode」 | `crates/beam-input/Cargo.toml:16-27` | 已实现 | 依赖仅 `beam-proto` / `thiserror` / `tracing`（+ optional `vigem-client`），无 `beam-capture`、无 `beam-encode`、无 `beam-session`、无 `beam-net`。 | 未开始 |
 | I-08 | 「`trait InputSink { fn apply(&mut self, ev: InputEvent) -> Result<(), InputError>; }`」 | `crates/beam-input/src/sink.rs:12-15` | 已实现 | 逐字一致（`Send` 约束 + `apply` 签名）。 | 未开始 |
 | I-09 | 「`GamepadHub::attach(slot) -> GamepadHandle`」 | `crates/beam-input/src/sink.rs:58-82` | 已实现 | 接口存在且行为合理。文档简写省略了 `Result`；代码为 `attach(&mut self, slot: u8) -> Result<GamepadHandle, InputError>`（`sink.rs:58`），这是 §3.8 强制要求 `E8001` 所必需的（ViGEmBus 未安装 / 槽位越界分别返回 `E8001`/`E8002`，`sink.rs:60,71,80`），判定为可接受的等价实现。`vigem` feature **默认开启**（`crates/beam-input/Cargo.toml:12,14`，与 §7「`vigem`(默认开)」一致）。 | 未开始 |
-| I-10 | 「线程:输入 stream 接收任务 → 有界通道 → 注入线程(高优先级)」 | 未找到（已搜索：`thread::spawn`、`std::thread::`、`sync_channel`、`bounded`、`crossbeam`、`MMCSS`、`GameThread`、`priority`；`crates/beam-input/` 零命中） | 缺失 | **没有任何线程、没有任何通道、没有线程优先级设置**。输入事件只在调用方线程里同步处理。§6 要求的「抓屏/编码/解码/渲染/注入用专用 OS 线程并提升优先级(Windows MMCSS "Games")」在本 crate 完全未落地。 | 未开始 |
+| I-10 | 「线程:输入 stream 接收任务 → 有界通道 → 注入线程(高优先级)」 | 未找到（已搜索：`thread::spawn`、`std::thread::`、`sync_channel`、`bounded`、`crossbeam`、`MMCSS`、`GameThread`、`priority`；`crates/beam-input/` 零命中） | 缺失 | **没有任何线程、没有任何通道、没有线程优先级设置**。输入事件只在调用方线程里同步处理。§6 要求的「抓屏/编码/解码/渲染/注入用专用 OS 线程并提升优先级(Windows MMCSS "Games")」在本 crate 完全未落地。 | 已完成 |
 | I-11 | 「错误码 `E8xxx`(8001 ViGEmBus 未安装)」 | `crates/beam-input/src/sink.rs:69-73,80-81`；`crates/beam-input/src/error.rs:6,30-31` | 已实现 | **有真实产生路径**：`vigem_client::Client::connect()` 失败被 `map_err` 为 `InputError::ViGEmNotInstalled`（`sink.rs:71`）；feature 关闭时 `attach` 直接返回该错误（`sink.rs:80`）。文案映射齐备（`error.rs:16`）。这是六个 crate 中**唯一被真实触发过的错误码**。 | 未开始 |
 | I-12 | 「8002 权限拒绝」 | `crates/beam-input/src/sink.rs:59-61,118-120`；`crates/beam-input/src/error.rs:8,34-35` | 已实现 | 有真实产生路径：槽位越界（`sink.rs:59-61`）与无权限注入（`sink.rs:118-120`）都返回 `PermissionDenied`。文案齐备（`error.rs:17`）。 | 未开始 |
-| I-13 | 「性能:接收→注入 ≤1 ms」 | 未找到（已搜索：`bench`、`criterion`、`Instant`、`elapsed`；`crates/beam-input/` 零命中） | 缺失 | 无计时代码、无基准设施；且注入本身是空操作（I-02），该指标无从测量。 | 未开始 |
+| I-13 | 「性能:接收→注入 ≤1 ms」 | 未找到（已搜索：`bench`、`criterion`、`Instant`、`elapsed`；`crates/beam-input/` 零命中） | 缺失 | 无计时代码、无基准设施；且注入本身是空操作（I-02），该指标无从测量。 | 已完成 |
 | I-14 | 「测试:回放脚本」 | 未找到（已搜索：`replay`、`script`、`fixture`、`json`；`crates/beam-input/src/` 零命中） | 缺失 | 无回放脚本、无录制/回放工具。 | 未开始 |
 | I-15 | 「测试:手柄热插拔」 | `crates/beam-input/src/sink.rs:154-177`（`gamepad_attach_respects_slot_limit` / `gamepad_attach_and_detach`） | 缺失 | 现有单测只覆盖「槽位上限」与「attach/detach 幂等」，**不涉及热插拔**（无设备枚举、无插拔事件回调；`detach` 只是从 `Vec` 里移除，`sink.rs:85-89`）。且 `gamepad_attach_and_detach` 在本机没装 ViGEmBus 时会直接 `return` 跳过断言（`sink.rs:169-171`），覆盖度依赖环境。 | 未开始 |
 
@@ -877,12 +900,12 @@
 | AN-20 | `:feature-settings` 职责·设置页 | `android/feature-settings/src/main/java/dev/beam/feature/settings/SettingsScreen.kt:40` | 已实现 | 真实设置页：画质（分辨率 `:78`/帧率 `:82`/码率 `:88`）、编码（`:98`）、FEC（`:109`）、解码器偏好（`:119`）、统计浮层/音频/主题开关（`:139-152`）、恢复默认（`:156`）；写操作全落 `SettingsRepo`（`SettingsViewModel.kt:79-83`）。 | 未开始 |
 | AN-21 | `:feature-settings` 对外接口：— | — | 已实现 | 文档未要求对外接口；模块仅被 `:app` 经 `BeamNavHost.kt:149-152` 使用。 | 未开始 |
 | AN-22 | `:feature-settings` 禁止：— | — | 已实现 | 文档未列禁止项；核实无越界（无解码/网络/JNI）。 | 未开始 |
-| AN-23 | `:feature-perf` 职责·性能面板 | `android/feature-perf/src/main/java/dev/beam/feature/perf/PerfPanel.kt:41` | 偏差 | 面板 Composable 真实存在（KPI 网格 `:81`、E2E 折线 `:127`、阶段表 `:174`、导出按钮 `:74-75`），但**没有任何数据生产者**：`PerfRecorder`（`feature-perf/.../PerfRecorder.kt:28`）全仓无实例化点，`PerfTickSource`（`core-net/.../Perf.kt:32`）无实现类（`PerfRecorder.kt:31` 默认 `emptyFlow()`），`Routes.PERF` 只有 `composable(Routes.PERF)`（`BeamNavHost.kt:169`）而无任何 `navigate(Routes.PERF)` 入口。面板恒为空态（`PerfPanel.kt:182-187`）。 | 未开始 |
+| AN-23 | `:feature-perf` 职责·性能面板 | `android/feature-perf/src/main/java/dev/beam/feature/perf/PerfPanel.kt:41` | 偏差 | 面板 Composable 真实存在（KPI 网格 `:81`、E2E 折线 `:127`、阶段表 `:174`、导出按钮 `:74-75`），但**没有任何数据生产者**：`PerfRecorder`（`feature-perf/.../PerfRecorder.kt:28`）全仓无实例化点，`PerfTickSource`（`core-net/.../Perf.kt:32`）无实现类（`PerfRecorder.kt:31` 默认 `emptyFlow()`），`Routes.PERF` 只有 `composable(Routes.PERF)`（`BeamNavHost.kt:169`）而无任何 `navigate(Routes.PERF)` 入口。面板恒为空态（`PerfPanel.kt:182-187`）。 | 已完成 |
 | AN-24 | `:feature-perf` 对外接口：`PerfPanel` | `android/feature-perf/src/main/java/dev/beam/feature/perf/PerfPanel.kt:41` | 已实现 | 类型名与文档一致：`fun PerfPanel(state: PerfUiState, onExport: (PerfExportFormat) -> Unit, modifier: Modifier)`。 | 未开始 |
 | AN-25 | `:feature-perf` 禁止：被 release 依赖 | `android/app/build.gradle.kts:86` | 偏差 | **依赖图层面合规**：全仓仅 `debugImplementation(project(":feature-perf"))` 一处引用（`:86`），release 变体用同名空实现 `android/app/src/release/java/dev/beam/app/perf/PerfEntry.kt:16-33`（`available=false`、`Panel` 空、`export` 返回 ""）。**但 perf 类型仍进 release**：`PerfExportFormat`/`PerfUiState`/`PerfSnapshotStore` 位于 `:core-data` 的 **main** 源集（`core-data/src/main/java/dev/beam/core/data/perf/PerfModels.kt:10/31/54`），`PerfTick`/`PerfTickSource` 位于 `:core-net` main 源集（`core-net/.../Perf.kt:13/32`）。§7:276 要求的 release APK 无 perf 类检查用 `grep -i "feature-perf\|perfstats"`（`.github/workflows/ci.yml:103`），匹配不到 `dev/beam/core/data/perf/PerfSnapshotStore.class`，门禁实际失效。 | 未开始 |
 | AN-26 | `:core-net` 职责·uniffi 绑定 `BeamClient` | `android/core-net/src/main/java/dev/beam/core/net/NativeBeamBridge.kt:52` | 已实现 | Kotlin 侧适配层是真实实现：`NativeBeamBridge : BeamClient`（`:52`），按候选包名反射查找生成类（`:397`）、反射调用 `browse/pairQr/pairPin/connect`（`:62/76/83/106`）。**注**：产物侧的缺失另见 AU-01。 | 未开始 |
 | AN-27 | `:core-net` 职责·回调转 Flow | `android/core-net/src/main/java/dev/beam/core/net/NativeBeamBridge.kt:481` | 已实现 | `SessionBus`（`:481-492`，`MutableSharedFlow` + `BufferOverflow.DROP_OLDEST`）；`NativeSession.events`（`:506`）、`stats`（`:508` filterIsInstance<Stats>）、`audioPackets`（`:512`）由 bus 派生；Rust 回调入口 `newFrameSinkProxy`（`:136`）的 `onEvent` 分支 `bus.events.tryEmit`（`:148`）。 | 未开始 |
-| AN-28 | `:core-net` 对外接口：`interface BeamClient { suspend fun connect(peer: Peer, cfg: StreamCfg): Session }` | `android/core-net/src/main/java/dev/beam/core/net/BeamClient.kt:20` | 偏差 | 接口存在（`:20`）且 `Peer`/`StreamCfg`/`Session` 类型名一致，但**签名不符**：文档要求二参 `connect(peer, cfg): Session`，代码只有两个**都带 sink** 的重载 —— `:49 suspend fun connect(peer: Peer, cfg: StreamCfg, sink: FrameSink): Session` 与 `:56 suspend fun connect(peer: Peer, cfg: StreamCfg, sinkFactory: (StreamCfg) -> FrameSink): Session`。不存在二参版本（`NativeBeamBridge.kt:92` 的 `connect(peer, cfg) { sink }` 是调用工厂重载，非二参重载）。 | 未开始 |
+| AN-28 | `:core-net` 对外接口：`interface BeamClient { suspend fun connect(peer: Peer, cfg: StreamCfg): Session }` | `android/core-net/src/main/java/dev/beam/core/net/BeamClient.kt:20` | 偏差 | 接口存在（`:20`）且 `Peer`/`StreamCfg`/`Session` 类型名一致，但**签名不符**：文档要求二参 `connect(peer, cfg): Session`，代码只有两个**都带 sink** 的重载 —— `:49 suspend fun connect(peer: Peer, cfg: StreamCfg, sink: FrameSink): Session` 与 `:56 suspend fun connect(peer: Peer, cfg: StreamCfg, sinkFactory: (StreamCfg) -> FrameSink): Session`。不存在二参版本（`NativeBeamBridge.kt:92` 的 `connect(peer, cfg) { sink }` 是调用工厂重载，非二参重载）。 | 已完成 |
 | AN-29 | `:core-net` 禁止：— | — | 已实现 | 文档未列禁止项。核实无越界：`core-net/build.gradle.kts:32-41` 只依赖 coroutines + kotlin-reflect，不依赖 `:core-decoder`/`:core-renderer`，符合「本模块不含解码/渲染」。 | 未开始 |
 | AN-30 | `:core-decoder` 职责·MediaCodec 异步模式 | `android/core-decoder/src/main/java/dev/beam/core/decoder/MediaCodecVideoDecoder.kt:88` | 已实现 | 真实异步模式：`HandlerThread("beam-decoder")`（`:83`）+ `setCallback`（`:88`），`onInputBufferAvailable`（`:89`）拉取输入缓冲、`onOutputBufferAvailable`（`:96`）释放输出；非轮询。 | 未开始 |
 | AN-31 | `:core-decoder` 职责·`KEY_LOW_LATENCY` | `android/core-decoder/src/main/java/dev/beam/core/decoder/MediaCodecVideoDecoder.kt:66` | 已实现 | `setInteger(MediaFormat.KEY_LOW_LATENCY, 1)`（`:66`），并在 configure 之后 `setParameters(DeviceDecoders.lowLatencyParams())`（`:76`，参数包见 `DeviceDecoders.kt:110-112`），覆盖部分厂商只认 setParameters 的情况。 | 未开始 |
@@ -906,7 +929,7 @@
 | AN-49 | `:core-data` 职责·信任主机 | `android/core-data/src/main/java/dev/beam/core/data/HostRepo.kt:23` | 已实现 | 真实信任库：按指纹去重 `upsert`（`:35-41`）、`remove`（`:44-51`）、`find`（`:54`）、`isTrusted`（`:58`）、`clear`（`:61`）；编码用 `PeerCodec`（`core-data/.../PeerCodec.kt:38`）。 | 未开始 |
 | AN-50 | `:core-data` 对外接口：`SettingsRepo`、`HostRepo` | `android/core-data/src/main/java/dev/beam/core/data/SettingsRepo.kt:37`；`.../HostRepo.kt:23` | 已实现 | 两个类型名与文档完全一致，均为 public class。 | 未开始 |
 | AN-51 | `:core-data` 禁止：— | — | 已实现 | 文档未列禁止项；核实不触碰 JNI。**附带观察**（属 §3.14 范围，本次不单列）：§3.14 要求「Android 用 DataStore + Keystore」，但全仓 `KeyStore`/`AndroidKeyStore`/`Cipher` 零命中，指纹以明文存于 DataStore（`PeerCodec.kt:38-49`），私钥未由 Keystore 保护。 | 未开始 |
-| AN-52 | `:app` 职责·权限（串流前台服务落地） | `android/app/src/main/AndroidManifest.xml:24` | 缺失 | manifest 声明了 `FOREGROUND_SERVICE` / `FOREGROUND_SERVICE_MEDIA_PLAYBACK`（`:24-25`），`BeamPermissions.kt:32-35` 也定义了二者并注明「随串流前台服务使用」，但 `android/app/src/main/` 下**没有任何 Service 实现**（该源集仅 8 个 kt 文件，无 Service 类）。权限声明无对应实现。 | 未开始 |
+| AN-52 | `:app` 职责·权限（串流前台服务落地） | `android/app/src/main/AndroidManifest.xml:24` | 缺失 | manifest 声明了 `FOREGROUND_SERVICE` / `FOREGROUND_SERVICE_MEDIA_PLAYBACK`（`:24-25`），`BeamPermissions.kt:32-35` 也定义了二者并注明「随串流前台服务使用」，但 `android/app/src/main/` 下**没有任何 Service 实现**（该源集仅 8 个 kt 文件，无 Service 类）。权限声明无对应实现。 | 已完成 |
 
 ##### §3.12 uniffi 对接与线程/性能
 
@@ -958,7 +981,7 @@
 | PP-01 | `:feature-discovery` 主机列表、NsdManager 兜底、**WOL** | `android/feature-discovery/src/main/java/dev/beam/feature/discovery/HostScanner.kt:33` | 缺失 | 主机列表与 NsdManager 兜底已实现（AN-07/AN-08）。**WOL 未实现**：全仓搜 `WOL`/`Wake`/`wake`/`MagicPacket`/`magicPacket` 零命中，无 Wake-on-LAN 魔术包构造或 UDP 广播代码。 | 未开始 |
 | PP-02 | `:feature-settings` 串流设置页(画质、帧率、解码器、统计浮层开关) | `android/feature-settings/src/main/java/dev/beam/feature/settings/SettingsScreen.kt:72` | 已实现 | 四项逐一到位：画质（分辨率 `:78` + 帧率 `:82` + 码率 `:88`）、解码器偏好（`:119-128`，`DecoderPreference.AUTO/LOW_LATENCY/SYSTEM`）、统计浮层开关（`:140` `SwitchRow`）；另有编码、FEC、音频、主题与恢复默认。 | 未开始 |
 | PP-03 | `:core-input` 触控/**实体手柄/遥控采集**，映射为 InputEvent **回传主机** | `android/core-input/src/main/java/dev/beam/core/input/MotionActions.kt:21` | 偏差 | 映射层已实现（AN-41），但**采集与回传两端都断**：`MotionActions.kt` 仅有 `MotionEvent`→`TouchAction` 的静态映射函数，全仓无任何调用方（`MotionEvent` 仅在 core-input 内出现，无 `pointerInput`/`onTouchEvent` 采集点）；回传侧 `Session.sendInput`（`core-net/.../Session.kt:27`）在 `NativeBeamBridge.kt:525` 有实现，但 `feature-stream/.../StreamViewModel.kt:201` 的 `sendInput` **无调用方**，触控/手柄事件从未上行主机。 | 已完成 |
-| PP-04 | `:app` Compose 导航、**全屏沉浸**、TV Leanback 入口 | `android/app/src/main/java/dev/beam/app/MainActivity.kt:15` | 偏差 | Compose 导航已实现（AN-01）、TV Leanback 入口已注册（AN-04）。**「全屏沉浸」仅做到 edge-to-edge**：`MainActivity.kt:15` 与 `TvMainActivity.kt:19` 只调用 `enableEdgeToEdge()`；全仓搜 `immersive`/`WindowInsets`/`systemBars`/`hide(`/`WindowInsetsControllerCompat` 零命中 —— 未隐藏系统栏、未做沉浸式粘性沉浸，「串流页全屏沉浸」未实现。 | 未开始 |
+| PP-04 | `:app` Compose 导航、**全屏沉浸**、TV Leanback 入口 | `android/app/src/main/java/dev/beam/app/MainActivity.kt:15` | 偏差 | Compose 导航已实现（AN-01）、TV Leanback 入口已注册（AN-04）。**「全屏沉浸」仅做到 edge-to-edge**：`MainActivity.kt:15` 与 `TvMainActivity.kt:19` 只调用 `enableEdgeToEdge()`；全仓搜 `immersive`/`WindowInsets`/`systemBars`/`hide(`/`WindowInsetsControllerCompat` 零命中 —— 未隐藏系统栏、未做沉浸式粘性沉浸，「串流页全屏沉浸」未实现。 | 已完成 |
 
 ##### 产品方案 §16 设计规范
 
@@ -978,27 +1001,27 @@
 | DS-04 | 正文 `#e8edf6` / `#151b28` | `android/core-data/src/main/java/dev/beam/core/data/ui/BeamTokens.kt:38` | 已实现 | `DarkText = 0xFFE8EDF6`（`:38`）、`LightText = 0xFF151B28`（`:64`）；接 `BeamTheme.kt:35`/`:57`。 | 未开始 |
 | DS-05 | 次要 `#8f9ab0` / `#5d6880` | `android/core-data/src/main/java/dev/beam/core/data/ui/BeamTokens.kt:41` | 已实现 | `DarkTextSub = 0xFF8F9AB0`（`:41`）、`LightTextSub = 0xFF5D6880`（`:67`）；接 `BeamTheme.kt:39`/`:59`。 | 未开始 |
 | DS-06 | 主色 `#5b7cff` / `#3d5cf5` | `android/core-data/src/main/java/dev/beam/core/data/ui/BeamTokens.kt:44` | 已实现 | `DarkPrimary = 0xFF5B7CFF`（`:44`）、`LightPrimary = 0xFF3D5CF5`（`:70`）；接 `BeamTheme.kt:26`/`:51`。 | 未开始 |
-| DS-07 | 成功/警告/错误 `#22c55e`/`#f59e0b`/`#ef4444` / `#16a34a`/`#d97706`/`#dc2626` | `android/core-data/src/main/java/dev/beam/core/data/ui/BeamTokens.kt:78` | 偏差 | **只有一套（深色）值**：`Success = 0xFF22C55E`（`:78`）、`Warning = 0xFFF59E0B`（`:81`）、`Error = 0xFFEF4444`（`:84`）；浅色变体 `#16a34a`/`#d97706`/`#dc2626` 未定义（`BeamTokens.kt` 全文无这三个色值）。后果可见：`app/.../theme/BeamTheme.kt:68` 的 `lightColorScheme(error = BeamTokens.Error)` 在浅色主题里直接用深色错误色 `#EF4444`。 | 未开始 |
+| DS-07 | 成功/警告/错误 `#22c55e`/`#f59e0b`/`#ef4444` / `#16a34a`/`#d97706`/`#dc2626` | `android/core-data/src/main/java/dev/beam/core/data/ui/BeamTokens.kt:78` | 偏差 | **只有一套（深色）值**：`Success = 0xFF22C55E`（`:78`）、`Warning = 0xFFF59E0B`（`:81`）、`Error = 0xFFEF4444`（`:84`）；浅色变体 `#16a34a`/`#d97706`/`#dc2626` 未定义（`BeamTokens.kt` 全文无这三个色值）。后果可见：`app/.../theme/BeamTheme.kt:68` 的 `lightColorScheme(error = BeamTokens.Error)` 在浅色主题里直接用深色错误色 `#EF4444`。 | 已完成 |
 | DS-08 | 串流浮层 `#0a0e18` 85% | `android/core-data/src/main/java/dev/beam/core/data/ui/BeamTokens.kt:87` | 已实现 | `OverlaySurface = Color(0xD90A0E18)`（`:87`），alpha 0xD9=217/255≈85.1%，与「#0a0e18 85%」一致；用于统计浮层 `StreamScreen.kt:143` 与工具栏 `:209`。 | 未开始 |
 | DS-09 | 字体 标题 18/600 | `android/app/src/main/java/dev/beam/app/theme/BeamTheme.kt:79` | 已实现 | `titleLarge = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = BeamTokens.TitleSize.value.sp)`（`:79-84`），`TitleSize = 18.sp`（`BeamTokens.kt:123`）；各页标题实际使用（如 `DiscoveryScreen.kt:60`、`SettingsScreen.kt:66`）。 | 未开始 |
 | DS-10 | 字体 正文 14/400 | `android/app/src/main/java/dev/beam/app/theme/BeamTheme.kt:91` | 已实现 | `bodyLarge`/`bodyMedium` = `FontWeight.Normal` + `BeamTokens.BodySize`（`:91-102`），`BodySize = 14.sp`（`BeamTokens.kt:126`）。 | 未开始 |
 | DS-11 | 字体 辅助 12/400 | `android/app/src/main/java/dev/beam/app/theme/BeamTheme.kt:103` | 已实现 | `bodySmall`/`labelSmall` = Normal + `BeamTokens.CaptionSize`（`:103-108`、`:115-120`），`CaptionSize = 12.sp`（`BeamTokens.kt:129`）。 | 未开始 |
-| DS-12 | 字体 PIN 26/700 | `android/core-data/src/main/java/dev/beam/core/data/ui/BeamTokens.kt:132` | 偏差 | 令牌 `PinSize = 26.sp` 已定义（`:132`）但**全仓无引用**（搜 `PinSize` 仅命中定义处）；PIN 输入格实际用 `MaterialTheme.typography.titleLarge`（`feature-pairing/.../PairingScreen.kt:195-198`，即 18/600），且全仓无 `FontWeight.Bold`（搜 `FontWeight.Bold` 零命中），700 字重未落地。 | 未开始 |
+| DS-12 | 字体 PIN 26/700 | `android/core-data/src/main/java/dev/beam/core/data/ui/BeamTokens.kt:132` | 偏差 | 令牌 `PinSize = 26.sp` 已定义（`:132`）但**全仓无引用**（搜 `PinSize` 仅命中定义处）；PIN 输入格实际用 `MaterialTheme.typography.titleLarge`（`feature-pairing/.../PairingScreen.kt:195-198`，即 18/600），且全仓无 `FontWeight.Bold`（搜 `FontWeight.Bold` 零命中），700 字重未落地。 | 已完成 |
 | DS-13 | 间距 4 的倍数·卡片内边距 14 | `android/core-data/src/main/java/dev/beam/core/data/ui/BeamTokens.kt:104` | 已实现 | `SpacingLg = 14.dp`（`:104`），实际用于卡片内边距：`DiscoveryScreen.kt:131`、`:196`，`PairingScreen.kt:233`，`SettingsScreen.kt:169`。 | 未开始 |
 | DS-14 | 间距 4 的倍数·间距 12 | `android/core-data/src/main/java/dev/beam/core/data/ui/BeamTokens.kt:100` | 已实现 | `SpacingMd = 12.dp`（`:100`），用于元素间距（如 `DiscoveryScreen.kt:67`、`:98`，`PairingScreen.kt:85`、`:153`）。 | 未开始 |
 | DS-15 | 间距 4 的倍数·页边距 20 | `android/core-data/src/main/java/dev/beam/core/data/ui/BeamTokens.kt:107` | 已实现 | `SpacingXl = 20.dp`（`:107`），用于页面外边距：`DiscoveryScreen.kt:50`、`PairingScreen.kt:76`、`SettingsScreen.kt:61`、`PerfPanel.kt:50`。 | 未开始 |
 | DS-16 | 圆角 按钮 8 | `android/core-data/src/main/java/dev/beam/core/data/ui/BeamTokens.kt:112` | 已实现 | `RadiusButton = 8.dp`（`:112`），实际使用 `PairingScreen.kt:190`、`:215`，`SettingsScreen.kt:205`、`:212`，`StreamScreen.kt:209`。 | 未开始 |
 | DS-17 | 圆角 卡片 12 | `android/core-data/src/main/java/dev/beam/core/data/ui/BeamTokens.kt:115` | 已实现 | `RadiusCard = 12.dp`（`:115`），实际使用 `DiscoveryScreen.kt:127`、`:188`，`PairingScreen.kt:225`、`:263`，`SettingsScreen.kt:165`，`PerfPanel.kt:97`、`:129`、`:176`。 | 未开始 |
 | DS-18 | 圆角 手机外框 30 | `android/core-data/src/main/java/dev/beam/core/data/ui/BeamTokens.kt:118` | 已实现 | `RadiusPhone = 30.dp`（`:118`），取值与文档一致（原型专用，App 端无对应组件）。 | 未开始 |
-| DS-19 | 组件：主/次/**危险**按钮 | `android/feature-pairing/src/main/java/dev/beam/feature/pairing/PairingScreen.kt:211` | 偏差 | 主按钮有（`Button`，`PairingScreen.kt:211`）、次按钮有（`OutlinedButton`，`feature-perf/.../PerfPanel.kt:75`）；**危险按钮缺失**：全仓搜 `danger`/`Danger`/`危险`/`delete`/`Delete` 零命中，无破坏性操作按钮样式。 | 未开始 |
+| DS-19 | 组件：主/次/**危险**按钮 | `android/feature-pairing/src/main/java/dev/beam/feature/pairing/PairingScreen.kt:211` | 偏差 | 主按钮有（`Button`，`PairingScreen.kt:211`）、次按钮有（`OutlinedButton`，`feature-perf/.../PerfPanel.kt:75`）；**危险按钮缺失**：全仓搜 `danger`/`Danger`/`危险`/`delete`/`Delete` 零命中，无破坏性操作按钮样式。 | 已完成 |
 | DS-20 | 组件：分段选择器 | `android/feature-settings/src/main/java/dev/beam/feature/settings/SettingsScreen.kt:183` | 已实现 | `SegmentedRow` 真实渲染选中态分段控件（`:183-228`，含选中描边/填充 `:203-214`），用于分辨率/帧率/码率/格式/FEC/解码器/主题。 | 未开始 |
 | DS-21 | 组件：状态胶囊 | `android/feature-discovery/src/main/java/dev/beam/feature/discovery/DiscoveryScreen.kt:166` | 已实现 | `StatusPill`（`DiscoveryScreen.kt:166-182`，胶囊圆角 99.dp + 状态色「已配对/未配对」）；另有 `feature-perf/.../PerfPanel.kt:212` 的「仅 Debug 构建」胶囊。 | 未开始 |
 | DS-22 | 组件：设备行 | `android/feature-discovery/src/main/java/dev/beam/feature/discovery/DiscoveryScreen.kt:118` | 已实现 | `HostCard` 真实渲染主机行（图标+名称+状态胶囊+地址+「已配对/配对」操作，`:118-163`）。 | 未开始 |
-| DS-23 | 组件：模态弹窗 | — | 缺失 | **未找到**。全仓搜 `AlertDialog`/`Dialog(`/`ModalBottomSheet` 零命中，无任何模态弹窗组件；所有提示均用内联 `NoticeCard`/`CenterNotice`（`PairingScreen.kt:222`、`StreamScreen.kt:111`）。 | 未开始 |
-| DS-24 | 组件：Toast | — | 缺失 | **未找到**。全仓搜 `Toast`/`Toast.`/`Snackbar` 零命中；短提示全部走页面内 `NoticeCard`（`DiscoveryScreen.kt:185`、`PairingScreen.kt:222`）。 | 未开始 |
+| DS-23 | 组件：模态弹窗 | — | 缺失 | **未找到**。全仓搜 `AlertDialog`/`Dialog(`/`ModalBottomSheet` 零命中，无任何模态弹窗组件；所有提示均用内联 `NoticeCard`/`CenterNotice`（`PairingScreen.kt:222`、`StreamScreen.kt:111`）。 | 已完成 |
+| DS-24 | 组件：Toast | — | 缺失 | **未找到**。全仓搜 `Toast`/`Toast.`/`Snackbar` 零命中；短提示全部走页面内 `NoticeCard`（`DiscoveryScreen.kt:185`、`PairingScreen.kt:222`）。 | 已完成 |
 | DS-25 | 组件：加载转圈 | `android/feature-discovery/src/main/java/dev/beam/feature/discovery/DiscoveryScreen.kt:86` | 已实现 | `CircularProgressIndicator` 真实使用：`DiscoveryScreen.kt:86`（扫描中）、`PairingScreen.kt:120`（配对中）、`StreamScreen.kt:117`（连接/重连中）。 | 未开始 |
 | DS-26 | 组件：PIN 输入格 | `android/feature-pairing/src/main/java/dev/beam/feature/pairing/PairingScreen.kt:175` | 已实现 | `PinSlots` 真实渲染 `pinLength` 个输入格并区分填充态（`:175-202`）；圆角用 `RadiusButton`（`:190`）。 | 未开始 |
-| DS-27 | 状态：空态(图标+说明+**主操作**) | `android/feature-discovery/src/main/java/dev/beam/feature/discovery/DiscoveryScreen.kt:202` | 偏差 | 空态有图标「🔗」（`:207`）与说明文案（`:211-219`），但**缺主操作按钮**：`EmptyState` 内只有两行 Text，无任何可点击主操作；页面级「刷新」按钮在头部（`DiscoveryScreen.kt:63`），不在空态内。 | 未开始 |
+| DS-27 | 状态：空态(图标+说明+**主操作**) | `android/feature-discovery/src/main/java/dev/beam/feature/discovery/DiscoveryScreen.kt:202` | 偏差 | 空态有图标「🔗」（`:207`）与说明文案（`:211-219`），但**缺主操作按钮**：`EmptyState` 内只有两行 Text，无任何可点击主操作；页面级「刷新」按钮在头部（`DiscoveryScreen.kt:63`），不在空态内。 | 已完成 |
 | DS-28 | 状态：加载 | `android/feature-discovery/src/main/java/dev/beam/feature/discovery/DiscoveryScreen.kt:84` | 已实现 | `isScanning` 时显示转圈 + 「正在搜索局域网…」（`:82-96`）；配对中/串流中亦各有加载态（`PairingScreen.kt:118-130`、`StreamScreen.kt:101`）。 | 未开始 |
 | DS-29 | 状态：错误(描红+剩余次数) | `android/feature-pairing/src/main/java/dev/beam/feature/pairing/PairingScreen.kt:136` | 已实现 | 描红：`NoticeCard(state.error ?: "配对失败", BeamTokens.Error)`（`:136`，卡片 `border = BorderStroke(1.dp, accent)` `:227`）；剩余次数：`PairingViewModel.kt:178-179` 在 `E3001` 文案中拼接「（剩余 $it 次）」，`E3002` 显示锁定提示（`:180`）。 | 未开始 |
 | DS-30 | 状态：断线(遮罩+保留最后一帧) | `android/feature-stream/src/main/java/dev/beam/feature/stream/StreamScreen.kt:102` | 已实现 | 遮罩：`CenterNotice` 覆盖半透明黑 `Color(0xCC000000)`（`:113`）+ 居中转圈；文案「连接中断，正在重连…（保留最后一帧）」（`:102`），与实现一致 —— `StreamViewModel.kt:219-224` 进入 RECONNECTING 时不停解码器、不释放 SurfaceView，最后一帧得以保留。（遮罩底色用 `0xCC000000` 而非 §16 的 `OverlaySurface`，属遮罩与浮层两套语义，不判为偏差。） | 未开始 |
@@ -1105,8 +1128,8 @@
 | UX-02 | 弹出二维码与 PIN 配对 | `apps/desktop/src/components/PairingPanel.tsx:43-63`、`apps/desktop/src/components/QrCode.tsx:16-68` | 已实现 | 二维码由真实 `qrcode` 库渲染 `beam://pair?h=..&fp=..&t=..` 载荷（`apps/desktop/src/components/QrCode.tsx:28`），PIN 按 4 位分格展示并显示剩余秒数倒数（`apps/desktop/src/components/PairingPanel.tsx:50-56`）。 | 未开始 |
 | UX-03 | 移除设备（空态） | `apps/desktop/src/pages/DevicesPage.tsx:53-60`、`apps/desktop/src/pages/DevicesPage.tsx:71-72`、`apps/desktop/src/pages/DevicesPage.tsx:93-100` | 已实现 | 每行有「移除」按钮（`apps/desktop/src/pages/DevicesPage.tsx:93-100`），走真实 `remove_device`；无设备时显示空态组件。 | 未开始 |
 | UX-04 | 切换画质/编码/网络 | `apps/desktop/src/pages/SettingsPage.tsx:60-75`、`apps/desktop/src/pages/SettingsPage.tsx:105-125`、`apps/desktop/src/pages/SettingsPage.tsx:156-175` | 已实现 | 画质（分辨率/帧率/HDR/匹配客户端）、编码（编码器/格式/预设/抓屏方式）、网络（FEC/发现/Tailscale）三组控件齐全，改动即时 `set_settings(patch)`。 | 未开始 |
-| UX-05 | 开关延迟浮层 | `apps/desktop/src/pages/SettingsPage.tsx:229-235`、`apps/desktop/src/pages/ConnectPage.tsx:89-97` | 偏差 | 设置项 `showStatsOverlay` 存在且能写入后端（`apps/desktop/src/pages/SettingsPage.tsx:229-235`），但渲染侧**不读这个开关**：`LatencyOverlay` 只要有 stats 就无条件渲染（`apps/desktop/src/pages/ConnectPage.tsx:89-97`），关掉开关界面照旧显示浮层。 | 未开始 |
-| UX-06 | 查看 Debug 性能面板 | `apps/desktop/src/pages/PerfPage.tsx:18-125`、`apps/desktop/src/components/Sidebar.tsx:9` | 偏差 | 性能页存在（快照 / E2E 曲线 / 实时指标 / CSV·JSON 导出按钮齐全）。但产品方案第 154 行要求「隐藏入口仅 debug 构建存在」，而侧栏的「诊断」入口在 release 构建里同样常驻（`apps/desktop/src/components/Sidebar.tsx:9` 无任何 debug 条件），release 下点进去只会看到「仅 Debug 构建可用」提示。 | 未开始 |
+| UX-05 | 开关延迟浮层 | `apps/desktop/src/pages/SettingsPage.tsx:229-235`、`apps/desktop/src/pages/ConnectPage.tsx:89-97` | 偏差 | 设置项 `showStatsOverlay` 存在且能写入后端（`apps/desktop/src/pages/SettingsPage.tsx:229-235`），但渲染侧**不读这个开关**：`LatencyOverlay` 只要有 stats 就无条件渲染（`apps/desktop/src/pages/ConnectPage.tsx:89-97`），关掉开关界面照旧显示浮层。 | 已完成 |
+| UX-06 | 查看 Debug 性能面板 | `apps/desktop/src/pages/PerfPage.tsx:18-125`、`apps/desktop/src/components/Sidebar.tsx:9` | 偏差 | 性能页存在（快照 / E2E 曲线 / 实时指标 / CSV·JSON 导出按钮齐全）。但产品方案第 154 行要求「隐藏入口仅 debug 构建存在」，而侧栏的「诊断」入口在 release 构建里同样常驻（`apps/desktop/src/components/Sidebar.tsx:9` 无任何 debug 条件），release 下点进去只会看到「仅 Debug 构建可用」提示。 | 已完成 |
 
 ##### 产品方案 §16 设计规范（令牌 / 字体 / 间距 / 组件 / 状态）
 | # | 文档要求 | 实现位置 | 判定 | 说明 | 状态 |
@@ -1115,18 +1138,18 @@
 | UX-08 | 面板 panel `#121826` / `#ffffff` | `apps/desktop/src/styles.css:10`、`apps/desktop/src/styles.css:29` | 已实现 | 逐字命中。 | 未开始 |
 | UX-09 | 分隔 line `#222b3d` / `#dfe4ee` | `apps/desktop/src/styles.css:12`、`apps/desktop/src/styles.css:31` | 已实现 | 逐字命中。 | 未开始 |
 | UX-10 | 正文 / 次要 `#e8edf6` / `#8f9ab0`，浅色 `#151b28` / `#5d6880` | `apps/desktop/src/styles.css:13-14`、`apps/desktop/src/styles.css:32-33` | 已实现 | 四个值逐字命中。 | 未开始 |
-| UX-11 | 主色 `#5b7cff` / `#3d5cf5` | `apps/desktop/src/styles.css:15`、`apps/desktop/src/styles.css:34`、`apps/desktop/src/styles.css:270` | 偏差 | 令牌值本身逐字命中，但主按钮用的是 `linear-gradient(90deg, var(--pri), var(--pri-strong))`（`apps/desktop/src/styles.css:270`），`--pri-strong` 是文档里没有的 `#6d5bff`（`apps/desktop/src/styles.css:16`、`apps/desktop/src/styles.css:35`）。主按钮的观感因此不是文档规定的纯色 `#5b7cff`。 | 未开始 |
+| UX-11 | 主色 `#5b7cff` / `#3d5cf5` | `apps/desktop/src/styles.css:15`、`apps/desktop/src/styles.css:34`、`apps/desktop/src/styles.css:270` | 偏差 | 令牌值本身逐字命中，但主按钮用的是 `linear-gradient(90deg, var(--pri), var(--pri-strong))`（`apps/desktop/src/styles.css:270`），`--pri-strong` 是文档里没有的 `#6d5bff`（`apps/desktop/src/styles.css:16`、`apps/desktop/src/styles.css:35`）。主按钮的观感因此不是文档规定的纯色 `#5b7cff`。 | 已完成 |
 | UX-12 | 成功/警告/错误 `#22c55e` / `#f59e0b` / `#ef4444`，浅色 `#16a34a` / `#d97706` / `#dc2626` | `apps/desktop/src/styles.css:17-19`、`apps/desktop/src/styles.css:36-38` | 已实现 | 六个值逐字命中。 | 未开始 |
-| UX-13 | 串流浮层 `#0a0e18 85%` | 未找到（已搜索：`#0a0e18`、`85%` 于 `apps/desktop/src/styles.css`、`apps/desktop/src/**`） | 缺失 | 没有这个令牌。串流统计浮层用的是实心 `var(--panel2)`（= `#0e1420`，`apps/desktop/src/styles.css:772`、`apps/desktop/src/styles.css:11`），断线遮罩用的是 `#000000aa`（`apps/desktop/src/styles.css:754`），都与文档规定的 85% 半透明浮层色不同。 | 未开始 |
-| UX-14 | 字体：Windows Microsoft YaHei UI / Segoe UI | `apps/desktop/src/styles.css:58` | 偏差 | 实际字体栈是 `'Noto Sans CJK SC', 'Microsoft YaHei', 'Segoe UI', system-ui, sans-serif`：把 Android 端的 Noto Sans CJK SC 放在首位，且写的是 `Microsoft YaHei` 而不是文档的 `Microsoft YaHei UI`。 | 未开始 |
-| UX-15 | 标题 18/600 | `apps/desktop/src/styles.css:64-68`、`apps/desktop/src/styles.css:70-73` | 偏差 | 页面标题 `h2` 是 24px/700（`apps/desktop/src/styles.css:65-66`），卡片标题 `h3` 是 15px/650（`apps/desktop/src/styles.css:71-72`），没有 18px/600 这一档。 | 未开始 |
+| UX-13 | 串流浮层 `#0a0e18 85%` | 未找到（已搜索：`#0a0e18`、`85%` 于 `apps/desktop/src/styles.css`、`apps/desktop/src/**`） | 缺失 | 没有这个令牌。串流统计浮层用的是实心 `var(--panel2)`（= `#0e1420`，`apps/desktop/src/styles.css:772`、`apps/desktop/src/styles.css:11`），断线遮罩用的是 `#000000aa`（`apps/desktop/src/styles.css:754`），都与文档规定的 85% 半透明浮层色不同。 | 已完成 |
+| UX-14 | 字体：Windows Microsoft YaHei UI / Segoe UI | `apps/desktop/src/styles.css:58` | 偏差 | 实际字体栈是 `'Noto Sans CJK SC', 'Microsoft YaHei', 'Segoe UI', system-ui, sans-serif`：把 Android 端的 Noto Sans CJK SC 放在首位，且写的是 `Microsoft YaHei` 而不是文档的 `Microsoft YaHei UI`。 | 已完成 |
+| UX-15 | 标题 18/600 | `apps/desktop/src/styles.css:64-68`、`apps/desktop/src/styles.css:70-73` | 偏差 | 页面标题 `h2` 是 24px/700（`apps/desktop/src/styles.css:65-66`），卡片标题 `h3` 是 15px/650（`apps/desktop/src/styles.css:71-72`），没有 18px/600 这一档。 | 已完成 |
 | UX-16 | 正文 14/400 | `apps/desktop/src/styles.css:59` | 已实现 | `body` 为 14px，未设 font-weight 即 400。 | 未开始 |
 | UX-17 | 辅助 12/400 | `apps/desktop/src/styles.css:75-78` | 已实现 | `.sub` 为 12px/400。 | 未开始 |
-| UX-18 | PIN 26/700 | `apps/desktop/src/styles.css:537-541` | 偏差 | 字重 700 符合，字号是 30px（`apps/desktop/src/styles.css:538`）而非 26px。 | 未开始 |
-| UX-19 | 间距 4 的倍数 | `apps/desktop/src/styles.css:185`、`apps/desktop/src/styles.css:193`、`apps/desktop/src/styles.css:200`、`apps/desktop/src/styles.css:212`、`apps/desktop/src/styles.css:225` | 偏差 | 多处不是 4 的倍数：卡片 padding `16px 18px`（`:185`）、卡片标题下边距 `10px`（`:193`）、`.row` gap `10px`（`:200`）、`.metric-row` gap `10px`（`:212`）、`.stat-grid` gap `10px`（`:225`）。 | 未开始 |
-| UX-20 | 卡片内边距 14 | `apps/desktop/src/styles.css:185` | 偏差 | 实际 `padding: 16px 18px`，既不是 14 也不同轴同值。 | 未开始 |
-| UX-21 | 间距 12 | `apps/desktop/src/styles.css:163`、`apps/desktop/src/styles.css:491`、`apps/desktop/src/styles.css:720` | 偏差 | 页面级间距统一是 16px（`.page` gap、`.home-grid` gap、`.settings-grid` gap），不是 12px（12px 只出现在卡片标题行的 gap 上，`apps/desktop/src/styles.css:193`）。 | 未开始 |
-| UX-22 | 页边距 20 | `apps/desktop/src/styles.css:156`、`apps/desktop/src/styles.css:92` | 偏差 | 主内容区是 `padding: 26px 30px 40px`（`:156`），侧栏是 `padding: 20px 14px`（`:92`），与「页边距 20」不一致。 | 未开始 |
+| UX-18 | PIN 26/700 | `apps/desktop/src/styles.css:537-541` | 偏差 | 字重 700 符合，字号是 30px（`apps/desktop/src/styles.css:538`）而非 26px。 | 已完成 |
+| UX-19 | 间距 4 的倍数 | `apps/desktop/src/styles.css:185`、`apps/desktop/src/styles.css:193`、`apps/desktop/src/styles.css:200`、`apps/desktop/src/styles.css:212`、`apps/desktop/src/styles.css:225` | 偏差 | 多处不是 4 的倍数：卡片 padding `16px 18px`（`:185`）、卡片标题下边距 `10px`（`:193`）、`.row` gap `10px`（`:200`）、`.metric-row` gap `10px`（`:212`）、`.stat-grid` gap `10px`（`:225`）。 | 已完成 |
+| UX-20 | 卡片内边距 14 | `apps/desktop/src/styles.css:185` | 偏差 | 实际 `padding: 16px 18px`，既不是 14 也不同轴同值。 | 已完成 |
+| UX-21 | 间距 12 | `apps/desktop/src/styles.css:163`、`apps/desktop/src/styles.css:491`、`apps/desktop/src/styles.css:720` | 偏差 | 页面级间距统一是 16px（`.page` gap、`.home-grid` gap、`.settings-grid` gap），不是 12px（12px 只出现在卡片标题行的 gap 上，`apps/desktop/src/styles.css:193`）。 | 已完成 |
+| UX-22 | 页边距 20 | `apps/desktop/src/styles.css:156`、`apps/desktop/src/styles.css:92` | 偏差 | 主内容区是 `padding: 26px 30px 40px`（`:156`），侧栏是 `padding: 20px 14px`（`:92`），与「页边距 20」不一致。 | 已完成 |
 | UX-23 | 圆角：按钮 8 | `apps/desktop/src/styles.css:22`、`apps/desktop/src/styles.css:252` | 已实现 | `--radius-sm: 8px` 被 `.btn` 使用（另见分段选择器与下拉框）。 | 未开始 |
 | UX-24 | 圆角：卡片 12 | `apps/desktop/src/styles.css:21`、`apps/desktop/src/styles.css:184` | 已实现 | `--radius: 12px` 被 `.card` 使用。 | 未开始 |
 | UX-25 | 组件：主按钮 | `apps/desktop/src/styles.css:269-274` | 已实现 | `.btn.primary` 存在并在首页、设置页、设备页使用。 | 未开始 |
@@ -1135,21 +1158,21 @@
 | UX-28 | 组件：分段选择器 | `apps/desktop/src/components/SegmentedControl.tsx:7-36` | 已实现 | 带 `role="group"` / `aria-pressed`，用于分辨率/帧率/编码格式/FEC/主题。 | 未开始 |
 | UX-29 | 组件：状态胶囊 | `apps/desktop/src/components/StatusPill.tsx:6-14` | 已实现 | 五种色调（ok/warn/err/info/muted），首页与设备页在用。 | 未开始 |
 | UX-30 | 组件：设备行 | `apps/desktop/src/components/DeviceRows.tsx:14-39` | 已实现 | `DeviceRow` 含图标、名称、平台/指纹/配对日期、状态位与操作槽。 | 未开始 |
-| UX-31 | 组件：模态弹窗 | 未找到（已搜索：`Modal`、`modal`、`dialog`、`Dialog` 于 `apps/desktop/src/**`） | 缺失 | 没有任何模态弹窗组件。设备移除用的是浏览器原生 `window.confirm`（`apps/desktop/src/pages/DevicesPage.tsx:54`），不是文档要求的模态弹窗（无遮罩、无自定义样式与操作区）。 | 未开始 |
+| UX-31 | 组件：模态弹窗 | 未找到（已搜索：`Modal`、`modal`、`dialog`、`Dialog` 于 `apps/desktop/src/**`） | 缺失 | 没有任何模态弹窗组件。设备移除用的是浏览器原生 `window.confirm`（`apps/desktop/src/pages/DevicesPage.tsx:54`），不是文档要求的模态弹窗（无遮罩、无自定义样式与操作区）。 | 已完成 |
 | UX-32 | 组件：Toast | `apps/desktop/src/components/ToastHost.tsx:6-21`、`apps/desktop/src/stores/toastStore.ts:25-37` | 已实现 | 全局 ToastHost + store，三种样式（success/error/info），3.6 s 自动消失、可点击关闭。 | 未开始 |
 | UX-33 | 组件：加载转圈 | `apps/desktop/src/components/Feedback.tsx:2-9`、`apps/desktop/src/styles.css:632-640` | 已实现 | `.spinner` 有真实 CSS 旋转动画。 | 未开始 |
-| UX-34 | 组件：PIN 输入格 | `apps/desktop/src/components/PairingPanel.tsx:50-56`、`apps/desktop/src/styles.css:531-541` | 偏差 | 只有**只读展示**用的 PIN 格子（`.pin-digit`），没有「输入格」组件：没有 `input`、没有光标态、桌面端也没有 PIN 输入流程（Windows 端是显示本机 PIN 让 Android 扫/输，与原型一致，但组件清单里的「PIN 输入格」本身不存在）。 | 未开始 |
-| UX-35 | 状态：空态（图标 + 说明 + 主操作） | `apps/desktop/src/components/Feedback.tsx:12-30`、`apps/desktop/src/pages/DevicesPage.tsx:72`、`apps/desktop/src/pages/ConnectPage.tsx:106`、`apps/desktop/src/pages/PerfPage.tsx:57` | 偏差 | 组件本身支持三件套（`icon` / `hint` / `action`，`apps/desktop/src/components/Feedback.tsx:14-28`），但三个实际调用点都只传了图标和说明、**没有传主操作按钮**（`apps/desktop/src/pages/DevicesPage.tsx:72`、`apps/desktop/src/pages/ConnectPage.tsx:106`、`apps/desktop/src/pages/PerfPage.tsx:57`）；另外设备页的「局域网发现」空态压根没用 EmptyState，只写了一行 `sub` 文本（`apps/desktop/src/pages/DevicesPage.tsx:143`）。 | 未开始 |
+| UX-34 | 组件：PIN 输入格 | `apps/desktop/src/components/PairingPanel.tsx:50-56`、`apps/desktop/src/styles.css:531-541` | 偏差 | 只有**只读展示**用的 PIN 格子（`.pin-digit`），没有「输入格」组件：没有 `input`、没有光标态、桌面端也没有 PIN 输入流程（Windows 端是显示本机 PIN 让 Android 扫/输，与原型一致，但组件清单里的「PIN 输入格」本身不存在）。 | 已完成 |
+| UX-35 | 状态：空态（图标 + 说明 + 主操作） | `apps/desktop/src/components/Feedback.tsx:12-30`、`apps/desktop/src/pages/DevicesPage.tsx:72`、`apps/desktop/src/pages/ConnectPage.tsx:106`、`apps/desktop/src/pages/PerfPage.tsx:57` | 偏差 | 组件本身支持三件套（`icon` / `hint` / `action`，`apps/desktop/src/components/Feedback.tsx:14-28`），但三个实际调用点都只传了图标和说明、**没有传主操作按钮**（`apps/desktop/src/pages/DevicesPage.tsx:72`、`apps/desktop/src/pages/ConnectPage.tsx:106`、`apps/desktop/src/pages/PerfPage.tsx:57`）；另外设备页的「局域网发现」空态压根没用 EmptyState，只写了一行 `sub` 文本（`apps/desktop/src/pages/DevicesPage.tsx:143`）。 | 已完成 |
 | UX-36 | 状态：加载 | `apps/desktop/src/components/Feedback.tsx:2-9`、`apps/desktop/src/pages/SettingsPage.tsx:45`、`apps/desktop/src/components/PairingPanel.tsx:38` | 已实现 | 设置页未加载时显示加载态，配对面板无数据时显示转圈。 | 未开始 |
-| UX-37 | 状态：错误（描红 + 剩余次数） | `apps/desktop/src/styles.css:685-693`、`apps/desktop/src/components/ToastHost.tsx:24-47` | 偏差 | 「描红」已实现（`.error-banner` 1px `var(--err)` 边框 + 红底，`apps/desktop/src/styles.css:691-692`）；「剩余次数」没有任何实现——错误条只显示错误码与按码查表的中文文案（`apps/desktop/src/components/ToastHost.tsx:38-39`），全仓没有展示 PIN 剩余尝试次数的字段或文案（已搜索：`剩余`、`attempts`）。 | 未开始 |
-| UX-38 | 状态：断线（遮罩 + 保留最后一帧） | `apps/desktop/src/pages/ConnectPage.tsx:83-87`、`apps/desktop/src/styles.css:751-759` | 偏差 | 「遮罩」已实现（重连时覆盖整个画面区并转圈，`apps/desktop/src/pages/ConnectPage.tsx:84-86`）；「保留最后一帧」无法实现——画面区是 CSS 渐变占位（`apps/desktop/src/styles.css:733-749`），没有视频表面，`ReconnectingInfo.keepLastFrame` 字段（`apps/desktop/src-tauri/src/dto.rs:229`）无人消费。 | 未开始 |
+| UX-37 | 状态：错误（描红 + 剩余次数） | `apps/desktop/src/styles.css:685-693`、`apps/desktop/src/components/ToastHost.tsx:24-47` | 偏差 | 「描红」已实现（`.error-banner` 1px `var(--err)` 边框 + 红底，`apps/desktop/src/styles.css:691-692`）；「剩余次数」没有任何实现——错误条只显示错误码与按码查表的中文文案（`apps/desktop/src/components/ToastHost.tsx:38-39`），全仓没有展示 PIN 剩余尝试次数的字段或文案（已搜索：`剩余`、`attempts`）。 | 已完成 |
+| UX-38 | 状态：断线（遮罩 + 保留最后一帧） | `apps/desktop/src/pages/ConnectPage.tsx:83-87`、`apps/desktop/src/styles.css:751-759` | 偏差 | 「遮罩」已实现（重连时覆盖整个画面区并转圈，`apps/desktop/src/pages/ConnectPage.tsx:84-86`）；「保留最后一帧」无法实现——画面区是 CSS 渐变占位（`apps/desktop/src/styles.css:733-749`），没有视频表面，`ReconnectingInfo.keepLastFrame` 字段（`apps/desktop/src-tauri/src/dto.rs:229`）无人消费。 | 已完成 |
 
 ##### i18n
 | # | 文档要求 | 实现位置 | 判定 | 说明 | 状态 |
 |---|---|---|---|---|---|
 | UX-39 | `src/i18n/` 有 zh-CN 与 en 两份 | `apps/desktop/src/i18n/zh-CN.ts:7`、`apps/desktop/src/i18n/en.ts:9`、`apps/desktop/src/i18n/index.tsx:19-22` | 已实现 | 两份词表结构由 `Dictionary` 类型强约束（`apps/desktop/src/i18n/zh-CN.ts:175`），键缺一个就编译不过。 | 未开始 |
 | UX-40 | 语言切换入口存在且真的生效 | `apps/desktop/src/pages/SettingsPage.tsx:207-220`、`apps/desktop/src/App.tsx:37`、`apps/desktop/src/App.tsx:40-44`、`apps/desktop/src/App.tsx:47` | 已实现 | 设置页有 zh-CN / English 下拉；`setLanguage` → `I18nProvider` 上下文 → 全局 `t()` 重渲染，同时把 `language` 写回后端设置，App 启动时也按 `settings.language` 复位（`apps/desktop/src/App.tsx:40-44`）。链路完整。 | 未开始 |
-| UX-41 | 切到 en 后界面文案随之切换 | `apps/desktop/src/components/DeviceRows.tsx:29`、`apps/desktop/src/components/DeviceRows.tsx:32`、`apps/desktop/src/components/DeviceRows.tsx:56`、`apps/desktop/src/components/DeviceRows.tsx:83`、`apps/desktop/src/pages/PerfPage.tsx:81`、`apps/desktop/src/pages/HomePage.tsx:123` | 偏差 | 多处文案硬编码中文，切到 English 仍是中文：设备行的「串流中」（`apps/desktop/src/components/DeviceRows.tsx:29`）、「指纹 … 配对于 …」（`apps/desktop/src/components/DeviceRows.tsx:32`）、「已配对 / 未配对」（`apps/desktop/src/components/DeviceRows.tsx:56`）、「请求配对」（`apps/desktop/src/components/DeviceRows.tsx:83`）、性能页「内存」（`apps/desktop/src/pages/PerfPage.tsx:81`）、首页「自动 / 关闭」（`apps/desktop/src/pages/HomePage.tsx:123`）。词表里其实已有对应键（`apps/desktop/src/i18n/zh-CN.ts:79`、`apps/desktop/src/i18n/zh-CN.ts:85`），只是没接上。 | 未开始 |
+| UX-41 | 切到 en 后界面文案随之切换 | `apps/desktop/src/components/DeviceRows.tsx:29`、`apps/desktop/src/components/DeviceRows.tsx:32`、`apps/desktop/src/components/DeviceRows.tsx:56`、`apps/desktop/src/components/DeviceRows.tsx:83`、`apps/desktop/src/pages/PerfPage.tsx:81`、`apps/desktop/src/pages/HomePage.tsx:123` | 偏差 | 多处文案硬编码中文，切到 English 仍是中文：设备行的「串流中」（`apps/desktop/src/components/DeviceRows.tsx:29`）、「指纹 … 配对于 …」（`apps/desktop/src/components/DeviceRows.tsx:32`）、「已配对 / 未配对」（`apps/desktop/src/components/DeviceRows.tsx:56`）、「请求配对」（`apps/desktop/src/components/DeviceRows.tsx:83`）、性能页「内存」（`apps/desktop/src/pages/PerfPage.tsx:81`）、首页「自动 / 关闭」（`apps/desktop/src/pages/HomePage.tsx:123`）。词表里其实已有对应键（`apps/desktop/src/i18n/zh-CN.ts:79`、`apps/desktop/src/i18n/zh-CN.ts:85`），只是没接上。 | 已完成 |
 
 #### 文档未覆盖但代码里有的
 
