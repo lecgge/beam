@@ -51,6 +51,8 @@ fun SettingsScreen(
     onThemeChange: (ThemeMode) -> Unit,
     onReset: () -> Unit,
     modifier: Modifier = Modifier,
+    /** 性能面板入口（仅 debug 构建提供；null 时不显示）。 */
+    onOpenPerf: (() -> Unit)? = null,
 ) {
     val settings = state.settings
     Column(
@@ -153,7 +155,16 @@ fun SettingsScreen(
 
         Spacer(Modifier.height(BeamTokens.SpacingMd))
 
-        TextButton(onClick = onReset) { Text("恢复默认设置") }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(BeamTokens.SpacingSm),
+        ) {
+            TextButton(onClick = onReset) { Text("恢复默认设置") }
+            // 性能面板入口（AN-23）：只在 debug 构建里提供。
+            onOpenPerf?.let { open ->
+                TextButton(onClick = open) { Text("性能面板（Debug）") }
+            }
+        }
         Spacer(Modifier.height(BeamTokens.SpacingXl))
     }
 }

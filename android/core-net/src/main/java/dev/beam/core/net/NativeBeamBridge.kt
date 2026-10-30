@@ -105,6 +105,12 @@ class NativeBeamBridge private constructor(
     override suspend fun connect(peer: Peer, cfg: StreamCfg, sink: FrameSink): Session =
         connect(peer, cfg) { sink }
 
+    /**
+     * 二参重载（§3.12 对外接口表）：帧交给默认接收端 [DefaultFrameSink]。
+     */
+    override suspend fun connect(peer: Peer, cfg: StreamCfg): Session =
+        connect(peer, cfg) { DefaultFrameSink() }
+
     override suspend fun connect(peer: Peer, cfg: StreamCfg, sinkFactory: (StreamCfg) -> FrameSink): Session {
         val peerClass = requireClass(PEER_CLASSES, "Peer")
         val cfgClass = requireClass(CFG_CLASSES, "StreamCfg")

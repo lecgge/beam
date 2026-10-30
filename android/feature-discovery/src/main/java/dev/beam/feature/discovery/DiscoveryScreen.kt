@@ -16,14 +16,19 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusEvent
@@ -35,12 +40,19 @@ import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import dev.beam.core.data.ui.BeamDialog
 import dev.beam.core.data.ui.BeamTokens
 
 /**
  * 主机列表页（原型「Android 端 → 主机列表」）。
  *
  * 只做展示与事件回调；所有状态与逻辑在 [DiscoveryViewModel] 里。
+ *
+ * ## 交互约定
+ *
+ * - **二次确认**（移除信任）走模态弹窗（[BeamDialog]）；
+ * - **短反馈**（已复制地址、已移除信任）走 Toast（`BeamToast`，由 `:app` 挂宿主）；
+ * - **错误**留在页面上（`NoticeCard`），不弹窗、不自动消失。
  */
 @Composable
 fun DiscoveryScreen(
@@ -50,7 +62,16 @@ fun DiscoveryScreen(
     onRefresh: () -> Unit,
     onOpenSettings: () -> Unit,
     modifier: Modifier = Modifier,
+    onRemoveTrust: (HostRow) -> Unit = {},
+    onManualConnect: (String) -> Unit = {},
+    onCopyAddress: (HostRow) -> Unit = {},
 ) {
+    // 待确认的「移除信任」目标。
+    var pendingRemoval by remember { mutableStateOf<HostRow?>(null) }
+    // 手动输入主机地址的弹窗。
+    var manualVisible by remember { mutableStateOf(false) }
+    var manualAddress by remember { mutableStateOf("") }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -106,18 +127,67 @@ fun DiscoveryScreen(
         Spacer(Modifier.height(BeamTokens.SpacingMd))
 
         if (state.isEmpty) {
-            EmptyState()
-            return@Column
-        }
-
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(BeamTokens.SpacingMd)) {
-            items(state.hosts, key = { it.peer.id + it.peer.address }) { row ->
-                HostCard(
-                    row = row,
-                    onClick = { onHostClick(row) },
-                    onPair = { onPairClick(row) },
-                )
+            EmptyState(
+                onRefresh = onRefresh,
+                onManual = { manualVisible = true },
+            )
+        } else {
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(BeamTokens.SpacingMd)) {
+                items(state.hosts, key = { it.peer.id + it.peer.address }) { row ->
+                    HostCard(
+                        row = row,
+                        onClick = { onHostClick(row) },
+                        onPair = { onPairClick(row) },
+                        onCopyAddress = { onCopyAddress(row) },
+                        onRequestRemoveTrust = { pendingRemoval = row },
+                    )
+                }
             }
+        }
+    }
+
+    // 二次确认：移除信任。
+    pendingRemoval?.let { row ->
+        BeamDialog(
+            visible = true,
+            title = "移除信任",
+            message = "移除「${row.peer.name}」后，下次连接需要重新配对（PIN 或扫码）。",
+            confirmLabel = "移除",
+            destructive = true,
+            onConfirm = {
+                pendingRemoval = null
+                onRemoveTrust(row)
+            },
+            onDismiss = { pendingRemoval = null },
+        )
+    }
+
+    // 手动输入主机地址（空态的次操作）。
+    if (manualVisible) {
+        BeamDialog(
+            visible = true,
+            title = "手动连接主机",
+            message = "输入主机地址（ip 或 ip:port，默认端口 4827），随后用主机屏幕上显示的 PIN 完成配对。",
+            confirmLabel = "下一步",
+            onConfirm = {
+                manualVisible = false
+                val address = manualAddress
+                manualAddress = ""
+                if (address.isNotBlank()) onManualConnect(address)
+            },
+            onDismiss = {
+                manualVisible = false
+                manualAddress = ""
+            },
+        ) {
+            OutlinedTextField(
+                value = manualAddress,
+                onValueChange = { manualAddress = it },
+                singleLine = true,
+                label = { Text("主机地址") },
+                placeholder = { Text("192.168.1.10:4827") },
+                modifier = Modifier.fillMaxWidth(),
+            )
         }
     }
 }
@@ -127,6 +197,8 @@ private fun HostCard(
     row: HostRow,
     onClick: () -> Unit,
     onPair: () -> Unit,
+    onCopyAddress: () -> Unit,
+    onRequestRemoveTrust: () -> Unit,
 ) {
     // TV（10 英尺）用 D-pad 导航：焦点可见、中心键激活。
     val focused = remember { mutableStateOf(false) }
@@ -180,6 +252,10 @@ private fun HostCard(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.primary,
                 )
+                Row(horizontalArrangement = Arrangement.spacedBy(BeamTokens.SpacingSm)) {
+                    TextButton(onClick = onCopyAddress) { Text("复制地址") }
+                    TextButton(onClick = onRequestRemoveTrust) { Text("移除信任") }
+                }
             } else {
                 Spacer(Modifier.height(BeamTokens.SpacingSm))
                 TextButton(onClick = onPair) {
@@ -226,10 +302,18 @@ private fun NoticeCard(text: String, accent: Color) {
     }
 }
 
+/**
+ * 空态（产品方案 §16「状态：空态(图标+说明+**主操作**)」）。
+ *
+ * 主操作是「重新扫描」；「手动输入 IP」作为次操作。
+ */
 @Composable
-private fun EmptyState() {
+private fun EmptyState(
+    onRefresh: () -> Unit,
+    onManual: () -> Unit,
+) {
     Column(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 64.dp),
+        modifier = Modifier.fillMaxWidth().padding(vertical = 48.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Text(text = "🔗", style = MaterialTheme.typography.headlineLarge)
@@ -245,5 +329,19 @@ private fun EmptyState() {
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        Spacer(Modifier.height(BeamTokens.SpacingXl))
+        Button(
+            onClick = onRefresh,
+            shape = RoundedCornerShape(BeamTokens.RadiusButton),
+        ) {
+            Text("重新扫描")
+        }
+        Spacer(Modifier.height(BeamTokens.SpacingSm))
+        OutlinedButton(
+            onClick = onManual,
+            shape = RoundedCornerShape(BeamTokens.RadiusButton),
+        ) {
+            Text("手动输入 IP")
+        }
     }
 }

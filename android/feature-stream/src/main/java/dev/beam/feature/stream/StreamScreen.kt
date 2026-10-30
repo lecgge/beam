@@ -59,6 +59,11 @@ fun StreamScreen(
 ) {
     val context = LocalContext.current
 
+    // 沉浸式：串流中隐藏状态栏与导航栏（粘性沉浸），离开时恢复（PP-04）。
+    StreamImmersiveEffect(
+        enabled = state.phase == StreamPhase.STREAMING || state.phase == StreamPhase.RECONNECTING,
+    )
+
     // 手柄模拟轴走 Android 的 generic motion 通道（不在 Compose 的按键/指针通道里）。
     BeamGamepadInput(onEvent = onInput)
 

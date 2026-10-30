@@ -71,10 +71,12 @@ class SettingsViewModel(
     /** 设置主题模式。 */
     fun setThemeMode(mode: ThemeMode) = update { it.copy(themeMode = mode) }
 
-    /** 恢复默认。 */
-    fun reset() {
-        viewModelScope.launch { settingsRepo.reset() }
-    }
+    /**
+     * 恢复默认。
+     *
+     * @return 是否写入成功；调用方据此决定提示「已恢复」还是「恢复失败」。
+     */
+    suspend fun reset(): Boolean = runCatching { settingsRepo.reset() }.isSuccess
 
     private fun update(transform: (BeamSettings) -> BeamSettings) {
         viewModelScope.launch {

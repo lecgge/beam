@@ -105,6 +105,41 @@ class DiscoveryViewModel(
         start()
     }
 
+    /**
+     * 移除对某个主机的信任。
+     *
+     * **调用方负责二次确认**（UI 弹模态确认框），这里只负责落地。
+     *
+     * @return 是否移除成功；失败时调用方应如实报错，而不是提示「已移除」。
+     */
+    suspend fun removeTrust(row: HostRow): Boolean {
+        val fingerprint = row.peer.fingerprint
+        val removed = if (fingerprint.isNotBlank()) {
+            runCatching { hostRepo.remove(fingerprint) }.isSuccess
+        } else {
+            true
+        }
+        if (removed) {
+            _state.update { current ->
+                current.copy(hosts = current.hosts.filterNot { it.peer.id == row.peer.id })
+            }
+        }
+        return removed
+    }
+
+    /**
+     * 校验手动输入的主机地址，合法时返回主机对象。
+     *
+     * 接受 `ip` 与 `ip:port` 两种写法，缺省端口 [ManualAddress.DEFAULT_PORT]。
+     * 非法时返回 null（由调用方在页面上提示错误）。
+     */
+    fun manualPeer(input: String): Peer? = ManualAddress.parse(input)
+
+    /** 报告一条错误提示（留在页面上，不弹窗）。 */
+    fun reportError(message: String) {
+        _state.update { it.copy(error = message) }
+    }
+
     private fun merge(target: MutableMap<String, HostRow>, host: DiscoveredHost) {
         val key = host.peer.id.ifBlank { host.peer.address }
         val trusted = _state.value.hosts

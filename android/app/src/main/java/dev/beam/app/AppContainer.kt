@@ -11,6 +11,9 @@ import dev.beam.core.net.BeamClient
 import dev.beam.core.net.NativeBeamBridge
 import dev.beam.core.net.Peer
 import dev.beam.core.net.UnavailableBeamClient
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 
 /**
@@ -54,6 +57,13 @@ class AppContainer(context: Context) {
 
     /** 当前选中的主机（页面之间传递用，避免用路由参数编码复杂对象）。 */
     val selectedPeer = MutableStateFlow<Peer?>(null)
+
+    /**
+     * 应用级协程作用域。
+     *
+     * 用于与界面生命周期无关的后台任务（例如性能面板的采集器）。
+     */
+    val appScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     companion object {
         /** DataStore 文件名。 */

@@ -4,6 +4,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import dev.beam.feature.stream.StreamImmersive
 
 /**
  * Android TV 入口（§3.12 `:app` 职责包含「TV 入口」）。
@@ -21,6 +22,8 @@ class TvMainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        // 全屏沉浸（PP-04）：与手机端一致，系统栏滑动临时显示。
+        StreamImmersive.configureEdgeToEdge(window)
         val container = (application as BeamApplication).container
         setContent {
             BeamRoot(container = container, isTv = true)

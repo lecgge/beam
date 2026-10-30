@@ -49,6 +49,14 @@ interface BeamClient {
     suspend fun connect(peer: Peer, cfg: StreamCfg, sink: FrameSink): Session
 
     /**
+     * 建立串流会话（**文档约定的二参签名**，§3.12 对外接口表）。
+     *
+     * 帧交给默认接收端 [DefaultFrameSink]：帧被计数后立即归还缓冲，不落屏。
+     * 需要自己消费帧时请用带 sink 的重载。
+     */
+    suspend fun connect(peer: Peer, cfg: StreamCfg): Session
+
+    /**
      * 建立串流会话（自带默认帧接收端）。
      *
      * §3.12 表格给出的对外签名形式；帧会交给 [sinkFactory] 产生的接收端。

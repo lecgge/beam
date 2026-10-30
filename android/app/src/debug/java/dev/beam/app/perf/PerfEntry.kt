@@ -6,6 +6,11 @@ import androidx.compose.ui.Modifier
 import dev.beam.core.data.perf.PerfExportFormat
 import dev.beam.core.data.perf.PerfSnapshotStore
 import dev.beam.core.data.perf.PerfUiState
+import dev.beam.core.net.SessionStats
+import dev.beam.core.net.SessionStatsTickSource
+import dev.beam.feature.perf.PerfRecorder
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.Flow
 import java.io.File
 
 /**
@@ -19,6 +24,44 @@ object PerfEntry {
 
     /** release 构建为 false。 */
     const val available: Boolean = true
+
+    /** 采集器实例（AN-23：性能面板必须有数据生产者）。 */
+    private var recorder: PerfRecorder? = null
+
+    /** 当前采集器对应的数据源（用于判断是不是同一次会话）。 */
+    private var recordedStats: Flow<SessionStats>? = null
+
+    /**
+     * 开始采集。
+     *
+     * 数据源是**真实**的会话统计（`session://stats`，500 ms 一次）：
+     * - `stats` 直接喂给 [PerfRecorder]，产出 KPI 与 E2E 折线；
+     * - 同一份统计经 [SessionStatsTickSource] 拆成阶段耗时，产出阶段表。
+     *
+     * 没有会话就没有数据 —— 面板显示空态，**不填充任何合成数值**。
+     *
+     * 同一次会话（同一个数据源）重复调用时**不重建**采集器，
+     * 以免重连时丢掉已经采到的 E2E 历史。
+     */
+    fun startRecording(scope: CoroutineScope, stats: Flow<SessionStats>) {
+        if (recorder != null && recordedStats === stats) return
+        stopRecording()
+        val created = PerfRecorder(
+            scope = scope,
+            stats = stats,
+            ticks = SessionStatsTickSource(stats).perfTicks(),
+        )
+        created.start()
+        recorder = created
+        recordedStats = stats
+    }
+
+    /** 停止采集。 */
+    fun stopRecording() {
+        recorder?.stop()
+        recorder = null
+        recordedStats = null
+    }
 
     /** 渲染性能面板。 */
     @Composable

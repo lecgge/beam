@@ -61,6 +61,24 @@ fun PerfPanel(
         }
         Spacer(Modifier.height(BeamTokens.SpacingMd))
 
+        // 没有采样就如实说明空态，不用 0 值冒充「实测为 0」。
+        if (state.stages.isEmpty() && state.e2eHistory.isEmpty()) {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(BeamTokens.RadiusCard),
+                color = MaterialTheme.colorScheme.surface,
+                border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+            ) {
+                Text(
+                    text = "暂无采样数据：debug 构建下开始串流后自动采集（§3.13）",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(BeamTokens.SpacingMd),
+                )
+            }
+            Spacer(Modifier.height(BeamTokens.SpacingMd))
+        }
+
         KpiGrid(state)
 
         Spacer(Modifier.height(BeamTokens.SpacingMd))

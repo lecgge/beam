@@ -5,6 +5,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import dev.beam.core.data.perf.PerfExportFormat
 import dev.beam.core.data.perf.PerfUiState
+import dev.beam.core.net.SessionStats
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.Flow
 
 /**
  * release 变体的性能面板入口：**空实现**。
@@ -17,6 +20,12 @@ object PerfEntry {
 
     /** release 构建为 false。 */
     const val available: Boolean = false
+
+    /** release 不采集性能数据。 */
+    fun startRecording(scope: CoroutineScope, stats: Flow<SessionStats>) = Unit
+
+    /** release 不采集性能数据。 */
+    fun stopRecording() = Unit
 
     /** 不渲染任何内容。 */
     @Composable

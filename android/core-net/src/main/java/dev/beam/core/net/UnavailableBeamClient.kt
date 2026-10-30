@@ -21,6 +21,8 @@ class UnavailableBeamClient(
 
     override suspend fun connect(peer: Peer, cfg: StreamCfg, sink: FrameSink): Session = failure()
 
+    override suspend fun connect(peer: Peer, cfg: StreamCfg): Session = failure()
+
     override suspend fun connect(peer: Peer, cfg: StreamCfg, sinkFactory: (StreamCfg) -> FrameSink): Session =
         failure()
 

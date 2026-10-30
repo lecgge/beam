@@ -21,9 +21,13 @@ import dev.beam.core.renderer.FramePacer
 import dev.beam.core.renderer.PacerDecision
 import dev.beam.core.renderer.SurfaceFrameRate
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
@@ -93,6 +97,19 @@ class StreamViewModel(
 
     private val _state = MutableStateFlow(StreamUiState())
     val state: StateFlow<StreamUiState> = _state.asStateFlow()
+
+    /**
+     * `session://stats` 原始流（500 ms 一次）。
+     *
+     * 供 `:feature-perf` 的采集器消费（AN-23）：性能面板的数据全部来自这里，
+     * **没有任何合成值**。
+     */
+    private val _sessionStats = MutableSharedFlow<SessionStats>(
+        replay = 0,
+        extraBufferCapacity = 64,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+    val sessionStats: SharedFlow<SessionStats> = _sessionStats.asSharedFlow()
 
     private var session: Session? = null
     private var decoder: VideoDecoder? = null
@@ -226,8 +243,12 @@ class StreamViewModel(
         statsJob = viewModelScope.launch {
             opened.events.collect { event ->
                 when (event) {
-                    is SessionEvent.Stats -> _state.update {
-                        it.copy(stats = event.stats, phase = StreamPhase.STREAMING)
+                    is SessionEvent.Stats -> {
+                        // 原始统计同时喂给性能面板（AN-23）。
+                        _sessionStats.tryEmit(event.stats)
+                        _state.update {
+                            it.copy(stats = event.stats, phase = StreamPhase.STREAMING)
+                        }
                     }
                     is SessionEvent.Reconnecting -> _state.update {
                         it.copy(

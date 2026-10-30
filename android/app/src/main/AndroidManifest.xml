@@ -67,6 +67,12 @@
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 串流前台服务（AN-52）：串流开始时启动，结束时停止。 -->
+        <service
+            android:name=".stream.StreamForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
     </application>
 
 </manifest>
