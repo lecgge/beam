@@ -184,7 +184,7 @@ pub fn default_frame_pipeline(
     Box<dyn beam_session::FramePipeline>,
     crate::adapters::PipelineErrors,
 ) {
-    #[cfg(feature = "platform")]
+    #[cfg(any(feature = "platform", feature = "platform-wgc"))]
     {
         let pipeline = crate::platform::PlatformPipeline::new(
             cfg.capture.clone(),
@@ -194,7 +194,7 @@ pub fn default_frame_pipeline(
         let errors = pipeline.errors();
         (Box::new(pipeline), errors)
     }
-    #[cfg(not(feature = "platform"))]
+    #[cfg(not(any(feature = "platform", feature = "platform-wgc")))]
     {
         let _ = cfg;
         let pipeline = crate::adapters::EmptyPipeline::new();

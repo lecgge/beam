@@ -65,8 +65,9 @@
 pub mod adapters;
 pub mod net;
 pub mod pairing;
-/// 平台会话工厂与监听编排（需要 `platform` feature：WGC + NVENC）。
-#[cfg(feature = "platform")]
+/// 平台会话工厂与监听编排（需要 `platform` 或 `platform-wgc` feature：
+/// WGC 抓屏 + NVENC 硬编）。
+#[cfg(any(feature = "platform", feature = "platform-wgc"))]
 pub mod platform;
 pub mod runtime;
 

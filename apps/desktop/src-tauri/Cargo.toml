@@ -42,6 +42,15 @@ beam-crates = [
 # 因此 CI 的默认 `cargo check` 不开这个 feature。
 host-platform = ["beam-crates", "beam-host/platform"]
 
+# host-platform-wgc:只开 WGC 抓屏(纯 Rust,不需要 ffmpeg 开发库)。
+#
+# 用途:让 CI 能在没有 ffmpeg 的机器上**编译检查**桌面端的主机模式接线
+# (监听 / 信任闸门 / 会话编排 / WGC 真后端)—— 否则这条路径在 CI 里
+# 根本不会被编译,坏了也没人知道。
+#
+# 它**不出画面**(硬编后端是关的);真画面要开 host-platform。
+host-platform-wgc = ["beam-crates", "beam-host/platform-wgc"]
+
 [build-dependencies]
 tauri-build = { version = "~2.6.3", features = [] }
 

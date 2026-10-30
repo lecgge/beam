@@ -19,7 +19,16 @@ default = []
 #
 # 默认关闭：不开这个 feature 时本 crate 不碰任何原生 API，
 # 编译产物也不需要 ffmpeg / windows-capture 工具链。
-platform = ["beam-capture/wgc", "beam-encode/ffmpeg"]
+platform = ["platform-wgc", "beam-encode/ffmpeg"]
+
+# 只开 WGC 抓屏（windows-capture 是**纯 Rust**，不需要 ffmpeg 开发库）。
+#
+# 用途：让 CI 能在没有 ffmpeg 的机器上**编译检查**「主机编排 + WGC 真后端」
+# 这条路径 —— 否则 §3.5 的 WGC 接线在 CI 里根本不会被编译，坏了也没人知道。
+#
+# 注意：只开这个 feature 时，硬编后端是关的（`HardwareVideoEncoder::open`
+# 返回 `BackendDisabled`），运行时**不出画面**；它只是让 CI 能查编译。
+platform-wgc = ["beam-capture/wgc"]
 
 [dependencies]
 beam-proto = { workspace = true }

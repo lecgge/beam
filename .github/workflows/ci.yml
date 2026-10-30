@@ -97,6 +97,18 @@ jobs:
       - name: check（含 windows only crate）
         shell: pwsh
         run: cargo check --workspace --all-targets
+      # 平台后端（§3.5 WGC 抓屏 / §3.8 渲染）默认是**关**的，
+      # 上面的默认 check 根本不会编译它们 —— 接线坏了也没人知道。
+      # windows-capture 与 windows 绑定都是**纯 Rust**，不需要 ffmpeg 开发库，
+      # 所以这两条可以进 CI。
+      # 硬编/硬解（beam-encode/ffmpeg、beam-decode/ffmpeg）需要 ffmpeg 开发库，
+      # §7 要求 LGPL 构建，CI 引入发行版前**不进 CI**（本地已验证）。
+      - name: check 平台后端（wgc / d3d11，纯 Rust）
+        shell: pwsh
+        run: |
+          cargo check -p beam-capture --features wgc --all-targets
+          cargo check -p beam-render --features d3d11 --all-targets
+          cargo check -p beam-host --features platform-wgc --all-targets
       - name: test
         shell: pwsh
         run: cargo test --workspace
@@ -192,3 +204,9 @@ jobs:
       - name: src-tauri 检查
         shell: pwsh
         run: cargo check
+      # 桌面端的主机模式接线（监听 / 信任闸门 / 会话编排 / WGC 真后端）。
+      # host-platform-wgc 只开 WGC(纯 Rust),不需要 ffmpeg 开发库；
+      # 真画面要开 host-platform,那一条需要 ffmpeg 开发库,暂不进 CI。
+      - name: src-tauri 主机模式检查（host-platform-wgc）
+        shell: pwsh
+        run: cargo check --features host-platform-wgc
