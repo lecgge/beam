@@ -10,6 +10,11 @@ pub mod code {
     pub const OUTPUT_FAILED: u16 = 7003;
     /// `E7004`：音频后端未启用（§3.7 段内扩展）。
     pub const BACKEND_DISABLED: u16 = 7004;
+    /// `E7005`：音频数据报非法（§3.7 段内扩展）。
+    ///
+    /// 音频数据报的线上格式问题：帧头解不开、类型不是音频、
+    /// 分片参数不是「1 片 0 冗余」、或负载超过单数据报上限。
+    pub const DATAGRAM_INVALID: u16 = 7005;
 }
 
 /// 由错误码反查人类可读文案（§3.11）。
@@ -19,6 +24,7 @@ pub fn message(code: u16) -> &'static str {
         code::CODEC_FAILED => "音频编解码失败",
         code::OUTPUT_FAILED => "音频输出失败",
         code::BACKEND_DISABLED => "音频后端未启用",
+        code::DATAGRAM_INVALID => "音频数据报非法",
         _ => UNKNOWN_TEXT,
     }
 }
@@ -53,6 +59,13 @@ pub enum AudioError {
     /// `E7004`：后端未启用。
     #[error("E7004: 音频后端未启用(缺少 opus feature)")]
     BackendDisabled,
+
+    /// `E7005`：音频数据报非法。
+    #[error("E7005: 音频数据报非法: {reason}")]
+    DatagramInvalid {
+        /// 原因，仅用于日志。
+        reason: String,
+    },
 }
 
 impl AudioError {
@@ -63,6 +76,7 @@ impl AudioError {
             AudioError::CodecFailed { .. } => code::CODEC_FAILED,
             AudioError::OutputFailed { .. } => code::OUTPUT_FAILED,
             AudioError::BackendDisabled => code::BACKEND_DISABLED,
+            AudioError::DatagramInvalid { .. } => code::DATAGRAM_INVALID,
         }
     }
 
@@ -100,6 +114,10 @@ mod tests {
         assert_eq!(AudioError::CodecFailed { reason: "x".into() }.code(), 7002);
         assert_eq!(AudioError::OutputFailed { reason: "x".into() }.code(), 7003);
         assert_eq!(AudioError::BackendDisabled.code(), 7004);
+        assert_eq!(
+            AudioError::DatagramInvalid { reason: "x".into() }.code(),
+            7005
+        );
         assert_eq!(message(7099), UNKNOWN_TEXT);
         assert!(is_audio_code(7001));
     }

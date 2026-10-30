@@ -31,6 +31,11 @@ pub struct ClientConfig {
     pub stream: StreamConfig,
     /// 要连接的主机（为空表示由调用方在连接时指定）。
     pub peer: Option<PeerAddr>,
+    /// 音频配置（§3.7）。
+    ///
+    /// `mode = off`（默认）时客户端**不接音频**；非 off 时用
+    /// [`ClientRuntime::transport_factory_with_audio`] 建立带音频分流的传输。
+    pub audio: beam_audio::AudioConfig,
 }
 
 impl ClientConfig {
@@ -51,6 +56,17 @@ impl ClientConfig {
                 features: 0,
             },
             peer: None,
+            // §3.7：音频模式与码率来自配置层，其余用 §3.7 的默认值。
+            audio: beam_audio::AudioConfig {
+                mode: match cfg.audio.mode {
+                    beam_config::AudioMode::HostAndStream => beam_audio::AudioMode::HostAndStream,
+                    beam_config::AudioMode::StreamOnly => beam_audio::AudioMode::StreamOnly,
+                    beam_config::AudioMode::Off => beam_audio::AudioMode::Off,
+                },
+                bitrate_bps: cfg.audio.bitrate_bps,
+                sample_rate: beam_audio::SAMPLE_RATE,
+                channels: 2,
+            },
         }
     }
 }
@@ -138,6 +154,25 @@ impl ClientRuntime {
             .parse()
             .unwrap_or_else(|_| "127.0.0.1:0".parse().expect("合法回环地址"));
         crate::adapters::NetTransportFactory::new(addr, net_cfg, verifier)
+    }
+
+    /// 用给定的校验器建立**带音频分流**的传输工厂（§3.7）。
+    ///
+    /// 与 [`ClientRuntime::transport_factory`] 的区别：datagram 通道会按帧头
+    /// `type` 分流 —— 音频数据报走「Opus 解码 + WASAPI 输出」，
+    /// 画面数据报走画面重组器（见 [`crate::transport::DemuxTransport`]）。
+    ///
+    /// 音频不可用（没有输出设备、Opus 后端未启用）时**只关音频**，画面照旧。
+    pub fn transport_factory_with_audio(
+        peer: &PeerAddr,
+        net_cfg: beam_net::NetConfig,
+        verifier: std::sync::Arc<dyn PeerVerifier>,
+        audio: beam_audio::AudioConfig,
+    ) -> crate::transport::DemuxTransportFactory {
+        let addr = format!("{}:{}", peer.host, peer.port)
+            .parse()
+            .unwrap_or_else(|_| "127.0.0.1:0".parse().expect("合法回环地址"));
+        crate::transport::DemuxTransportFactory::with_audio(addr, net_cfg, verifier, audio)
     }
 }
 

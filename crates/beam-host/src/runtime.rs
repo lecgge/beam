@@ -14,6 +14,7 @@ use beam_session::{
 };
 
 use crate::adapters::{CaptureEncodePipeline, InputAdapter, NetVideoSender, PipelineErrors};
+use crate::audio::{AudioStatsHandle, NetAudioSender};
 use crate::input::map_input_permissions;
 use crate::net::{HostInput, HostTransport};
 
@@ -72,6 +73,12 @@ pub struct HostConfig {
     /// 决定本机最多允许注入哪几类设备。它与协议侧的对端权限取**交集**
     /// 后才得到真正的注入权限（见 [`crate::input::map_input_permissions`]）。
     pub input: InputSettings,
+    /// 音频配置（§3.7 `audio_mode=host+stream|stream_only|off`、`bitrate=128k`）。
+    ///
+    /// 由 [`ResolvedConfig`] 派生（§3.14 → §3.9）：`mode` 与 `bitrate_bps`
+    /// 来自配置层，其余用 §3.7 的默认值（48 kHz / 双声道）。
+    /// `mode = off`（默认）时本次会话**完全不发**音频。
+    pub audio: beam_audio::AudioConfig,
 }
 
 impl Default for HostConfig {
@@ -85,6 +92,8 @@ impl Default for HostConfig {
             // `ResolvedConfig::default()` 里），因此这里取 `ResolvedConfig::default()`
             // 的值，保持「配置只有一份真值来源」。
             input: ResolvedConfig::default().input,
+            // 音频默认关闭（§3.7 `audio_mode=off`）。
+            audio: beam_audio::AudioConfig::default(),
         }
     }
 }
@@ -116,6 +125,17 @@ impl HostConfig {
             encode: EncodeConfig::from(cfg),
             advertise: None,
             input: cfg.input.clone(),
+            // §3.7：音频模式与码率来自配置层，其余用 §3.7 的默认值。
+            audio: beam_audio::AudioConfig {
+                mode: match cfg.audio.mode {
+                    beam_config::AudioMode::HostAndStream => beam_audio::AudioMode::HostAndStream,
+                    beam_config::AudioMode::StreamOnly => beam_audio::AudioMode::StreamOnly,
+                    beam_config::AudioMode::Off => beam_audio::AudioMode::Off,
+                },
+                bitrate_bps: cfg.audio.bitrate_bps,
+                sample_rate: beam_audio::SAMPLE_RATE,
+                channels: 2,
+            },
         }
     }
 }
@@ -140,6 +160,12 @@ pub struct HostSessionHandle {
     /// 只有在主机编排层用了**真实注入器**时才有值；
     /// 调用方自带注入器时为 `None`。
     input_stats: Option<std::sync::Arc<beam_input::InjectorStats>>,
+    /// 音频泵任务（§3.7）；句柄释放时自动取消。
+    audio_task: Option<tokio::task::JoinHandle<()>>,
+    /// 音频统计（§3.7）。
+    ///
+    /// 只有本次会话**接了音频**时才有值（`audio_mode=off` ⇒ `None`）。
+    audio_stats: Option<AudioStatsHandle>,
 }
 
 impl std::fmt::Debug for HostSessionHandle {
@@ -149,6 +175,11 @@ impl std::fmt::Debug for HostSessionHandle {
             .field("has_pipeline_error", &self.errors.has_error())
             .field("has_input_pump", &self.input_task.is_some())
             .field("has_input_stats", &self.input_stats.is_some())
+            .field("has_audio_pump", &self.audio_task.is_some())
+            .field(
+                "audio_stats",
+                &self.audio_stats.as_ref().map(AudioStatsHandle::snapshot),
+            )
             .finish()
     }
 }
@@ -156,6 +187,9 @@ impl std::fmt::Debug for HostSessionHandle {
 impl Drop for HostSessionHandle {
     fn drop(&mut self) {
         if let Some(task) = self.input_task.take() {
+            task.abort();
+        }
+        if let Some(task) = self.audio_task.take() {
             task.abort();
         }
     }
@@ -201,6 +235,15 @@ impl HostSessionHandle {
     /// （调用方自带了注入器，或根本没接输入）。
     pub fn input_stats(&self) -> Option<&std::sync::Arc<beam_input::InjectorStats>> {
         self.input_stats.as_ref()
+    }
+
+    /// 音频统计（§3.7）。
+    ///
+    /// 返回 `None` 表示这次会话**没有**接音频
+    /// （`audio_mode=off`，或 `stream_only` 下主机不采集）。
+    /// 音频失败**不会**让会话进入错误态：画面照旧，音频降级为关闭。
+    pub fn audio_stats(&self) -> Option<&AudioStatsHandle> {
+        self.audio_stats.as_ref()
     }
 }
 
@@ -341,6 +384,8 @@ impl HostRuntime {
             errors,
             input_task: None,
             input_stats: None,
+            audio_task: None,
+            audio_stats: None,
         }
     }
 
@@ -488,12 +533,85 @@ impl HostRuntime {
             })
         });
 
+        // 音频（§3.7）：与画面走**同一条** QUIC 连接的 datagram 通道，
+        // 只是帧头 `type = 1`（音频）。音频失败**不会**打断画面（降级为只有画面）。
+        let (audio_task, audio_stats) = self.start_audio(conn.clone());
+
         Ok(HostSessionHandle {
             session,
             errors,
             input_task,
             input_stats,
+            audio_task,
+            audio_stats,
         })
+    }
+
+    /// 按 `audio_mode` 启动主机侧音频（§3.7）。
+    ///
+    /// 返回（任务句柄，统计句柄）：
+    ///
+    /// - `off` ⇒ 两者都是 `None`（本次会话完全没有音频）；
+    /// - `stream_only` ⇒ 任务为 `None`（主机**不采集**系统声音 ⇒ 没有帧可发），
+    ///   统计句柄仍然是 `Some`，便于上层看出「音频开了但没帧」；
+    /// - `host+stream` ⇒ 打开 WASAPI loopback → Opus 编码 → 发音频数据报。
+    ///
+    /// 任何一步失败（设备打不开 `E7001`、Opus 后端未启用 `E7004`、编码失败 `E7002`）
+    /// 都只影响音频：任务停止、错误码记进统计并写日志，**画面照旧**。
+    fn start_audio(
+        &self,
+        conn: beam_net::Conn,
+    ) -> (
+        Option<tokio::task::JoinHandle<()>>,
+        Option<AudioStatsHandle>,
+    ) {
+        let cfg = self.cfg.audio.clone();
+        match cfg.mode {
+            beam_audio::AudioMode::Off => (None, None),
+            beam_audio::AudioMode::StreamOnly => {
+                // §3.7 `stream_only` = 「只串流（主机不采集）」。
+                // 主机侧唯一可用的音频源就是 WASAPI loopback（采系统正在播放的声音），
+                // 不采集就没有帧可发 ⇒ 本次会话不发音频帧，画面不受影响。
+                tracing::info!("audio_mode=stream_only：主机不采集系统声音,本次会话不发音频帧");
+                (None, Some(AudioStatsHandle::default()))
+            }
+            beam_audio::AudioMode::HostAndStream => {
+                let stats = AudioStatsHandle::default();
+                // 先建编码器：没开 `opus` feature 时这里是 E7004（后端未启用），
+                // 早失败早知道，别把设备打开了才发现编不了。
+                let encoder = match beam_audio::OpusEncoderImpl::new(cfg.clone()) {
+                    Ok(encoder) => encoder,
+                    Err(e) => {
+                        stats.record_error(e.code());
+                        tracing::warn!(
+                            code = %e.code_str(),
+                            "Opus 编码器不可用,音频降级为关闭(画面不受影响)"
+                        );
+                        return (None, Some(stats));
+                    }
+                };
+                let source = beam_audio::WasapiLoopbackSource::new();
+                let sender = NetAudioSender::new(conn);
+                let task_stats = stats.clone();
+                let error_stats = stats.clone();
+                let task = tokio::spawn(async move {
+                    match crate::audio::run_audio_loop(source, encoder, sender, cfg, task_stats)
+                        .await
+                    {
+                        Ok(()) => {}
+                        Err(e) => {
+                            error_stats.record_error(e.code());
+                            tracing::warn!(
+                                code = %e.code_str(),
+                                reason = %e,
+                                "音频链路失败,降级为只有画面"
+                            );
+                        }
+                    }
+                });
+                (Some(task), Some(stats))
+            }
+        }
     }
 }
 
@@ -594,6 +712,31 @@ mod tests {
         assert!(!cfg.input.allow_keyboard);
         assert!(cfg.input.allow_mouse);
         assert!(cfg.input.gamepad);
+    }
+
+    #[test]
+    fn config_from_resolved_carries_audio_settings() {
+        // §3.14 → §3.9：音频模式与码率必须真的送达 `HostConfig.audio`。
+        let mut resolved = ResolvedConfig::default();
+        resolved.audio.mode = beam_config::AudioMode::HostAndStream;
+        resolved.audio.bitrate_bps = 96_000;
+
+        let cfg = HostConfig::from_resolved(&resolved);
+        assert_eq!(cfg.audio.mode, beam_audio::AudioMode::HostAndStream);
+        assert_eq!(cfg.audio.bitrate_bps, 96_000);
+        assert_eq!(cfg.audio.sample_rate, 48_000, "§3.7：48 kHz");
+        assert_eq!(cfg.audio.channels, 2, "§3.7：双声道");
+        assert!(
+            cfg.stream.audio_enabled,
+            "音频模式不是 off 时,能力协商里必须带上音频"
+        );
+    }
+
+    #[test]
+    fn audio_is_off_by_default() {
+        let cfg = HostConfig::default();
+        assert_eq!(cfg.audio.mode, beam_audio::AudioMode::Off);
+        assert!(!cfg.stream.audio_enabled, "默认不得宣称支持音频");
     }
 
     #[test]

@@ -10,6 +10,13 @@ repository.workspace = true
 
 [features]
 default = []
+# 真实 Opus 编解码（ffmpeg 的**原生** opus 编码器，与 `beam-audio/opus` 同一个后端）。
+#
+# 主机侧靠它把 WASAPI loopback 采到的 PCM 编码成 Opus 帧。
+# 不开这个 feature 时音频链路**接线仍然完整**，但 `OpusEncoderImpl::new` 返回
+# E7004（后端未启用）⇒ 主机降级为「只有画面」，错误码写进日志与统计。
+opus = ["beam-audio/opus"]
+
 # 平台会话（§3.9 主机编排 + §3.5/§3.6 平台后端）。
 #
 # 打开后把 beam-capture 的 `wgc`（WGC 抓屏）与 beam-encode 的 `ffmpeg`
@@ -19,7 +26,10 @@ default = []
 #
 # 默认关闭：不开这个 feature 时本 crate 不碰任何原生 API，
 # 编译产物也不需要 ffmpeg / windows-capture 工具链。
-platform = ["platform-wgc", "beam-encode/ffmpeg"]
+#
+# `opus` 一并打开：`platform` 已经需要 §7 的 LGPL ffmpeg 构建，
+# 音频的 Opus 编解码用的是同一套原生库，不额外增加依赖面。
+platform = ["platform-wgc", "beam-encode/ffmpeg", "opus"]
 
 # 只开 WGC 抓屏（windows-capture 是**纯 Rust**，不需要 ffmpeg 开发库）。
 #

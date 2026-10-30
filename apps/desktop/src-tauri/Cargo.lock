@@ -115,6 +115,7 @@ version = "0.1.0"
 dependencies = [
  "beam-proto",
  "bytes",
+ "ffmpeg-next",
  "thiserror 2.0.21",
  "tracing",
  "windows 0.62.2",
@@ -137,6 +138,7 @@ dependencies = [
 name = "beam-client"
 version = "0.1.0"
 dependencies = [
+ "beam-audio",
  "beam-config",
  "beam-decode",
  "beam-discovery",

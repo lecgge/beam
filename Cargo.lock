@@ -151,6 +151,7 @@ dependencies = [
 name = "beam-client"
 version = "0.1.0"
 dependencies = [
+ "beam-audio",
  "beam-config",
  "beam-decode",
  "beam-discovery",

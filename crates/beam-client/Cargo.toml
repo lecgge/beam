@@ -8,12 +8,25 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+# 真实 Opus 解码（ffmpeg 的**原生** opus 解码器，与 `beam-audio/opus` 同一个后端）。
+#
+# 客户端要靠它把主机发来的 Opus 帧解码成 PCM 再送进 WASAPI 输出。
+# 不开这个 feature 时音频链路**接线仍然完整**，但 `OpusDecoderImpl::new` 返回
+# E7004（后端未启用）⇒ 客户端降级为「只有画面」，错误码写进日志与统计。
+opus = ["beam-audio/opus"]
+
 [dependencies]
 beam-proto = { workspace = true }
 beam-session = { workspace = true }
 beam-decode = { workspace = true }
 beam-render = { workspace = true }
 beam-net = { workspace = true }
+# §3.7 音频：客户端侧要「Opus 解码 + WASAPI 输出」。
+# §4 允许 L3（host/client）引用平台 crate；`beam-audio` 的模块文档也写明
+# 「被依赖：beam-host、beam-client、beam-ffi」。
+beam-audio = { workspace = true }
 # §4「只允许上层依赖下层」：client(L3) 需要 pair(L1) 的 PeerVerifier 来校验主机证书。
 beam-pair = { workspace = true }
 beam-discovery = { workspace = true }

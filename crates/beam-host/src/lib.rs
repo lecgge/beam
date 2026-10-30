@@ -65,13 +65,27 @@
 //! 渲染侧是 `beam_render::D3D11Renderer::device()`，后者已做运行期设备校验
 //! （不匹配则该帧清屏并告警，**不静默拷错**）。**未改变文档语义**。
 //!
+//! ## 主机侧音频接线（§3.7）
+//!
+//! - [`AudioPipeline`]：WASAPI loopback 采集 → Opus 5 ms 帧 → **音频数据报**；
+//! - [`NetAudioSender`]：音频与画面走**同一条** QUIC 连接的 datagram 通道，
+//!   音频帧头的 `type = 1`（§5）；
+//! - 音频**不进 FEC 分组**、**不分片**（一帧 Opus ≈ 80 B ≪ 1184 B 的负载上限），
+//!   字节级格式由 `beam_audio::wire` 统一实现（主机与客户端共用同一份）；
+//! - 启停跟随 §3.7 的 `audio_mode`：`host+stream` 采集并串流、`stream_only`
+//!   主机不采集、`off` 完全不接；
+//! - **音频失败不影响画面**：设备打不开（`E7001`）、Opus 编解码失败（`E7002`）、
+//!   发送失败（`E2xxx`）都只停掉音频链路，串流继续。
+//!
 //! ## 错误码
 //!
 //! 编排层自身只做组装，错误沿用各平台 crate 的 `E5xxx` / `E6xxx` / `E8xxx` / `E2xxx`。
+//! 音频链路的错误沿用 `beam-audio` 的 `E7xxx`（见 [`AudioPipelineError::code`]）。
 
 #![forbid(unsafe_code)]
 
 pub mod adapters;
+pub mod audio;
 pub mod input;
 pub mod net;
 pub mod pairing;
@@ -83,6 +97,10 @@ pub mod runtime;
 
 pub use adapters::{
     CaptureEncodePipeline, EmptyPipeline, InputAdapter, NetVideoSender, NoopInputSink,
+};
+pub use audio::{
+    AudioDatagramSender, AudioPipeline, AudioPipelineError, AudioStats, AudioStatsHandle,
+    NetAudioSender,
 };
 pub use input::map_input_permissions;
 pub use net::{HostInput, HostListener, HostTransport};

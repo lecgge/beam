@@ -1235,7 +1235,7 @@ impl CrateService {
             };
 
             // §5 客户端传输:开控制双向流 + 输入单向流。
-            let transport = match NetTransport::connect(conn).await {
+            let transport = match NetTransport::connect(conn.clone()).await {
                 Ok(t) => t,
                 Err(e) => {
                     // 透传会话层的真实码(`SessionError::TransportFailed` = E9005),
@@ -1251,7 +1251,31 @@ impl CrateService {
             };
             // 帧通道统计句柄:上层据此知道有多少帧被丢弃(E2004)。
             let frame_stats = transport.frame_stats_handle();
-            let factory = ReadyTransportFactory::new(Box::new(transport) as Box<dyn Transport>);
+            // §3.7 音频:数据报读点按帧头 `type` 分流 —— 音频走「Opus 解码 +
+            // WASAPI 输出」,画面走画面重组器。**用 beam-client 的分流传输器**,
+            // 桌面端不需要直接依赖 beam-audio(§4 分层)。
+            let audio_cfg = beam_client::AudioConfig {
+                mode: match resolved.audio.mode {
+                    beam_config::AudioMode::HostAndStream => beam_client::AudioMode::HostAndStream,
+                    beam_config::AudioMode::StreamOnly => beam_client::AudioMode::StreamOnly,
+                    beam_config::AudioMode::Off => beam_client::AudioMode::Off,
+                },
+                bitrate_bps: resolved.audio.bitrate_bps,
+                sample_rate: beam_client::AudioConfig::default().sample_rate,
+                channels: beam_client::AudioConfig::default().channels,
+            };
+            let audio_stats = beam_client::AudioReceiveStatsHandle::default();
+            let audio_sink = beam_client::default_audio_sink(audio_cfg);
+            if audio_sink.is_none() {
+                tracing::info!("音频通路不可用(无输出设备或 Opus 后端未启用),本次会话只走画面");
+            }
+            let demux = beam_client::DemuxTransport::new(
+                transport,
+                conn.clone(),
+                audio_sink,
+                Some(audio_stats),
+            );
+            let factory = ReadyTransportFactory::new(Box::new(demux) as Box<dyn Transport>);
 
             let runtime = ClientRuntime::new(ClientConfig::from_resolved(&resolved));
             let handle = runtime.connect_default(peer, Some(Box::new(factory)));
