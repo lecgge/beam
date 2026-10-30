@@ -49,13 +49,13 @@
 |---|---|---|---|---|---|
 | 已实现 | 364 | 10 | 0 | 0 | 354 |
 | 占位 | 43 | 33 | 1 | 0 | 8 |
-| 缺失 | 111 | 54 | 2 | 0 | 42 |
+| 缺失 | 111 | 54 | 3 | 0 | 41 |
 | 偏差 | 76 | 54 | 0 | 0 | 22 |
 | 超出 | 3 | 0 | 0 | 0 | 3 |
-| **合计** | **597** | **151** | **3** | **0** | **429** |
+| **合计** | **597** | **151** | **4** | **0** | **428** |
 
 - 审计判定为**未达成**（占位+缺失+偏差）：**230** 条
-- 其中**已落地**：**158** 条；**仍未排期**：**72** 条
+- 其中**已落地**：**159** 条；**仍未排期**：**71** 条
 
 > 「未开始」不代表这一条没人管，而是**还没排进任何一批**。排期后的条目会出现在「落地进度台账」一节，带批次号与验收方式。
 
@@ -156,7 +156,7 @@
 | 状态 | 条目数 |
 |---|---|
 | 未开始 | 0 |
-| 进行中 | 3 |
+| 进行中 | 4 |
 | 已完成 | 152 |
 | 已阻塞 | 12 |
 | 暂不做 | 1 |
@@ -333,6 +333,18 @@
 | 音频真实出声与音画同步仍未验证 | B9-A 把采集→Opus→datagram→解码→WASAPI 输出整条接通，但本机无声卡回环条件，**「声音真的能出来」未验证**；音画同步也未测（两个时钟不同源）。§3.7 的采集→编码 ≤6 ms / 端到端 ≤40 ms / 同步 <30 ms 三个指标仍未测 | 需真机人工验证 |
 | Android 端到端运行时行为仍未验证 | 无 Android 真机 ⇒ 真机上的建连、输入回传、重连恢复、音频播放全部未实测 | 需真机人工验证 |
 
+| B10 | 2026-10-31 | 第十批：桌面端客户端真实上屏（独立原生窗口 + D3D11VA 硬解 + flip-model 交换链） | crates/beam-render / crates/beam-decode / crates/beam-client / apps/desktop | 已完成 | cargo fmt --all --check exit 0；cargo check --workspace --all-targets exit 0 / 0 warning；cargo clippy --workspace --all-targets -- -D warnings exit 0 / 0 warning；cargo test --workspace exit 0（46 套件 / 453 passed / 0 failed / 9 ignored）；cargo check/clippy -p beam-client --features video exit 0 / 0 warning；cargo test -p beam-client --features video --test video_present -- --ignored exit 0（独立原生窗口 + D3D11 flip-model 交换链 + D3D11VA 硬解上下文三步都真的建得起来）；桌面端 clippy --all-targets -- -D warnings exit 0（默认与 --features client-video 两种状态）；npm --prefix apps/desktop run build exit 0 |
+
+- **B10 客户端上屏链路（主会话自办）** — 写入范围：`crates/beam-render/**`、`crates/beam-decode/**`、`crates/beam-client/**`、`apps/desktop/**`；覆盖条目 ST-07
+
+**B10 追加项（审计中顺带发现，不在原 551 条内）**
+
+| 项 | 说明 | 归属 |
+|---|---|---|
+| 「画面真的出现在独立窗口里」未做端到端验证 | 本机自检只验证了「窗口 + 交换链 + 硬解上下文」建得起来；真实主机 → 网络 → 解码 → 上屏的完整链路需要 GUI 环境的串流会话，未自动化验证。上屏帧率 / 延迟 / 丢帧指标也未实测 | 需人工验证 |
+| FEC 帧的热路径仍未走 DirectByteBuffer（F-07 / P6-06） | 查证：uniffi 0.29 的 Kotlin 后端没有 ByteBuffer 直传；0.32 的 `lower_type_name_for_arg` 只对「Kotlin → Rust」方向的借用 `Bytes` 生效，**回调方向（Rust → Kotlin）仍然映射成 ByteArray**。因此零拷贝回调需要手写 JNI ⇒ 仍卡在待决事项 S4（新增 `jni` 依赖 + 放开 `beam-ffi` 的 `forbid(unsafe_code)`） | 待裁决 |
+| §3.10 的 `beam-render` 职责是否包含「创建独立原生串流窗口」 | 本批把窗口放进 `beam-render`（交换链与宿主窗口成对），§3.10 原文只写「D3D11 flip-model 交换链上屏；叠加层由 Tauri 窗口负责」。**语义没变**（客户端仍渲染到独立原生窗口），只是承载代码的 crate 变了。若认为这属于改文档口径，请裁决是否补一句 | 待裁决 |
+
 ### 已裁决事项
 
 | # | 议题 | 裁决 | 裁决日期 | 说明 | 解锁范围 |
@@ -391,6 +403,9 @@
 | 2026-10-30 |  | B3 记过 main 返回后 NVIDIA 驱动侧 atexit 回调访问已释放对象 → 0xC0000005。本轮做了对照实验：「先 drop 设备再让 main 正常返回」与「保持设备存活」两种写法**都是 exit 0** ⇒ 当前驱动版本下复现不出来。因此代码只改成更稳妥的写法（不再用 process::exit(0) 绕过 CRT 收尾、让设备活到进程结束），**不能声称已修复** | cargo run --release -p beam-encode --example perf_probe --features ffmpeg,perf-stats → exit 0 |
 | 2026-10-31 | FEC 编码超 §3.2 预算的根因：每帧重建 RS 矩阵 | 分段实测定位：`ReedSolomon::new(k,m)` 要在 GF(2^8) 上求逆 k×k 矩阵（O(k^3)），T1 档位单次 4.894 ms，占整帧 6.635 ms 的 74%，而真正的 GF 乘加只有 0.773 ms。而 `packetize()` 每帧 `FecCodec::new()` ⇒ 矩阵缓存永不跨帧存活。改法：`FecCodec` 缓存表改成 `Arc<Mutex<HashMap>>`（克隆体共享同一张表），发送端挂 `Conn`、接收端挂 `Reassembler`，新增 `packetize_with_codec`。**帧头与线上格式一字未改**（有单测 `shared_codec_produces_identical_packets` 钉住逐字节一致） | T1 6.635 → 1.553 ms（4.3×）、T2 5.320 → 0.716 ms（7.4×）、T3 1.397 → 0.276 ms（5.1×，**进预算**）；恢复路径 T1 6.98 → 1.75 ms（−71.7%）、T3 → 0.278 ms（**进预算**）。T1/T2 仍超预算 1.8~1.9 倍，根因已是标量 GF 乘加本身（登记为待决 S14） |
 | 2026-10-31 | uniffi 导出面暴露重连信息与会话汇总（§4.1 / §3.9） | 新增 `Session::reconnecting()` / `Session::summary()`。**刻意做成查询式而不是新增 `SessionEvent` 变体** —— `SessionEvent` 在 beam-session / beam-ffi / 桌面端 service_crates.rs 各有一处穷尽匹配，加变体会同时打破三处。Android 侧同步：`NativeMappings.mapReconnectingInfo` / `mapSessionSummary`、`Session` 接口新增 `reconnecting()` / `summary()`、测试替身 `GeneratedShapes.kt`、4 个新单测 | cargo check -p beam-ffi --features uniffi --all-targets exit 0；gradlew test 全绿（core-net 的 NativeMappingsTest 由 16 例增至 20 例）。顺带修掉一个死代码：Android 的断线遮罩原先只认 `SessionEvent.Reconnecting` 变体，而 Rust 侧**从不发**这个变体 ⇒ 遮罩永远不会出现；现在改由 500 ms 轮询真实重连状态驱动 |
+| 2026-10-31 | 真 bug：ffmpeg D3D11VA 硬解上下文被释放两次 ⇒ 退出时堆破坏 | `FfmpegD3D11VaDecoder` 把 `AVHWDeviceContext` 的 `device` 字段指向自己 AddRef 出来的 `ID3D11Device`，同时在 Rust 结构体里**又存了一份**该设备引用。而 ffmpeg 的 `AVD3D11VADeviceContext` 头文件写明：「Deallocating the AVHWDeviceContext will always release this interface」⇒ 设备被 Release 两次 ⇒ 交换链与解码纹理都建在这个设备上，提前释放让它们踩到野指针。实测：打开硬解上下文后立刻释放 ⇒ STATUS_ACCESS_VIOLATION。改法：把那一份 AddRef 的所有权**移交给 ffmpeg**（`mem::forget`），Rust 侧不再持有 | 硬解上下文开→关不再崩；`cargo test -p beam-client --features video --test video_present -- --ignored` 通过 |
+| 2026-10-31 | 真 bug：`AVBufferRef` 被 unref 两次 ⇒ use-after-free | `(*ctx).hw_device_ctx = hw.as_ptr()` 把 `AVBufferRef` **无引用地**塞给 libavcodec；`avcodec_free_context` 会 unref 它，之后 `HwDevice::drop` 又 unref 一次 ⇒ use-after-free ⇒ 实测 STATUS_HEAP_CORRUPTION。改法：交给 libavcodec 前先 `av_buffer_ref` 加一份引用（`avctx` 与 `avci` 各持一份，`avcodec_free_context` 负责归还） | 两个崩溃点（堆破坏 / 访问违例）都消除；上屏自检全绿 |
+| 2026-10-31 | 桌面端客户端此前**根本没有上屏路径** | 此前 `ClientRuntime::connect_default` 用的 `D3D11Renderer` **没有绑定任何窗口**，且 `beam-render/d3d11` / `beam-decode/ffmpeg` 两个 feature 默认关闭 ⇒ 客户端即便收到帧也只会得到 `E10014`（后端未启用）。本批补上 `client-video` feature 与 `connect_to_window` 入口（建窗口 → 建交换链 → 用同一设备开硬解），桌面端只调 L3 入口 | cargo check/clippy 两种 feature 状态全绿；本机自检三步（窗口/交换链/硬解）全过 |
 
 ---
 
@@ -1156,7 +1171,7 @@
 | ST-04 | `src/stores/` 存在且有内容 | `apps/desktop/src/stores/hostStore.ts:31`、`apps/desktop/src/stores/deviceStore.ts:43`、`apps/desktop/src/stores/sessionStore.ts:30`、`apps/desktop/src/stores/settingsStore.ts:22`、`apps/desktop/src/stores/perfStore.ts:27`、`apps/desktop/src/stores/toastStore.ts:25` | 已实现 | 6 个 store + 1 个 `index.ts` 汇总导出。 | 未开始 |
 | ST-05 | `src/i18n/` 存在且有内容 | `apps/desktop/src/i18n/index.tsx:19`、`apps/desktop/src/i18n/zh-CN.ts:7`、`apps/desktop/src/i18n/en.ts:9` | 已实现 | provider + 两份词表。 | 未开始 |
 | ST-06 | `src-tauri/` 应有 (commands.rs, events.rs, tray.rs, main.rs) | `apps/desktop/src-tauri/src/commands.rs:1`、`apps/desktop/src-tauri/src/events.rs:1`、`apps/desktop/src-tauri/src/tray.rs:1`、`apps/desktop/src-tauri/src/main.rs:1` | 已实现 | 4 个文件齐全（另有 `dto.rs`/`error.rs`/`service.rs`/`service_crates.rs`/`transport.rs` 5 个支撑文件）。 | 未开始 |
-| ST-07 | Windows 作为客户端：用独立原生 D3D11/wgpu 窗口渲染，不走 WebView（产品方案第 45 行） | 未找到（已搜索：`wgpu`、`d3d11`、`D3D11`、`WebviewWindow`、`WebviewBuilder`、`native_window`、`beam_render`、`beam_decode` 于 `apps/desktop/src-tauri/src/**`） | 缺失 | 桌面端只有一个 WebView 窗口（`apps/desktop/src-tauri/tauri.conf.json:14-27`），客户端画面区是纯 CSS 渐变占位加一个「GAME」字样（`apps/desktop/src/pages/ConnectPage.tsx:82`、`apps/desktop/src/styles.css:733-749`）；`beam-render` / `beam-decode` 两个 crate **未进入桌面端依赖**（`apps/desktop/src-tauri/Cargo.toml:57-69`），`beam-render` 自己也标注未启用 `d3d11` feature 时 `present` 返回 `E10014`（`crates/beam-render/src/renderer.rs:45`）。原生渲染窗口这一条整条未落地。 | 未开始 |
+| ST-07 | Windows 作为客户端：用独立原生 D3D11/wgpu 窗口渲染，不走 WebView（产品方案第 45 行） | 未找到（已搜索：`wgpu`、`d3d11`、`D3D11`、`WebviewWindow`、`WebviewBuilder`、`native_window`、`beam_render`、`beam_decode` 于 `apps/desktop/src-tauri/src/**`） | 缺失 | 桌面端只有一个 WebView 窗口（`apps/desktop/src-tauri/tauri.conf.json:14-27`），客户端画面区是纯 CSS 渐变占位加一个「GAME」字样（`apps/desktop/src/pages/ConnectPage.tsx:82`、`apps/desktop/src/styles.css:733-749`）；`beam-render` / `beam-decode` 两个 crate **未进入桌面端依赖**（`apps/desktop/src-tauri/Cargo.toml:57-69`），`beam-render` 自己也标注未启用 `d3d11` feature 时 `present` 返回 `E10014`（`crates/beam-render/src/renderer.rs:45`）。原生渲染窗口这一条整条未落地。 | 进行中 |
 | ST-08 | §6 第 69 行 Commands 清单（`get_host_status`、`start_hosting(opts)`/`stop_hosting`、`get_pairing_code`、`approve_pair(id)`/`remove_device(id)`、`list_hosts`/`connect(host_id)`、`get_settings`/`set_settings(patch)`） | `apps/desktop/src-tauri/src/main.rs:74-97`、`apps/desktop/src-tauri/src/commands.rs:30-153` | 已实现 | §6 清单里的 11 个命令全部注册且实现；§3.11 多出的 `reject_pair`/`disconnect` 也已实现（`apps/desktop/src-tauri/src/commands.rs:82-87`、`apps/desktop/src-tauri/src/commands.rs:116-129`）。（注：§6 第 69 行本身比 §3.11 少列 `reject_pair` 与 `disconnect`，是文档两处清单不一致，代码按 §3.11 的更全清单实现。） | 未开始 |
 | ST-09 | §6 第 70 行 Events 清单 | `apps/desktop/src-tauri/src/events.rs:24-31`、`apps/desktop/src/ipc/events.ts:23-37` | 已实现 | 6 个事件名与 §6 逐字一致（§6 把 `reconnecting` 写成 `session://disconnected/reconnecting`，代码按 §3.11 的 `session://reconnecting` 实现）；另加 §3.11 的 `session://reconnecting` 与 `perf://tick` 共 8 个，前后端事件名两两对齐。 | 未开始 |
 | ST-10 | §6 第 71 行：视频帧永远不经过 IPC | `apps/desktop/src-tauri/src/dto.rs:3-4`、`apps/desktop/src-tauri/src/events.rs:43-47` | 已实现 | 同 T-21：全部事件载荷都是控制面/统计面结构，无帧类型。 | 未开始 |
