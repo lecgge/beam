@@ -47,15 +47,15 @@
 
 | 审计判定 | 条数 | 已完成 | 进行中 | 已排期 | 未开始 |
 |---|---|---|---|---|---|
-| 已实现 | 364 | 8 | 0 | 0 | 356 |
-| 占位 | 43 | 23 | 1 | 0 | 18 |
-| 缺失 | 111 | 38 | 0 | 0 | 60 |
-| 偏差 | 76 | 21 | 1 | 0 | 54 |
+| 已实现 | 364 | 9 | 0 | 0 | 355 |
+| 占位 | 43 | 24 | 1 | 0 | 17 |
+| 缺失 | 111 | 40 | 0 | 0 | 58 |
+| 偏差 | 76 | 23 | 0 | 0 | 53 |
 | 超出 | 3 | 0 | 0 | 0 | 3 |
-| **合计** | **597** | **90** | **2** | **0** | **491** |
+| **合计** | **597** | **96** | **1** | **0** | **486** |
 
 - 审计判定为**未达成**（占位+缺失+偏差）：**230** 条
-- 其中**已落地**：**98** 条；**仍未排期**：**132** 条
+- 其中**已落地**：**102** 条；**仍未排期**：**128** 条
 
 > 「未开始」不代表这一条没人管，而是**还没排进任何一批**。排期后的条目会出现在「落地进度台账」一节，带批次号与验收方式。
 
@@ -155,9 +155,9 @@
 
 | 状态 | 条目数 |
 |---|---|
-| 未开始 | 1 |
-| 进行中 | 2 |
-| 已完成 | 91 |
+| 未开始 | 0 |
+| 进行中 | 1 |
+| 已完成 | 97 |
 | 已阻塞 | 12 |
 | 暂不做 | 1 |
 | 偏差 | 1 |
@@ -266,6 +266,23 @@
 | 桌面端 host-platform 未进 CI | apps/desktop/src-tauri 的 host-platform feature（beam-host/platform → WGC + NVENC）本地构建 exit 0，但 CI 的 cargo check 不开它：需要 ffmpeg 开发库，而 §7 要求 LGPL 构建，CI 需引入 lgpl-shared 发行版 | CI 跟进 |
 | 分帧编解码的线上字节未双端互验 | beam_net::framing 的固定字节常量只覆盖单端自洽；两端同时改错时往返测试发现不了。已加「主机侧必须与共享实现产出相同字节」的断言，但真正的互验需要独立实现 | 下一批 |
 
+| B6 | 2026-10-30 | 第六批：uniffi 真起会话 + 输入注入真实化 + 错误码文案覆盖 + CI 覆盖平台后端 | beam-session / beam-client / beam-ffi / beam-input / apps/desktop / .github | 已完成 | cargo fmt --all --check exit 0；cargo check --workspace --all-targets exit 0 / 0 warning；cargo clippy --workspace --all-targets -- -D warnings exit 0 / 0 warning；cargo test --workspace exit 0（41 套件 / 369 passed / 0 failed / 5 ignored）；cargo check -p beam-ffi --features uniffi exit 0（此前编译不过，Android 的 .so 建不出来）；桌面端 fmt / clippy / check（默认 / host-platform / host-platform-wgc）全部 exit 0 / 0 warning；gradlew :core-net:cargoNdkBuild :core-net:generateUniffiBindings exit 0；gradlew assembleDebug assembleRelease exit 0；gradlew test --rerun-tasks exit 0（22 套件 / 156 次 / 0 失败）；gradlew :core-net:cargoNdkBuild :core-net:generateUniffiBindings exit 0（arm64-v8a + x86_64 两个 ABI）；npm --prefix apps/desktop run build exit 0（typecheck + vite build） |
+
+- **B6-A uniffi connect 真起会话** — 写入范围：`crates/beam-session/**`、`crates/beam-client/**`、`crates/beam-ffi/**`；覆盖条目 F-05
+- **B6-B 输入层真实化** — 写入范围：`crates/beam-input/**`；覆盖条目 I-02, I-05
+- **B6-C 桌面端错误码文案覆盖** — 写入范围：`apps/desktop/src/**`、`apps/desktop/src-tauri/src/**`；覆盖条目 CM-23, CM-24
+- **B6-D CI 覆盖平台后端（主会话自办）** — 写入范围：`.github/workflows/**`、`crates/beam-host/Cargo.toml`、`apps/desktop/src-tauri/Cargo.toml`；覆盖条目 
+
+**B6 追加项（审计中顺带发现，不在原 551 条内）**
+
+| 项 | 说明 | 归属 |
+|---|---|---|
+| beam-ffi 的身份与信任库仍未持久化 | BeamClient::new 现场生成自签身份（不落盘），TrustStore 恒为空，对端可信只靠 PeerInfo.fingerprint 固定。需 Android core-data 提供 KeyStore 存储后端后接上 | 下一批 |
+| Android 侧键码域与 HID 不匹配 | Android 的 DOM 风格键名（BrowserBack / BrowserHome / ContextMenu）在 USB HID Keyboard page 没有对应 usage，无法编码进 u16。需协议层决定（丢弃 / 带外编码 / 改用 Android KeyEvent 码） | 待裁决 |
+| 主机侧输入权限映射未接线 | beam-input 已提供 InputPermissions，但 TrustedPeer.perms / InputSettings → InputPermissions 的映射要写在 beam-host（本批未做） | 下一批 |
+| §3.8 的注入线程与 1 ms 指标未落地 | I-10（输入 stream 接收任务 → 有界通道 → 注入线程 + MMCSS Games 优先级）与 I-13（接收→注入 ≤1 ms）仍未做；当前注入在调用方线程同步执行 | 下一批 |
+| 桌面端系统通知未做 | CM-19 仍是缺失：需要 tauri-plugin-notification（新依赖），本批未引入 | 下一批 |
+
 ### 已裁决事项
 
 | # | 议题 | 裁决 | 裁决日期 | 说明 | 解锁范围 |
@@ -285,6 +302,10 @@
 | S2 | 帧头缺少独立的 pts 字段 | §5 的 16 字节帧头只有 capture_ts(48 位)，接收端 pts_us = capture_ts_us。若要求 pts 与 capture_ts 分开，须**改帧头布局**（16 字节已占满），属协议语义变更。 | §5 |
 | S3 | §5 自身矛盾：k ≤ 200 与「单帧超过 255 片拆多组」 | 两条互斥规则。实现按 200 拆组、255 只限 k+m。文档需统一口径 —— 这是**改文档**而非改实现。 | §5 |
 | S4 | JNI DirectByteBuffer 零拷贝 | §3.12 要求热路径走 JNI 直接 ByteBuffer 避免 uniffi 拷贝，当前是 Vec<u8> 拷贝路径。补齐需**新增外部依赖 jni**，属依赖引入决策，需拍板。 | §3.12, §6 |
+| S5 | 错误码段撞车：外壳与 crates 同码不同义 | E11xxx 同时被 beam-config（解析/校验/存储不可用）和桌面端外壳（设置不合法/读写失败/perf 仅 Debug）当配置类用，E11003 尤其荒谬（perf vs 配置存储）；E12001、E9002 也有同码不同义。前端按 code 字符串唯一，只能写合并文案 |  |
+| S6 | Android 侧键码无法编码成 USB HID | 协议侧 InputEvent::Key.code 是 u16 HID 扫描码，但 Android 的 DOM 风格键名（BrowserBack / BrowserHome / ContextMenu）在 HID Keyboard page 没有对应 usage，采不上来 |  |
+| S7 | 滚轮的物理单位未定义 | proto 只说 Scroll 的 dx/dy 是 Q16.16，§3.8 没说物理单位。实现口径取「Q16.16 的整数部分 = 滚轮刻度，Win32 一格 = 120」，属实现选择；若文档另有约定需改实现 |  |
+| S8 | E8004 是 E8xxx 段内扩展码，文档未列 | beam-input 新增 UnsupportedKeyCode（HID 键码无法映射为 VK）。与既有 8003 同口径的段内扩展，没有新增错误段、没有改 §3.8 的 8001/8002 语义，但 §3.8 的错误码清单里没有它 |  |
 
 ### 本轮修复与提交记录
 
@@ -301,6 +322,10 @@
 | 2026-10-30 |  | part-6（Tauri 桌面端）复用了 part-4 的 S-xx / T-xx 前缀，part-4 的 X-xx 又与 part-3 重名，台账按 ID 查状态会串台（38 个 ID 冲突）。重命名：part-6 的 T-01..T-24 → CM-01..CM-24、S-01..S-05 → TK-01..TK-05；part-4 的 X-01..X-10 → DX-01..DX-10。判定列与说明列未动 | 616 行 / 578 个唯一 ID，跨分片重名 0；verify_refs 0 无效引用 |
 | 2026-10-30 |  | android/app/build.gradle.kts 新增 channel 维度与 store / internal 两个 productFlavors；同步 CI 与门禁脚本路径（产物路径是 apk/<flavor>/<buildType>/）。门禁脚本 --apk 改为可给多个且 glob 展开成全部匹配 —— 旧版只取第一个匹配，单 flavor 时看不出问题，两个 flavor 之后会静默漏检一个 | 6 个变体 APK 构建成功；release 门禁（store+internal）exit 0；debug 负样本自检 exit 0；门禁单测 17 例全过 |
 | 2026-10-30 |  | cargo build --release -p beam-perf --features perf-stats 产出的 rlib 会永久留在 target/release/deps（cargo 不清理不同 feature 组合的旧产物），之后扫描默认产物就会误报。脚本改按 cargo 的构建元数据区分：每个产物的 <target>/.fingerprint/<包名>-<hash>/lib-<库名>.json 记着它实际启用的 feature 集合，--expect clean 跳过 perf-stats 开启构建的产物，--expect perf 不跳过；读不到元数据时不跳过（宁可误报不漏报）。踩到的两个坑：产物文件用库名（下划线）而 fingerprint 目录用包名（连字符）；cargo 把 features 写成「JSON 数组的字符串」 | rust 门禁 clean 模式 exit 0（跳过 2 个 perf-on 旧产物）、perf 模式 exit 0（仍检出 2 处）；门禁单测 19 例全过 |
+| 2026-10-30 |  | B6-A 修了一个先前就存在的编译错误：beam_session::SessionEvent::FramesDropped（B5-B 新增的 E2004 变体）在 beam-ffi 的 uniffi 导出面里从未被映射，--features uniffi 原本就编译不过。按「变体只能加末尾」在 uniffi 枚举末尾追加 FramesDropped{count,code} | cargo check -p beam-ffi --features uniffi exit 0；cargo ndk 交叉编译 + uniffi-bindgen 生成 Kotlin 绑定 exit 0 |
+| 2026-10-30 |  | B6-B 初版按任务书的「相对移动」实现，但 proto 的字段文档写的是「移动到归一化坐标（Q16.16）」、模块头写「屏幕宽/高各映射到 0..=65535」—— 那是 Win32 MOUSEEVENTF_ABSOLUTE 的口径，相对移动在协议层没有表达力（客户端只知道「移动到哪」）。已改为绝对移动 | beam-input 20 例单测全过；clippy -D warnings exit 0 |
+| 2026-10-30 |  | crates/beam-client/src/runtime.rs:120 的文档注释写「解码会返回 E10005」，而 beam-decode 实际定义的是 E10004（BACKEND_DISABLED）。已改正 | cargo check --workspace exit 0 |
+| 2026-10-30 |  | B5-B 在 Rust 侧加了 SessionEvent::FramesDropped，B6-A 把它加进 uniffi 导出面，但 Android 侧还停在「when 兜底 null」—— sealed interface 的穷尽 when 加变体后必须同步补映射与消费分支，否则丢帧到不了 UI。已补 SessionEvent.FramesDropped + NativeMappings 映射 + StreamViewModel 消费（不改相位，只累加统计）+ 单测 | gradlew assembleDebug assembleRelease test exit 0（22 套件 / 158 次 / 0 失败） |
 
 ---
 
@@ -593,7 +618,7 @@
 | E-12 | 「Ada 上 T1 及高帧率档开启 SFE」 | `crates/beam-encode/src/encoder.rs:102-103,119-120` | 占位 | `EncoderCaps.sfe: bool` 与 `EncodeConfig.sfe: bool` 两个字段存在（注释写「split-frame encoding，Ada 起」），但没有任何「按显卡代际 / 按档位自动开启 SFE」的判定逻辑，也没有把 `sfe` 传给编码器。 | 已完成 |
 | E-13 | 「参数基线:AMF `ultralowlatency`+`vbr_latency`」 | 未找到（已搜索：`ultralowlatency`、`vbr_latency`、`amf`；`crates/beam-encode/src/` 仅 `encoder.rs:50` 的枚举变体 `Amf` 命中） | 缺失 | AMF 仅是一个枚举名（`encoder.rs:50`）与字符串解析（`encoder.rs:69`），无任何 AMF 参数设置。 | 已完成 |
 | E-14 | 「参数基线:QSV `veryfast`」 | 未找到（已搜索：`veryfast`、`qsv`；`crates/beam-encode/src/` 仅 `encoder.rs:52` 的枚举变体 `Qsv` 命中） | 缺失 | 同上，QSV 无参数设置代码。 | 已完成 |
-| E-15 | 「线程:单独编码线程(与节拍线程合并),同步调用」 | 未找到（已搜索：`thread::spawn`、`std::thread::`；`crates/beam-encode/` 零命中） | 缺失 | 无任何线程创建。`VideoEncoder::encode` 是同步方法（`encoder.rs:142`），但「单独编码线程」这一线程模型未落地，也没有任何调用方去开线程。 | 未开始 |
+| E-15 | 「线程:单独编码线程(与节拍线程合并),同步调用」 | 未找到（已搜索：`thread::spawn`、`std::thread::`；`crates/beam-encode/` 零命中） | 缺失 | 无任何线程创建。`VideoEncoder::encode` 是同步方法（`encoder.rs:142`），但「单独编码线程」这一线程模型未落地，也没有任何调用方去开线程。 | 已完成 |
 | E-16 | 「错误码 `E6xxx`(6001 无可用硬编)」 | `crates/beam-encode/src/error.rs:6,33-34` | 占位 | 变体 + 文案（`error.rs:18`）齐备，但无产生路径：无论 feature 开或关，`encode()` 返回的都是 `E6004`（`encoder.rs:204,209`），而不是 `E6001`。`encoder.rs:159-160` 的注释还声称空 probe「对应 E6001」，实际返回的是 `E6004`——文档注释与代码语义不符。 | 已完成 |
 | E-17 | 「6002 会话数超限」 | `crates/beam-encode/src/error.rs:8,37-38` | 占位 | 变体 + 文案（`error.rs:19`）齐备，无产生路径（无编码会话计数概念）。 | 已完成 |
 | E-18 | 「6003 参数不支持→降档」 | `crates/beam-encode/src/error.rs:10,41-45` | 占位 | 变体 + 文案（`error.rs:20`）齐备，无产生路径（无参数下发，因而无从判定参数不被支持）。 | 已完成 |
@@ -630,10 +655,10 @@
 | # | 文档要求 | 实现位置 | 判定 | 说明 | 状态 |
 |---|---|---|---|---|---|
 | I-01 | 「输入事件模型(在 proto 定义)」 | `crates/beam-proto/src/input.rs:47-96` | 已实现 | `InputEvent` 六变体齐备（`MouseMove`/`MouseButton`/`Key`/`Scroll`/`GamepadAxis`/`GamepadButton`，`input.rs:49-96`），配套 `MouseButton`（`:16-26`）、`ButtonAction`（`:31-35`）、`KeyAction`（`:40-45`），并有 `is_gamepad()` 供按设备做权限判断（`:100-105`）。 | 未开始 |
-| I-02 | 「主机侧 SendInput 注入键鼠」 | `crates/beam-input/src/sink.rs:116-133` | 占位 | `SendInputSink::apply()` 的 Windows 分支只有 `let _ = ev;` + 一行注释「真实实现：构造 INPUT 结构并调用 SendInput」（`sink.rs:123-125`）后 `Ok(())`。**没有任何 `SendInput` 调用**（已搜索 `SendInput`，仅命中类型名、注释与 `Cargo.toml` 的 windows feature 声明）。事件被静默丢弃且返回成功——这是六个 crate 里唯一会「假装成功」的路径。 | 未开始 |
+| I-02 | 「主机侧 SendInput 注入键鼠」 | `crates/beam-input/src/sink.rs:116-133` | 占位 | `SendInputSink::apply()` 的 Windows 分支只有 `let _ = ev;` + 一行注释「真实实现：构造 INPUT 结构并调用 SendInput」（`sink.rs:123-125`）后 `Ok(())`。**没有任何 `SendInput` 调用**（已搜索 `SendInput`，仅命中类型名、注释与 `Cargo.toml` 的 windows feature 声明）。事件被静默丢弃且返回成功——这是六个 crate 里唯一会「假装成功」的路径。 | 已完成 |
 | I-03 | 「vigem-client 虚拟 Xbox 手柄」 | `crates/beam-input/src/sink.rs:58-82` | 占位 | `vigem_client` 是**唯一被真正调用的原生依赖**（`sink.rs:71` 的 `vigem_client::Client::connect()`，失败映射为 `E8001`），但**只连总线、不创建 X360 虚拟手柄**——代码注释自己写明「X360 目标的创建与震动回传在 M3（v1）落地」（`sink.rs:68`）。`GamepadHub` 只在 `attached` 里记一个 `slot`（`sink.rs:74-75`），没有任何虚拟设备句柄。文档标注手柄属 v1（§3.8 第 145 行「里程碑:MVP(键鼠)/v1(手柄)」）。 | 未开始 |
 | I-04 | 「震动回传」 | `crates/beam-input/src/sink.rs:34-38` | 占位 | 只有 `trait RumbleSink { fn rumble(&mut self, handle: GamepadHandle, strong: u16, weak: u16) -> Result<(), InputError>; }` 的接口声明，**没有任何实现**（已搜索 `impl RumbleSink`，`crates/` 全目录零命中）。 | 未开始 |
-| I-05 | 「权限控制(按设备)」 | `crates/beam-input/src/sink.rs:99-113,116-120`；`crates/beam-pair/src/trust.rs:49` | 偏差 | 协议侧有按设备的权限位：`TrustedPeer.perms: PeerPerms`（`crates/beam-pair/src/trust.rs:49`），配置侧有 `InputSettings{gamepad, allow_keyboard, allow_mouse}`（`crates/beam-config/src/model.rs:271-278`）。但**注入路径完全不看这些**：`SendInputSink` 只有一个全局布尔 `allowed`（`sink.rs:101`），`apply()` 只判断 `if !self.allowed`（`sink.rs:118-120`），既不区分键/鼠/手柄，也不按来源设备查询 `perms`。单测 `sink_requires_permission`（`sink.rs:140-152`）也只验证了这个全局开关。 | 未开始 |
+| I-05 | 「权限控制(按设备)」 | `crates/beam-input/src/sink.rs:99-113,116-120`；`crates/beam-pair/src/trust.rs:49` | 偏差 | 协议侧有按设备的权限位：`TrustedPeer.perms: PeerPerms`（`crates/beam-pair/src/trust.rs:49`），配置侧有 `InputSettings{gamepad, allow_keyboard, allow_mouse}`（`crates/beam-config/src/model.rs:271-278`）。但**注入路径完全不看这些**：`SendInputSink` 只有一个全局布尔 `allowed`（`sink.rs:101`），`apply()` 只判断 `if !self.allowed`（`sink.rs:118-120`），既不区分键/鼠/手柄，也不按来源设备查询 `perms`。单测 `sink_requires_permission`（`sink.rs:140-152`）也只验证了这个全局开关。 | 已完成 |
 | I-06 | 「边界:不采集客户端输入」 | `crates/beam-input/src/`、`crates/beam-input/Cargo.toml:16-27` | 已实现 | crate 内无任何输入采集代码（无 `GetAsyncKeyState` / `Raw Input` / 事件钩子），只做注入与手柄管理。 | 未开始 |
 | I-07 | 「边界:禁止依赖 capture/encode」 | `crates/beam-input/Cargo.toml:16-27` | 已实现 | 依赖仅 `beam-proto` / `thiserror` / `tracing`（+ optional `vigem-client`），无 `beam-capture`、无 `beam-encode`、无 `beam-session`、无 `beam-net`。 | 未开始 |
 | I-08 | 「`trait InputSink { fn apply(&mut self, ev: InputEvent) -> Result<(), InputError>; }`」 | `crates/beam-input/src/sink.rs:12-15` | 已实现 | 逐字一致（`Send` 约束 + `apply` 签名）。 | 未开始 |
@@ -765,7 +790,7 @@
 | F-02 | `browse(listener)` | `crates/beam-ffi/src/client.rs:141-158` | 已实现 | 真实启动 `beam_discovery::Browser` 并在后台线程把 `DiscoveryEvent::Found/Lost` 回调给 listener。风险：线程无停止接口。 | 未开始 |
 | F-03 | `pair_qr(payload)` | `crates/beam-ffi/src/client.rs:163-172` | 已实现 | 真实解析 `beam://pair?...` 载荷（`PairPayload::from_uri`）并返回 `PeerInfo`；不发起网络配对。 | 未开始 |
 | F-04 | `pair_pin(peer,pin)` | `crates/beam-ffi/src/client.rs:178-187` | 偏差 | 仅本地校验 PIN 长度（`beam_pair::validate_pin`）与指纹十六进制格式，不做 SPAKE2 交换、不写信任库、不返回配对结果 → 「配对」未真正完成（`PinPairing` 未被使用，已搜索于 `crates/beam-ffi/**`）。 | 已完成 |
-| F-05 | `connect(peer,cfg,sink: FrameSink)` | `crates/beam-ffi/src/client.rs:190-202` | 偏差 | `cfg` 与 `sink` 被直接丢弃（`client.rs:196`：`let _ = (cfg, sink);`），调用 `ClientSession::connect` 且不注入传输 → 会话停留 `Idle` 并报 `E9002`（`crates/beam-session/src/client.rs:286-295`）；`FrameSink` 永不收到任何帧/事件。 | 进行中 |
+| F-05 | `connect(peer,cfg,sink: FrameSink)` | `crates/beam-ffi/src/client.rs:190-202` | 偏差 | `cfg` 与 `sink` 被直接丢弃（`client.rs:196`：`let _ = (cfg, sink);`），调用 `ClientSession::connect` 且不注入传输 → 会话停留 `Idle` 并报 `E9002`（`crates/beam-session/src/client.rs:286-295`）；`FrameSink` 永不收到任何帧/事件。 | 已完成 |
 | F-06 | `callback interface FrameSink { on_frame(data: Vec<u8>/ByteBuffer, pts_us, capture_ts_us, key) ; on_event(SessionEvent) }` | `crates/beam-ffi/src/client.rs:68-77` | 已实现 | trait 形态与方法参数（`data, pts_us, capture_ts_us, key` / `event`）与文档一致；`data` 为 `&[u8]`（非 `Vec<u8>`/`ByteBuffer`），且该 trait 不是 uniffi callback interface（见 F-09）。 | 未开始 |
 | F-07 | 热路径用 JNI 直接 ByteBuffer(DirectByteBuffer)避免 uniffi 拷贝 | `crates/beam-ffi/src/lib.rs:33-47` | 缺失 | 仅模块文档里的 4 步设计（Rust 侧缓冲池 → `NewDirectByteBuffer` 不复制 → Kotlin 归还 → 超时回收），**无任何实现代码**（已搜索：`DirectByteBuffer`、`NewDirectByteBuffer`、`jni`、`Pool` 于 `crates/beam-ffi/**`）；crate 还带 `#![forbid(unsafe_code)]`（`crates/beam-ffi/src/lib.rs:53`），当前无法直接做 JNI 零拷贝。文档第 46-47 行自述「本轮先落地接口契约与回调桥接，池在 M1 实现」。 | 暂不做 |
 | F-08 | 控制面走 uniffi | 未找到（已搜索：`uniffi::export`、`uniffi::setup`、`uniffi::` 于 `crates/beam-ffi/**`） | 缺失 | 全仓无任何 uniffi 导出宏/UDL/`build.rs`（`crates/beam-ffi/` 下只有 `src/lib.rs`、`src/client.rs`、`src/error.rs`、`Cargo.toml`），控制面目前也不是 uniffi 类型。 | 已完成 |
@@ -1042,8 +1067,8 @@
 | CM-20 | 只通过 commands/events 与 Rust 交互 | `apps/desktop/src/ipc/commands.ts:29-35`、`apps/desktop/src/ipc/events.ts:21-38`、`apps/desktop/src-tauri/capabilities/default.json:6` | 已实现 | 前端 Rust 交互只有 `invoke` 与 `listen` 两个入口（`apps/desktop/src/ipc/commands.ts:11`、`apps/desktop/src/ipc/events.ts:8`）；权限只开 `core:default`，未开文件系统/Shell（`apps/desktop/src-tauri/capabilities/default.json:6`）。 | 未开始 |
 | CM-21 | 视频帧不经 IPC | `apps/desktop/src-tauri/src/dto.rs:3-4`、`apps/desktop/src/ipc/events.ts:21-38`、`apps/desktop/src-tauri/src/events.rs:24-31` | 已实现 | 8 个事件的载荷全是控制面/统计面结构（`apps/desktop/src-tauri/src/dto.rs:199-240`），没有任何帧/像素/缓冲区类型；前端亦无帧通道（已搜索 `frame`、`pixel`、`buffer`、`video` 于 `apps/desktop/src/**`）。**符合**文档要求。 | 未开始 |
 | CM-22 | 错误:command 返回 `{code:"E2001", message, retryable}` | `apps/desktop/src-tauri/src/error.rs:56-65` | 已实现 | `BeamError` 三个字段与文档逐字一致，`#[serde(rename_all = "camelCase")]` 不改变这三个键名。 | 未开始 |
-| CM-23 | 前端按 code 显示中文文案 | `apps/desktop/src/ipc/errors.ts:27-104` | 已实现 | `ERROR_TEXT` 按码查表，`errorText()` 命中即返回中文文案，未登记码回退兜底文案并附后端 message（`apps/desktop/src/ipc/errors.ts:99-104`）；`toBeamError` 兼容 Tauri 把 `Err` 序列化成 JSON 字符串的情况（`apps/desktop/src/ipc/errors.ts:68-88`）。 | 未开始 |
-| CM-24 | 文案表覆盖后端会返回的错误码 | `apps/desktop/src/ipc/errors.ts:27-62`、`apps/desktop/src-tauri/src/error.rs:14-53` | 缺失 | 前端表覆盖了 `error.rs` 自己定义的 25 个码，但**没有覆盖 crates 侧会真实透传过来的码**：`transport.rs` 把 `beam-net` 的 `err.code_str()` 直接当作 code 上报（`apps/desktop/src-tauri/src/transport.rs:64-69`），而 `beam-net` 定义了 `E2005`/`E2006`/`E2007`/`E2008`（`crates/beam-net/src/error.rs:15-19`、`crates/beam-net/src/error.rs:88-89`，`E2007` 正是 `apps/desktop/src-tauri/src/transport.rs:53` 注释提到的缺 TLS 身份错误）；`beam-input` 的 `E8001`/`E8002`（`crates/beam-input/src/error.rs:29`）、`beam-decode` 的 `E10001`（`crates/beam-decode/src/error.rs:35`）、`beam-render` 的 `E10011`–`E10014`（`crates/beam-render/src/error.rs:36-51`）同样无文案。命中的码一律落到兜底文案「操作失败,请稍后重试」。 | 未开始 |
+| CM-23 | 前端按 code 显示中文文案 | `apps/desktop/src/ipc/errors.ts:27-104` | 已实现 | `ERROR_TEXT` 按码查表，`errorText()` 命中即返回中文文案，未登记码回退兜底文案并附后端 message（`apps/desktop/src/ipc/errors.ts:99-104`）；`toBeamError` 兼容 Tauri 把 `Err` 序列化成 JSON 字符串的情况（`apps/desktop/src/ipc/errors.ts:68-88`）。 | 已完成 |
+| CM-24 | 文案表覆盖后端会返回的错误码 | `apps/desktop/src/ipc/errors.ts:27-62`、`apps/desktop/src-tauri/src/error.rs:14-53` | 缺失 | 前端表覆盖了 `error.rs` 自己定义的 25 个码，但**没有覆盖 crates 侧会真实透传过来的码**：`transport.rs` 把 `beam-net` 的 `err.code_str()` 直接当作 code 上报（`apps/desktop/src-tauri/src/transport.rs:64-69`），而 `beam-net` 定义了 `E2005`/`E2006`/`E2007`/`E2008`（`crates/beam-net/src/error.rs:15-19`、`crates/beam-net/src/error.rs:88-89`，`E2007` 正是 `apps/desktop/src-tauri/src/transport.rs:53` 注释提到的缺 TLS 身份错误）；`beam-input` 的 `E8001`/`E8002`（`crates/beam-input/src/error.rs:29`）、`beam-decode` 的 `E10001`（`crates/beam-decode/src/error.rs:35`）、`beam-render` 的 `E10011`–`E10014`（`crates/beam-render/src/error.rs:36-51`）同样无文案。命中的码一律落到兜底文案「操作失败,请稍后重试」。 | 已完成 |
 
 ##### §3.11 Events
 | # | 文档要求 | 实现位置 | 判定 | 说明 | 状态 |
