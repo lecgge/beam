@@ -7,12 +7,22 @@
 //! 连接建立后客户端按 §4.1 时序发 `PairRequest` / `PairChallenge`，
 //! 配对完成后发 [`ControlMsg::Hello`]，收到 [`ControlMsg::HelloAck`]
 //! 才真正进入串流态——能力协商**真的跑一次**，不再只是状态机跳步。
+//!
+//! ## 首帧策略（§4.1「视频 datagram(首帧 IDR)」）
+//!
+//! 客户端收到的**第一帧**必须是关键帧。首帧不是关键帧时，
+//! 客户端发**一次** `RequestIdr` 让主机补一个 IDR（不重复发）。
+//!
+//! ## 丢帧上报（§3.2 **E2004**）
+//!
+//! 传输层统计到的过期帧由 [`Transport::take_dropped_frames`] 取出，
+//! 会上报成 [`SessionEvent::FramesDropped`]——**不**把会话打进 `Error` 态。
 
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use beam_proto::message::Hello;
-use beam_proto::{ControlMsg, Feedback, ProtocolVersion, StatsReport, StreamConfig};
+use beam_proto::{ControlMsg, EncodedFrame, Feedback, ProtocolVersion, StatsReport, StreamConfig};
 
 use crate::clock::duration_ms;
 use crate::control::{
@@ -75,20 +85,12 @@ impl std::fmt::Debug for ClientSessionConfig {
 }
 
 /// 客户端会话依赖。
+#[derive(Default)]
 pub struct ClientDeps {
     /// 解码 + 上屏。
     pub consumer: Option<Box<dyn FrameConsumer>>,
     /// 传输工厂。
     pub transport: Option<Box<dyn TransportFactory>>,
-}
-
-impl Default for ClientDeps {
-    fn default() -> Self {
-        Self {
-            consumer: None,
-            transport: None,
-        }
-    }
 }
 
 impl std::fmt::Debug for ClientDeps {
@@ -136,6 +138,10 @@ pub(crate) struct ClientRunner {
     handshake_started: bool,
     /// 是否已经发出 `Hello`。
     hello_sent: bool,
+    /// 是否已经收到过第一帧（§4.1「首帧 IDR」策略）。
+    first_frame_seen: bool,
+    /// 是否已经因为「首帧非 IDR」发出过一次 IDR 请求。
+    idr_requested: bool,
     /// 上一次统计上报时间戳。
     last_stats_ms: u64,
     /// 本端统计。
@@ -239,6 +245,32 @@ impl ClientRunner {
     /// 请求主机发 IDR（§4.1「重连后主机发 IDR」）。
     fn request_idr(&mut self) {
         self.send_control(ControlMsg::RequestIdr);
+    }
+
+    /// §4.1「视频 datagram(首帧 IDR)」：**首帧必须是关键帧**。
+    ///
+    /// 收到第一帧时若它不是关键帧，说明主机这一轮没有从 IDR 开始
+    /// （例如重连后补发的不是关键帧），解码器因此拿不到参考帧——
+    /// 客户端必须请求一次 IDR。
+    ///
+    /// 请求**只发一次**：首帧之后的帧不再重复触发（否则会刷请求）。
+    fn check_first_frame_is_idr(&mut self, frame: &EncodedFrame) {
+        if self.first_frame_seen {
+            return;
+        }
+        self.first_frame_seen = true;
+        if frame.is_key {
+            return;
+        }
+        if self.idr_requested {
+            return;
+        }
+        self.idr_requested = true;
+        tracing::warn!(
+            frame_id = frame.frame_id,
+            "首帧不是 IDR(§4.1 要求首帧 IDR),请求一次 IDR"
+        );
+        self.request_idr();
     }
 
     /// 发起握手：先配对，配对完成后发 `Hello`（§4.1）。
@@ -412,6 +444,8 @@ impl ClientRunner {
             match item {
                 Ok(frame) => {
                     self.on_data();
+                    // §4.1：首帧必须是 IDR；不是就请求一次。
+                    self.check_first_frame_is_idr(&frame);
                     let Some(consumer) = self.consumer.as_mut() else {
                         continue;
                     };
@@ -426,6 +460,24 @@ impl ClientRunner {
                 }
             }
         }
+    }
+
+    /// 把传输层统计到的丢帧（§3.2 **E2004**）上报成会话事件。
+    ///
+    /// 丢帧**不**把会话打进 `Error` 态：它只是一条统计事件（§3.11），
+    /// 上层据此提示「画面有丢帧」即可。
+    fn report_dropped_frames(&mut self) {
+        let count = match self.transport.as_mut() {
+            Some(t) => t.take_dropped_frames(),
+            None => 0,
+        };
+        if count == 0 {
+            return;
+        }
+        self.emit(SessionEvent::FramesDropped {
+            count,
+            code: crate::event::FRAME_EXPIRED_CODE,
+        });
     }
 
     /// 定期回报 `Feedback`（§4.1「输入 stream / Feedback」）。
@@ -510,6 +562,7 @@ impl SessionRunner for ClientRunner {
         self.check_deadlines();
         self.drain_control();
         self.pump_frames();
+        self.report_dropped_frames();
         self.maybe_send_feedback();
         self.flush_control();
     }
@@ -603,6 +656,8 @@ impl ClientSession {
             reconnect_since_ms: None,
             handshake_started: false,
             hello_sent: false,
+            first_frame_seen: false,
+            idr_requested: false,
             last_stats_ms: now,
             stats: StatsReport::default(),
         };
@@ -646,6 +701,8 @@ mod tests {
         inbound: std::collections::VecDeque<Result<ControlMsg, SessionError>>,
         sent: std::sync::Arc<std::sync::Mutex<Vec<ControlMsg>>>,
         frames: Vec<EncodedFrame>,
+        /// 待上报的丢帧数（§3.2 E2004）。
+        dropped: u32,
     }
 
     impl FakeTransport {
@@ -654,6 +711,7 @@ mod tests {
                 inbound: std::collections::VecDeque::new(),
                 sent: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
                 frames: Vec::new(),
+                dropped: 0,
             }
         }
     }
@@ -684,6 +742,10 @@ mod tests {
             } else {
                 Some(Ok(self.frames.remove(0)))
             }
+        }
+
+        fn take_dropped_frames(&mut self) -> u32 {
+            std::mem::take(&mut self.dropped)
         }
     }
 
@@ -764,6 +826,24 @@ mod tests {
                 features: 0,
             },
         }
+    }
+
+    /// 造一条画面帧。
+    fn frame(is_key: bool) -> EncodedFrame {
+        EncodedFrame {
+            frame_id: 1,
+            pts_us: 0,
+            capture_ts_us: 0,
+            is_key,
+            slices: vec![bytes::Bytes::from_static(b"x")],
+        }
+    }
+
+    /// 统计发出的控制消息里有多少条 IDR 请求。
+    fn idr_request_count(sent: &[ControlMsg]) -> usize {
+        sent.iter()
+            .filter(|m| matches!(m, ControlMsg::RequestIdr))
+            .count()
     }
 
     #[test]
@@ -912,5 +992,72 @@ mod tests {
             "stop 必须发 Bye"
         );
         assert_eq!(handle.state(), SessionState::Closed);
+    }
+
+    /// §4.1「视频 datagram(首帧 IDR)」：首帧不是关键帧 → 请求一次 IDR。
+    #[test]
+    fn client_requests_idr_once_when_first_frame_is_not_key() {
+        let mut transport = FakeTransport::new();
+        transport.inbound.push_back(Ok(hello_ack()));
+        // 一串「首帧非 IDR」的帧。
+        transport.frames.push(frame(false));
+        transport.frames.push(frame(false));
+        transport.frames.push(frame(false));
+        let (handle, sent) = session_with(transport);
+
+        handle.pump().expect("应当能收控制消息与帧");
+        assert_eq!(handle.state(), SessionState::Streaming);
+
+        let log = sent.lock().expect("锁").clone();
+        assert_eq!(
+            idr_request_count(&log),
+            1,
+            "首帧非 IDR 时必须请求一次 IDR,且不重复请求"
+        );
+    }
+
+    /// 首帧就是 IDR → 不发 IDR 请求（后续帧也不再触发）。
+    #[test]
+    fn client_does_not_request_idr_when_first_frame_is_key() {
+        let mut transport = FakeTransport::new();
+        transport.inbound.push_back(Ok(hello_ack()));
+        transport.frames.push(frame(true));
+        // 后续帧不是关键帧也不该再请求（首帧策略只看第一帧）。
+        transport.frames.push(frame(false));
+        let (handle, sent) = session_with(transport);
+
+        handle.pump().expect("应当能收控制消息与帧");
+        assert_eq!(handle.state(), SessionState::Streaming);
+
+        let log = sent.lock().expect("锁").clone();
+        assert_eq!(idr_request_count(&log), 0, "首帧是 IDR 时不得重复请求 IDR");
+    }
+
+    /// §3.2 E2004：丢帧上报成事件,但**不**把会话打进 Error 态。
+    #[test]
+    fn client_reports_dropped_frames_without_failing() {
+        let mut transport = FakeTransport::new();
+        transport.inbound.push_back(Ok(hello_ack()));
+        transport.dropped = 4;
+        let (handle, _sent) = session_with(transport);
+        let mut events = handle.events();
+
+        handle.pump().expect("应当能收控制消息");
+
+        let mut saw = false;
+        while let Some(ev) = futures::executor::block_on(events.next()) {
+            if let SessionEvent::FramesDropped { count, code } = ev {
+                assert_eq!(count, 4, "丢帧数必须原样上报");
+                assert_eq!(code, crate::event::FRAME_EXPIRED_CODE);
+                saw = true;
+                break;
+            }
+        }
+        assert!(saw, "必须上报丢帧事件");
+        assert_eq!(
+            handle.state(),
+            SessionState::Streaming,
+            "丢帧不是致命错误,会话状态不得改变"
+        );
     }
 }

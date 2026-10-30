@@ -165,6 +165,44 @@ impl HostSessionHandle {
     }
 }
 
+/// 按 feature 选一条主机侧画面流水线（§3.9）。
+///
+/// - **`platform` feature 开** → WGC 抓屏（§3.5）+ NVENC 硬编（§3.6）的
+///   真后端流水线（[`crate::platform::PlatformPipeline`]）；
+/// - **关** → [`crate::adapters::EmptyPipeline`]：控制面、能力协商与
+///   配对闸门照常工作，但**一帧画面都不产出**（不伪造）。
+///
+/// 返回值同时给出流水线的**真实错误槽**：[`crate::runtime::HostSessionHandle::pump`]
+/// 会从这里把真实错误冒泡给调用方（§3.9）。
+///
+/// 为什么需要这个函数：桌面端（`apps/desktop`）按 §4 **不能**直接依赖
+/// 平台 crate，只能经由本 crate 拿到流水线；「有没有平台后端」这件事
+/// 由本 crate 的 feature 决定，调用方不需要（也不该）知道细节。
+pub fn default_frame_pipeline(
+    cfg: &HostConfig,
+) -> (
+    Box<dyn beam_session::FramePipeline>,
+    crate::adapters::PipelineErrors,
+) {
+    #[cfg(feature = "platform")]
+    {
+        let pipeline = crate::platform::PlatformPipeline::new(
+            cfg.capture.clone(),
+            cfg.encode.clone(),
+            (u32::from(cfg.stream.width), u32::from(cfg.stream.height)),
+        );
+        let errors = pipeline.errors();
+        (Box::new(pipeline), errors)
+    }
+    #[cfg(not(feature = "platform"))]
+    {
+        let _ = cfg;
+        let pipeline = crate::adapters::EmptyPipeline::new();
+        let errors = pipeline.errors();
+        (Box::new(pipeline), errors)
+    }
+}
+
 /// 主机运行时：把平台实现与会话层组装起来。
 #[derive(Debug)]
 pub struct HostRuntime {
@@ -204,18 +242,18 @@ impl HostRuntime {
     ///
     /// 返回的 [`HostSessionHandle`] 带错误槽：调用方用
     /// [`HostSessionHandle::pump`] 推进会话时，真实的编码错误会冒泡出来。
-    pub fn start_session<C, E, S, I>(
-        &self,
-        capture: C,
-        encoder: E,
-        sender: S,
-        input: Option<I>,
-    ) -> HostSessionHandle
+    ///
+    /// ## 为什么没有 `input` 参数
+    ///
+    /// 输入事件走 §5 的**输入单向流**（客户端 → 主机），必须有一条传输连接
+    /// 才能接收；本方法没有连接（纯内存组装），因此不接输入。
+    /// 需要输入注入的主机路径请用 [`HostRuntime::start_quic_session`]：
+    /// 它会自己起输入泵（§3.8「输入 stream 接收任务 → 有界通道 → 注入线程」）。
+    pub fn start_session<C, E, S>(&self, capture: C, encoder: E, sender: S) -> HostSessionHandle
     where
         C: CaptureSource + Send + 'static,
         E: VideoEncoder + Send + 'static,
         S: NetVideoSenderTrait + Send + 'static,
-        I: PlatformInputSink + Send + 'static,
     {
         let pipeline = CaptureEncodePipeline::with_frame_size(
             capture,
@@ -230,8 +268,6 @@ impl HostRuntime {
         let deps = HostDeps {
             pipeline: Box::new(pipeline),
             sender: Box::new(NetVideoSender::new(sender)),
-            input: input
-                .map(|i| Box::new(InputAdapter::new(i)) as Box<dyn beam_session::InputSink>),
         };
         let session_cfg = HostSessionConfig {
             stream: self.cfg.stream.clone(),
@@ -276,20 +312,43 @@ impl HostRuntime {
         E: VideoEncoder + Send + 'static,
         I: PlatformInputSink + Send + 'static,
     {
+        let pipeline = CaptureEncodePipeline::new(capture, encoder, self.cfg.capture.clone());
+        // 与 `start_session` 同法：先把共享错误槽取出来，再把流水线移进 `HostDeps`。
+        let errors = pipeline.errors();
+        self.start_quic_session_with_pipeline(conn, Box::new(pipeline), errors, input)
+            .await
+    }
+
+    /// 用一条**已经建立**的 QUIC 连接启动主机会话，并注入**已经组装好的**流水线。
+    ///
+    /// 与 [`HostRuntime::start_quic_session`] 的区别：后者用
+    /// `CaptureSource` / `VideoEncoder` 两个平台 trait 现搭流水线，
+    /// 因此要求它们满足 `Send`；本方法接受**已经组装好**的
+    /// [`beam_session::FramePipeline`]，因此可以用「抓屏与编码在专用 OS 线程上」
+    /// 的实现（§6）——那种实现里的编码器**不是 `Send`**（ffmpeg 裸指针）。
+    ///
+    /// `errors` 是流水线共享的真实错误槽：调用方拿到的
+    /// [`HostSessionHandle`] 在 [`HostSessionHandle::pump`] 时会把里面的错误冒泡出来。
+    pub async fn start_quic_session_with_pipeline<I>(
+        &self,
+        conn: beam_net::Conn,
+        pipeline: Box<dyn beam_session::FramePipeline>,
+        errors: PipelineErrors,
+        input: Option<I>,
+    ) -> Result<HostSessionHandle, HostError>
+    where
+        I: PlatformInputSink + Send + 'static,
+    {
         let transport = HostTransport::accept(conn.clone()).await.map_err(|e| {
             HostError::TransportUnavailable {
                 reason: format!("{e}"),
             }
         })?;
 
-        let pipeline = CaptureEncodePipeline::new(capture, encoder, self.cfg.capture.clone());
-        // 与 `start_session` 同法：先把共享错误槽取出来，再把流水线移进 `HostDeps`。
-        let errors = pipeline.errors();
         let deps = HostDeps {
-            pipeline: Box::new(pipeline),
+            pipeline,
             sender: Box::new(NetVideoSender::new(conn.clone())),
-            // 输入由本 crate 的输入泵驱动（见下），不交给会话状态机。
-            input: None,
+            // 输入由本 crate 的输入泵驱动（见下），会话层不持有注入器。
         };
         let session_cfg = HostSessionConfig {
             stream: self.cfg.stream.clone(),
@@ -302,6 +361,14 @@ impl HostRuntime {
             rate: None,
         };
         let session = HostSession::start_with_control(session_cfg, deps, Some(control));
+
+        // §4.1 时序：QUIC 连接已经建立 → `Connecting` → `Connected`（进入能力协商）。
+        //
+        // 这一步**不能省**：§3.9 的转移表里 `Idle → Streaming` 是非法转移，
+        // 主机必须先走到 `Negotiating`，收到客户端的 `Hello` 才能进 `Streaming`。
+        // 不做这一步的话协商会一直失败（`E9001` 非法转移）。
+        let _ = session.apply(SessionInput::Connecting);
+        let _ = session.apply(SessionInput::Connected);
 
         // 输入泵：§5 输入 stream（客户端 → 主机）。
         let input_task = input.map(|sink| {
@@ -385,12 +452,13 @@ mod tests {
     #[test]
     fn runtime_starts_session() {
         let runtime = HostRuntime::new(HostConfig::default());
-        let handle = runtime.start_session(FakeCapture, FakeEncoder, FakeSender, Some(FakeInput));
+        let handle = runtime.start_session(FakeCapture, FakeEncoder, FakeSender);
         assert_eq!(
             handle.state(),
             beam_session::SessionState::Idle,
             "刚创建时应处于 Idle"
         );
+        let _ = FakeInput;
     }
 
     #[test]

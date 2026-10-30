@@ -55,7 +55,7 @@ fn main() {
             tray::sync_menu_state(app.handle(), &status);
             Ok(())
         })
-        .on_menu_event(|app, event| tray::handle_menu_event(app, event))
+        .on_menu_event(tray::handle_menu_event)
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 // §3.11:主窗口关闭后收进托盘,托盘菜单继续提供「显示主窗口 / 退出」。

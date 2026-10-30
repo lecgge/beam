@@ -29,6 +29,19 @@ beam-crates = [
     "dep:beam-proto",
 ]
 
+# host-platform:让「桌面端作为主机」真的出画面。
+#
+# §4 规定平台 crate(capture/encode/input/decode/render)只能被 host/client 引用,
+# 桌面端**不能**直接依赖它们 —— 因此真实后端由 beam-host 在 crate 内部构造
+# (`beam-host/platform` → WGC 抓屏 + NVENC 硬编),桌面端只调 beam-host 的 API。
+#
+# 不开这个 feature 时:主机的 QUIC 监听、配对闸门、人工确认、控制面
+# **照常工作**,只是画面通道不产出帧(beam-host 用 EmptyPipeline)。
+#
+# 打开它需要 ffmpeg 开发库(windows-capture 是纯 Rust,无额外依赖),
+# 因此 CI 的默认 `cargo check` 不开这个 feature。
+host-platform = ["beam-crates", "beam-host/platform"]
+
 [build-dependencies]
 tauri-build = { version = "~2.6.3", features = [] }
 

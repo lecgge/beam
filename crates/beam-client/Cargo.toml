@@ -18,8 +18,9 @@ beam-net = { workspace = true }
 beam-pair = { workspace = true }
 beam-discovery = { workspace = true }
 beam-config = { workspace = true }
-# `beam_proto::encode` 的输出缓冲类型（§5 线上格式）。
-bytes = { workspace = true }
+# 分帧编解码统一由 beam-net::framing 提供（§5 线上格式的唯一真值来源），
+# 本 crate 不再自带实现，因此不再直接依赖 bytes。
+# `futures` 只用于 `block_on` 与无环 waker。
 futures = { workspace = true }
 # §6「tokio 只用于网络与控制」：控制 / 输入流的读写原语
 # （`tokio::io::AsyncRead` / `AsyncWrite`，quinn 直接实现了这两个 trait）。

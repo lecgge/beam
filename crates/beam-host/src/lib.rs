@@ -29,6 +29,24 @@
 //! 画面走 QUIC datagram。它们原本寄居在 `beam-client`（职责倒挂），
 //! 本 crate 才是它们的 rightful 归属。
 //!
+//! ## 平台会话与监听编排（§3.9）
+//!
+//! - [`HostListener`]：QUIC 监听（§3.2），把「监听 → 接受连接 → 起会话」串起来；
+//! - [`HostRuntime::start_platform_session`]（`platform` feature）：
+//!   在本 crate **内部**构造 WGC 抓屏源（§3.5）与 NVENC 编码器（§3.6），
+//!   交给 [`HostRuntime::start_quic_session`]。
+//!
+//! `platform` feature 默认关闭；打开它会把 `beam-capture` 的 `wgc`
+//! 与 `beam-encode` 的 `ffmpeg` 两个后端传递进来。
+//! 桌面端因此**不需要**直接依赖平台 crate（§4）。
+//!
+//! ## 主机侧配对的安全环节（§3.3 / 产品方案 §8）
+//!
+//! [`HostTrustGate`] 是主机侧的信任闸门：未写入信任库的对端**一律拒绝握手**
+//! （但指纹被记住），用户人工确认后写库，下一次握手才放行。
+//! 这是产品方案第 102 行「主机端必须弹窗人工确认后才会写入信任库」
+//! 在代码里的落点，**不可省略**。
+//!
 //! ## 决策备注
 //!
 //! **D5（跨 crate 的 D3D11 设备契约）**：设备由**本 crate（串流编排层，L3）**
@@ -46,8 +64,15 @@
 
 pub mod adapters;
 pub mod net;
+pub mod pairing;
+/// 平台会话工厂与监听编排（需要 `platform` feature：WGC + NVENC）。
+#[cfg(feature = "platform")]
+pub mod platform;
 pub mod runtime;
 
-pub use adapters::{CaptureEncodePipeline, InputAdapter, NetVideoSender};
-pub use net::{HostInput, HostTransport};
-pub use runtime::{HostConfig, HostError, HostRuntime};
+pub use adapters::{
+    CaptureEncodePipeline, EmptyPipeline, InputAdapter, NetVideoSender, NoopInputSink,
+};
+pub use net::{HostInput, HostListener, HostTransport};
+pub use pairing::{HostTrustGate, ObservedPeer};
+pub use runtime::{default_frame_pipeline, HostConfig, HostError, HostRuntime, HostSessionHandle};

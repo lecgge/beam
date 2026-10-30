@@ -8,7 +8,17 @@ use beam_proto::{ControlMsg, EncodedFrame, Feedback, InputEvent, StatsReport, St
 
 use crate::error::SessionError;
 
+/// 帧过期丢弃的原因码（§3.2 **E2004**：帧过期丢弃）。
+///
+/// 丢帧**不是**会话错误：它不改变会话状态，只作为统计事件上报（§3.11）。
+pub const FRAME_EXPIRED_CODE: u16 = 2004;
+
 /// 会话事件（§6：`session` 汇总为 `SessionEvent::Error{code, retryable}`）。
+///
+/// ## 变体顺序
+///
+/// **新增变体只能加在末尾**（与 `beam-perf` 的 `Stage` 同样的约束）：
+/// 变体序号一旦被某处按序号引用就不能重排，否则线上含义会漂移。
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionEvent {
     /// 状态变化。
@@ -37,10 +47,27 @@ pub enum SessionEvent {
     },
     /// 会话结束。
     Closed,
+    /// 丢帧（§3.2 **E2004**：帧过期丢弃）。
+    ///
+    /// 与 [`SessionEvent::Error`] 的区别：**丢帧不是会话错误**。
+    /// 它既不会把会话打进 `Error` 态，也不会让会话结束——
+    /// 上层只把它当成一条统计 / 提示（§3.11）。
+    ///
+    /// 由客户端会话在读到传输层统计到的过期帧时发出（见
+    /// [`Transport::take_dropped_frames`]）。
+    FramesDropped {
+        /// 本次丢弃的帧数。
+        count: u32,
+        /// 原因码（§3.2 **E2004** = [`FRAME_EXPIRED_CODE`]）。
+        code: u16,
+    },
 }
 
 impl SessionEvent {
-    /// 该事件的错误码（没有则 `None`）。
+    /// 该事件的**会话错误码**；非错误事件（例如丢帧）返回 `None`。
+    ///
+    /// [`SessionEvent::FramesDropped`] 自带原因码，但它不是会话错误，
+    /// 因此这里返回 `None`——避免上层把「丢帧」误当成「会话出错」。
     pub fn code(&self) -> Option<u16> {
         match self {
             SessionEvent::Error { code, .. } => Some(*code),
@@ -109,6 +136,14 @@ pub trait FrameConsumer: Send {
 }
 
 /// 输入注入器（§3.8 `InputSink` 的会话侧镜像）。
+///
+/// ## 归属：输入注入归 **beam-host**
+///
+/// 输入事件走 §5 的**输入单向流**（客户端 → 主机），由 beam-host 的输入任务
+/// （§3.8「输入 stream 接收任务 → 有界通道 → 注入线程」）接收并注入平台。
+/// 本 trait 只是会话层给出的**类型边界**：beam-host 的适配器实现它，
+/// `beam-session` 自己既不持有也不调用它——会话层没有输入字段
+/// （`HostDeps` 里没有 `input`），因此不存在「两处都注入」的可能。
 pub trait InputSink: Send {
     /// 注入一个输入事件。
     fn apply(&mut self, ev: InputEvent) -> Result<(), SessionError>;
@@ -154,6 +189,13 @@ pub trait Transport: ControlChannel {
     fn send_input(&mut self, ev: InputEvent) -> Result<(), SessionError>;
     /// 接收下一帧画面；`None` 表示当前没有新帧。
     fn recv_frame(&mut self) -> Option<Result<EncodedFrame, SessionError>>;
+    /// 取走自上次调用以来被丢弃的帧数（§3.2 **E2004**：帧过期丢弃）。
+    ///
+    /// 默认实现返回 `0`（没有丢帧统计的传输实现）。
+    /// 会话层据此发出 [`SessionEvent::FramesDropped`]——丢帧不改变会话状态。
+    fn take_dropped_frames(&mut self) -> u32 {
+        0
+    }
 }
 
 /// 传输工厂（由 host / client 层注入 beam-net 的连接逻辑）。
@@ -174,5 +216,16 @@ mod tests {
         };
         assert_eq!(ev.code(), Some(9001));
         assert_eq!(SessionEvent::Closed.code(), None);
+    }
+
+    #[test]
+    fn frames_dropped_is_not_a_session_error() {
+        let ev = SessionEvent::FramesDropped {
+            count: 3,
+            code: FRAME_EXPIRED_CODE,
+        };
+        assert_eq!(ev.code(), None, "丢帧不是会话错误,不能被当成 Error 处理");
+        assert_eq!(FRAME_EXPIRED_CODE, 2004, "E2004 的码值必须稳定");
+        assert_eq!(ev, ev.clone(), "事件必须可克隆可比较");
     }
 }

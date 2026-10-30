@@ -17,22 +17,40 @@
 //! （负载自带 1 字节消息族标签，由 `beam_proto::encode` 产生）。
 //! 这个长度前缀是实现约定，§5 未规定。
 //!
+//! ## 分帧编解码的唯一实现
+//!
 //! §4 的分层规则不允许 L3 的 crate 之间横向依赖（`host` 与 `client` 同层），
-//! 因此这段分帧编解码在两端各存一份，**格式必须保持一致**。
+//! 所以这段分帧编解码**曾经**在两端各存一份 —— 改了一边忘了另一边，
+//! 线上直接不通且极难发现。
+//!
+//! 现在它收敛到了 [`beam_net::framing`]（`beam-net` 是 L2 网络层，
+//! `beam-host` 与 `beam-client` 都依赖它，**不构成** L3 横向依赖）。
+//! 本模块只调用 [`beam_net::framing`] 的 API，**不再**自己实现分帧。
 
+use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use beam_proto::{ControlMsg, EncodedFrame, InputEvent, Message};
+use beam_net::framing::{decode_payload, encode_frame, FrameDecoder};
+use beam_pair::PeerVerifier;
+use beam_proto::{ControlMsg, EncodedFrame, InputEvent};
 use beam_session::{ControlChannel, SessionError};
-use bytes::BytesMut;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 
-/// 线上帧的长度前缀长度（4 字节大端）。
-const FRAME_LEN_PREFIX: usize = 4;
+use crate::runtime::HostError;
 
-/// 单帧上限（防御性上限；控制消息与输入事件都很小）。
-const MAX_FRAME_LEN: usize = 64 * 1024;
+/// 把网络层错误映射成本层的传输错误。
+///
+/// **错误码保持不变**：分帧失败在本层一直报 `SessionError::TransportFailed`
+/// （E9005），改用 `beam_net::framing` 之后底层错误是 E2005，
+/// 但对外表现仍然是 E9005 —— 收敛的是**实现**，不是**对外语义**。
+fn framing_err(err: beam_net::NetError) -> SessionError {
+    SessionError::TransportFailed {
+        reason: format!("{}: {}", err.code_str(), err.text()),
+    }
+}
 
 /// 待发送字节缓冲（写侧）。
 ///
@@ -68,49 +86,6 @@ impl OutBuf {
     fn is_empty(&self) -> bool {
         self.pos >= self.data.len()
     }
-}
-
-/// 增量解码器：从字节流里切出完整帧。
-#[derive(Debug, Default)]
-struct FrameDecoder {
-    buf: Vec<u8>,
-}
-
-impl FrameDecoder {
-    fn push(&mut self, data: &[u8]) {
-        self.buf.extend_from_slice(data);
-    }
-
-    /// 取出一条完整帧；数据不够时返回 `Ok(None)`。
-    fn next_frame(&mut self) -> Result<Option<Vec<u8>>, SessionError> {
-        if self.buf.len() < FRAME_LEN_PREFIX {
-            return Ok(None);
-        }
-        let len = u32::from_be_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]]) as usize;
-        if len > MAX_FRAME_LEN {
-            return Err(SessionError::TransportFailed {
-                reason: format!("线上帧长度超限({len} 字节)"),
-            });
-        }
-        if self.buf.len() < FRAME_LEN_PREFIX + len {
-            return Ok(None);
-        }
-        let frame = self.buf[FRAME_LEN_PREFIX..FRAME_LEN_PREFIX + len].to_vec();
-        self.buf.drain(..FRAME_LEN_PREFIX + len);
-        Ok(Some(frame))
-    }
-}
-
-/// 把一条线上消息编码成「4 字节大端长度 + 负载」。
-fn encode_frame<M: Message>(msg: &M) -> Result<Vec<u8>, SessionError> {
-    let mut buf = BytesMut::new();
-    beam_proto::encode(msg, &mut buf).map_err(|e| SessionError::TransportFailed {
-        reason: format!("编码失败: {e}"),
-    })?;
-    let mut out = Vec::with_capacity(FRAME_LEN_PREFIX + buf.len());
-    out.extend_from_slice(&(buf.len() as u32).to_be_bytes());
-    out.extend_from_slice(&buf);
-    Ok(out)
 }
 
 /// 非阻塞写：把待发字节尽量写进流里。
@@ -201,14 +176,9 @@ impl HostTransport {
     /// 取出一条已经完整的控制帧并解码。
     fn take_control_frame(&mut self) -> Option<Result<ControlMsg, SessionError>> {
         match self.ctrl_in.next_frame() {
-            Ok(Some(frame)) => Some(match beam_proto::decode_as::<ControlMsg>(&frame) {
-                Ok(msg) => Ok(msg),
-                Err(e) => Err(SessionError::TransportFailed {
-                    reason: format!("解码控制消息失败: {e}"),
-                }),
-            }),
+            Ok(Some(frame)) => Some(decode_payload::<ControlMsg>(&frame).map_err(framing_err)),
             Ok(None) => None,
-            Err(e) => Some(Err(e)),
+            Err(e) => Some(Err(framing_err(e))),
         }
     }
 }
@@ -221,7 +191,7 @@ impl ControlChannel for HostTransport {
                 reason: reason.clone(),
             });
         }
-        let frame = encode_frame(&msg)?;
+        let frame = encode_frame(&msg).map_err(framing_err)?;
         self.ctrl_out.push(&frame);
         flush_stream(&mut self.ctrl_out, &mut *self.ctrl_send)
     }
@@ -277,6 +247,88 @@ impl beam_net::VideoSender for HostTransport {
     /// 发一帧画面（QUIC datagram，§5）。
     fn send_frame(&self, f: EncodedFrame) -> Result<(), beam_net::NetError> {
         self.conn.send_frame(f)
+    }
+}
+
+/// 主机侧 QUIC 监听器（§3.2 `NetEndpoint::listen`）。
+///
+/// ## 为什么在编排层
+///
+/// §3.9 的主机运行时负责「listen → accept → start_quic_session」这条链路：
+/// 网络层只提供「监听」与「接受一条连接」两个原语，
+/// 把它们和「用这条连接起一个主机会话」串起来是**编排层**的事。
+///
+/// 调用方拿到 [`crate::runtime::HostSessionHandle`] 后自己 `pump()`，
+/// 流水线里的真实错误由 `pump()` 冒泡（§3.9 / E6005 那套机制）。
+pub struct HostListener {
+    endpoint: beam_net::NetEndpoint,
+    /// 是否已被 [`HostListener::close`] 关闭。
+    closed: AtomicBool,
+}
+
+impl std::fmt::Debug for HostListener {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostListener")
+            .field("local_addr", &self.endpoint.local_addr().ok())
+            .field("closed", &self.closed.load(Ordering::Relaxed))
+            .finish()
+    }
+}
+
+impl HostListener {
+    /// 开始监听（§3.2）。
+    ///
+    /// `cfg.identity` 必须带本机证书与私钥（§3.3 自签身份），
+    /// 否则返回 `E2007`；双向 TLS 校验由 `verifier` 承担
+    /// （主机侧用 [`crate::pairing::HostTrustGate`]，见产品方案 §8）。
+    pub async fn listen(
+        cfg: beam_net::NetConfig,
+        verifier: Arc<dyn PeerVerifier>,
+    ) -> Result<Self, HostError> {
+        let endpoint = beam_net::NetEndpoint::listen(cfg, verifier)
+            .await
+            .map_err(|e| HostError::TransportUnavailable {
+                reason: format!("{}: {}", e.code_str(), e.text()),
+            })?;
+        Ok(Self {
+            endpoint,
+            closed: AtomicBool::new(false),
+        })
+    }
+
+    /// 本地监听地址（端口为 0 时由系统分配，真实端口从这里读）。
+    pub fn local_addr(&self) -> Result<SocketAddr, HostError> {
+        self.endpoint
+            .local_addr()
+            .map_err(|e| HostError::TransportUnavailable {
+                reason: format!("{}: {}", e.code_str(), e.text()),
+            })
+    }
+
+    /// 接受一条客户端连接。
+    ///
+    /// **单次握手失败不算监听失败**：未信任对端的握手会被
+    /// [`crate::pairing::HostTrustGate`] 故意拒绝，这时返回 `Err`，
+    /// 调用方应当**继续接受**而不是退出循环。
+    /// 只有监听被 [`HostListener::close`] 关掉时才会持续失败。
+    pub async fn accept(&self) -> Result<beam_net::Conn, HostError> {
+        self.endpoint
+            .accept()
+            .await
+            .map_err(|e| HostError::TransportUnavailable {
+                reason: format!("{}: {}", e.code_str(), e.text()),
+            })
+    }
+
+    /// 监听是否已被关闭。
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Relaxed)
+    }
+
+    /// 关闭监听（§3.11 `stop_hosting`）。
+    pub fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        self.endpoint.close();
     }
 }
 
@@ -376,14 +428,9 @@ impl HostInput {
     /// 从已缓冲的字节里切出一条完整输入事件。
     fn take_buffered_event(&mut self) -> Option<Result<InputEvent, SessionError>> {
         match self.decoder.next_frame() {
-            Ok(Some(frame)) => Some(match beam_proto::decode_as::<InputEvent>(&frame) {
-                Ok(ev) => Ok(ev),
-                Err(e) => Err(SessionError::TransportFailed {
-                    reason: format!("解码输入事件失败: {e}"),
-                }),
-            }),
+            Ok(Some(frame)) => Some(decode_payload::<InputEvent>(&frame).map_err(framing_err)),
             Ok(None) => None,
-            Err(e) => Some(Err(e)),
+            Err(e) => Some(Err(framing_err(e))),
         }
     }
 }
@@ -392,33 +439,41 @@ impl HostInput {
 mod tests {
     use super::*;
 
+    /// 主机侧与客户端侧必须共用**同一份**分帧实现。
+    ///
+    /// 这条测试的真正目的不是「分帧能工作」（那是 `beam_net::framing` 的职责，
+    /// 它自己已经测了），而是**防止主机侧再长出一份私有实现**：
+    /// 一旦这里改回自研的分帧器，字节级不兼容就会回来。
     #[test]
-    fn frame_round_trip_through_length_prefix() {
+    fn host_side_uses_the_shared_framing_implementation() {
+        // 主机侧写出去的字节，必须与 `beam_net::framing` 写出来的**完全一致**。
         let msg = ControlMsg::Bye;
-        let frame = encode_frame(&msg).expect("编码应当成功");
-        let len = u32::from_be_bytes([frame[0], frame[1], frame[2], frame[3]]) as usize;
-        assert_eq!(len, frame.len() - FRAME_LEN_PREFIX);
+        let shared = beam_net::framing::encode_frame(&msg).expect("共享实现编码应当成功");
+        let local = encode_frame(&msg).map_err(|e| e).expect("主机侧编码应当成功");
+        assert_eq!(local, shared, "主机侧必须与共享实现产出相同字节");
 
+        // 并且能通过共享实现的解码器读回来。
         let mut decoder = FrameDecoder::default();
-        // 先喂一半：应当还切不出完整帧。
-        decoder.push(&frame[..2]);
-        assert!(decoder.next_frame().expect("不应出错").is_none());
-        decoder.push(&frame[2..]);
+        decoder.push(&local);
         let got = decoder
             .next_frame()
             .expect("不应出错")
             .expect("应当切出完整帧");
-        let decoded = beam_proto::decode_as::<ControlMsg>(&got).expect("应当能解码");
+        let decoded = decode_payload::<ControlMsg>(&got).expect("应当能解码");
         assert_eq!(decoded, ControlMsg::Bye);
     }
 
+    /// 分帧失败在本层仍然报 **E9005**（`SessionError::TransportFailed`）。
+    ///
+    /// 底层换成了 `beam_net::framing`（E2005），但**对外错误码不变** ——
+    /// 收敛的是实现，不是对外语义。
     #[test]
-    fn oversized_frame_is_rejected() {
+    fn oversized_frame_is_rejected_as_transport_failure() {
         let mut decoder = FrameDecoder::default();
         let mut frame = Vec::new();
-        frame.extend_from_slice(&(MAX_FRAME_LEN as u32 + 1).to_be_bytes());
+        frame.extend_from_slice(&(beam_net::framing::MAX_FRAME_LEN as u32 + 1).to_be_bytes());
         decoder.push(&frame);
-        let err = decoder.next_frame().expect_err("超长帧必须报错");
+        let err = framing_err(decoder.next_frame().expect_err("超长帧必须报错"));
         assert_eq!(err.code(), 9005);
     }
 
@@ -435,7 +490,7 @@ mod tests {
             .next_frame()
             .expect("不应出错")
             .expect("应当切出完整帧");
-        let decoded = beam_proto::decode_as::<InputEvent>(&got).expect("应当能解码");
+        let decoded = decode_payload::<InputEvent>(&got).expect("应当能解码");
         assert_eq!(decoded, ev);
     }
 }

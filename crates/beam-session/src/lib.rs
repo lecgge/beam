@@ -33,9 +33,26 @@
 //!
 //! - **不负责**：不直接调用平台 API，通过 trait（`FramePipeline` / `VideoSender` /
 //!   `FrameConsumer` / `InputSink` / `ControlChannel` / `Transport`）注入，便于测试。
+//! - **输入注入归 beam-host**：输入事件走 §5 的输入单向流（客户端 → 主机），
+//!   接收与注入都在 beam-host（§3.8 的输入任务）。本 crate **不持有**输入注入器
+//!   （[`HostDeps`] 里没有 `input` 字段），因此只有一处会注入输入。
 //! - **依赖**：proto（数据与协议）、pair（§3.3 配对）、futures（事件流）。
 //! - **被依赖**：host、client、ffi。
 //! - **禁止**：依赖 capture / encode / decode / render 等平台 crate（§4）。
+//!
+//! ## 事件
+//!
+//! [`SessionEvent`] 的变体**只能加在末尾**（与 `beam-perf` 的 `Stage` 同样的约束）：
+//! 变体序号一旦被某处按序号引用就不能重排。
+//!
+//! - [`SessionEvent::Error`]：会话错误（会把会话打进 `Error` 态）。
+//! - [`SessionEvent::FramesDropped`]：丢帧（§3.2 **E2004**）——**不是**会话错误，
+//!   只作统计 / 提示；会话状态不变。
+//!
+//! ## 首帧策略（§4.1）
+//!
+//! §4.1 写「视频 datagram(首帧 IDR)」：客户端收到的第一帧必须是关键帧。
+//! 首帧不是关键帧时，客户端发**一次** `RequestIdr`（见 [`client`] 模块文档）。
 //!
 //! ## 线程模型
 //!
@@ -55,7 +72,9 @@
 //!
 //! 状态机表驱动测试（全部合法与非法转移）+ 控制消息处理单测
 //! （能力协商 / 配对 / IDR / Feedback / Resume / Bye）
-//! + 假时钟驱动的停滞与重连超时判定测试。
+//! + 假时钟驱动的停滞与重连超时判定测试
+//! + 客户端首帧 IDR 策略与丢帧事件单测
+//! + 本机回环集成测试（真实 QUIC，见 `tests/loopback.rs`）。
 
 #![forbid(unsafe_code)]
 
@@ -77,7 +96,7 @@ pub use control::{
 pub use error::{message, SessionError};
 pub use event::{
     ControlChannel, FrameConsumer, FramePipeline, InputSink, RateControl, SessionEvent,
-    SessionInput, Transport, TransportFactory, VideoSender,
+    SessionInput, Transport, TransportFactory, VideoSender, FRAME_EXPIRED_CODE,
 };
 pub use handle::{SessionEventStream, SessionHandle, SessionTimeouts};
 pub use host::{HostControlDeps, HostDeps, HostSession, HostSessionConfig};

@@ -354,8 +354,10 @@ mod tests {
     #[test]
     fn update_and_stop() {
         let h = handle();
-        let mut cfg = StreamConfig::default();
-        cfg.fps = 144;
+        let cfg = StreamConfig {
+            fps: 144,
+            ..StreamConfig::default()
+        };
         h.update(cfg.clone()).expect("应当能更新");
         assert_eq!(h.config().fps, 144);
         h.stop();

@@ -23,6 +23,19 @@
 //! - [`Conn::accept_uni`]：主机侧接受输入单向流（§5 输入 stream）。
 //! - [`RateController::on_feedback`]：码率决策。
 //!
+//! ## 分帧编解码：唯一真值来源
+//!
+//! 控制 / 输入流的线上帧格式（**4 字节大端长度前缀 + postcard 负载 + 1 字节族标签**）
+//! 由 [`framing`] 模块**统一实现**：
+//!
+//! - [`framing::encode_frame`]：写一帧；[`framing::FrameDecoder`]：读一帧；
+//! - 该格式此前在 `beam-client` 与 `beam-host` 各写了一份（§4 不允许 L3 横向依赖），
+//!   两份必须永远字节级一致；`beam-client` 已改用本模块，
+//!   `beam-host` 侧那份**应删除并改用本模块**；
+//! - [`framing`] 的测试把线上字节**钉成固定十六进制常量**，
+//!   任何一端改动格式都会立刻暴露（往返自洽发现不了「两端同时改错」）。
+//!   详见 [`framing`] 的模块文档。
+//!
 //! ## 数据结构
 //!
 //! [`EncodedFrame`] / [`AssembledFrame`] 定义在协议层（beam-proto），
@@ -110,6 +123,7 @@ pub mod datagram;
 pub mod endpoint;
 pub mod error;
 pub mod fec;
+pub mod framing;
 pub mod jitter;
 pub mod rate;
 
@@ -128,6 +142,7 @@ pub use datagram::{
 pub use endpoint::{Conn, NetEndpoint, VideoReceiver, VideoSender, VideoStream};
 pub use error::{message, NetError};
 pub use fec::{parity_shard_count, FecCodec, FecGroup, FEC_ENABLED};
+pub use framing::{decode_payload, encode_frame, FrameDecoder, LENGTH_PREFIX_LEN, MAX_FRAME_LEN};
 pub use jitter::JitterBuffer;
 pub use rate::{BitrateDecision, RateAction, RateController};
 

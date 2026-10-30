@@ -138,6 +138,7 @@ name = "beam-capture"
 version = "0.1.0"
 dependencies = [
  "beam-config",
+ "beam-perf",
  "beam-proto",
  "thiserror",
  "tracing",
@@ -183,6 +184,7 @@ dependencies = [
 name = "beam-decode"
 version = "0.1.0"
 dependencies = [
+ "beam-perf",
  "beam-proto",
  "bytes",
  "ffmpeg-next",
@@ -208,6 +210,7 @@ name = "beam-encode"
 version = "0.1.0"
 dependencies = [
  "beam-config",
+ "beam-perf",
  "beam-proto",
  "bytes",
  "ffmpeg-next",
@@ -253,9 +256,11 @@ dependencies = [
  "beam-input",
  "beam-log",
  "beam-net",
+ "beam-pair",
  "beam-proto",
  "beam-session",
  "bytes",
+ "futures",
  "thiserror",
  "tokio",
  "tracing",
@@ -347,6 +352,7 @@ dependencies = [
 name = "beam-render"
 version = "0.1.0"
 dependencies = [
+ "beam-perf",
  "beam-proto",
  "thiserror",
  "tracing",
@@ -357,11 +363,13 @@ dependencies = [
 name = "beam-session"
 version = "0.1.0"
 dependencies = [
+ "beam-net",
  "beam-pair",
  "beam-proto",
  "bytes",
  "futures",
  "thiserror",
+ "tokio",
  "tracing",
 ]
 

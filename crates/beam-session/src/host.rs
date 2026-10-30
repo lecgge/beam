@@ -1,12 +1,18 @@
 //! 主机会话（§3.9 `HostSession::start(cfg, deps) -> SessionHandle`）。
 //!
-//! 主机侧串联：抓屏 → 编码 → net；并接收客户端输入做注入。
+//! 主机侧串联：抓屏 → 编码 → net。
 //! 平台能力通过 trait 注入（[`crate::event::FramePipeline`] / [`crate::event::VideoSender`]），
 //! 因此本 crate 不依赖任何平台 crate（§3.9 边界）。
 //!
 //! 控制通道（§5 控制 stream 0）通过 [`crate::event::ControlChannel`] 注入：
 //! 收到 `Hello` 后做能力协商并回 `HelloAck`，收到 `RequestIdr` / `Feedback` /
 //! `Resume` / `Bye` 分别触发 IDR、码率控制、会话恢复与会话关闭（§4.1 时序）。
+//!
+//! ## 边界：输入注入归 beam-host
+//!
+//! 输入事件走 §5 的**输入单向流**（客户端 → 主机），接收与注入都在 beam-host
+//! （§3.8 的输入任务）。本 crate 不持有输入注入器
+//! （[`HostDeps`] 里没有 `input` 字段），因此只有**一处**会注入输入。
 
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -20,7 +26,7 @@ use crate::control::{
 };
 use crate::error::SessionError;
 use crate::event::{
-    ControlChannel, FramePipeline, InputSink, RateControl, SessionEvent, SessionInput, VideoSender,
+    ControlChannel, FramePipeline, RateControl, SessionEvent, SessionInput, VideoSender,
 };
 use crate::handle::{SessionHandle, SessionInner, SessionRunner, SessionTimeouts};
 use crate::state::{SessionState, StateMachine};
@@ -47,20 +53,23 @@ impl Default for HostSessionConfig {
 }
 
 /// 主机会话依赖（全部为 trait 对象，便于测试）。
+///
+/// ## 没有 `input` 字段：输入注入归 beam-host
+///
+/// 输入事件走 §5 的**输入单向流**（客户端 → 主机），由 beam-host 的输入任务
+/// 接收并注入平台（§3.8「输入 stream 接收任务 → 有界通道 → 注入线程」）。
+/// 会话层不持有输入注入器，因此不存在「会话层注入一次、主机再注入一次」
+/// 的重复注入风险。
 pub struct HostDeps {
     /// 抓屏 → 编码流水线。
     pub pipeline: Box<dyn FramePipeline>,
     /// 视频 / 控制发送器。
     pub sender: Box<dyn VideoSender>,
-    /// 输入注入器（可选）。
-    pub input: Option<Box<dyn InputSink>>,
 }
 
 impl std::fmt::Debug for HostDeps {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HostDeps")
-            .field("input", &self.input.is_some())
-            .finish()
+        f.debug_struct("HostDeps").finish_non_exhaustive()
     }
 }
 
@@ -647,7 +656,6 @@ mod tests {
             sender: Box::new(FakeSender {
                 sent: AtomicUsize::new(0),
             }),
-            input: None,
         }
     }
 
@@ -766,7 +774,6 @@ mod tests {
                 sender: Box::new(FakeSender {
                     sent: AtomicUsize::new(0),
                 }),
-                input: None,
             },
             Some(HostControlDeps {
                 control: Box::new(control),
@@ -817,7 +824,6 @@ mod tests {
                 sender: Box::new(FakeSender {
                     sent: AtomicUsize::new(0),
                 }),
-                input: None,
             },
             Some(HostControlDeps {
                 control: Box::new(control),

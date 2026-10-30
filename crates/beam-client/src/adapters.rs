@@ -9,10 +9,13 @@
 //! | 视频 / 音频 | 帧 | datagram | `beam_net::VideoSender` / `VideoStream` |
 //!
 //! 线上帧格式：**4 字节大端长度前缀 + postcard 负载**（负载自带 1 字节消息族标签，
-//! 由 `beam_proto::encode` 产生）。长度前缀是本层的实现约定，§5 未规定。
+//! 由 `beam_proto::encode` 产生）。该格式由 [`beam_net::framing`] **统一实现** ——
+//! 本 crate **不再自带分帧实现**，分帧格式的唯一真值来源在 `beam-net`
+//! （详见 [`beam_net::framing`] 的模块文档）。
 //!
 //! 主机侧的对称实现（接受控制流 / 接收输入流）在 `beam-host`：
 //! [`NetTransport`] 只负责客户端侧，主机侧适配器不寄居在本 crate。
+//! `beam-host` 的分帧实现同样应改用 [`beam_net::framing`]，以保证两端字节级一致。
 //!
 //! ## 帧通道（§5 画面走 datagram）
 //!
@@ -27,19 +30,13 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use beam_decode::VideoDecoder;
-use beam_proto::{ControlMsg, EncodedFrame, Feedback, InputEvent, Message};
+use beam_net::framing::{decode_payload, encode_frame, FrameDecoder};
+use beam_proto::{ControlMsg, EncodedFrame, Feedback, InputEvent};
 use beam_render::Renderer;
 use beam_session::{
     ControlChannel, FrameConsumer, RateControl, SessionError, Transport, TransportFactory,
 };
-use bytes::BytesMut;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-
-/// 线上帧的长度前缀长度（4 字节大端）。
-const FRAME_LEN_PREFIX: usize = 4;
-
-/// 单帧上限（防御性上限；控制消息与输入事件都很小）。
-const MAX_FRAME_LEN: usize = 64 * 1024;
 
 /// 解码 → 上屏适配器。
 #[derive(Debug)]
@@ -130,49 +127,6 @@ impl OutBuf {
     fn is_empty(&self) -> bool {
         self.pos >= self.data.len()
     }
-}
-
-/// 增量解码器：从字节流里切出完整帧。
-#[derive(Debug, Default)]
-struct FrameDecoder {
-    buf: Vec<u8>,
-}
-
-impl FrameDecoder {
-    fn push(&mut self, data: &[u8]) {
-        self.buf.extend_from_slice(data);
-    }
-
-    /// 取出一条完整帧；数据不够时返回 `Ok(None)`。
-    fn next_frame(&mut self) -> Result<Option<Vec<u8>>, SessionError> {
-        if self.buf.len() < FRAME_LEN_PREFIX {
-            return Ok(None);
-        }
-        let len = u32::from_be_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]]) as usize;
-        if len > MAX_FRAME_LEN {
-            return Err(SessionError::TransportFailed {
-                reason: format!("线上帧长度超限({len} 字节)"),
-            });
-        }
-        if self.buf.len() < FRAME_LEN_PREFIX + len {
-            return Ok(None);
-        }
-        let frame = self.buf[FRAME_LEN_PREFIX..FRAME_LEN_PREFIX + len].to_vec();
-        self.buf.drain(..FRAME_LEN_PREFIX + len);
-        Ok(Some(frame))
-    }
-}
-
-/// 把一条线上消息编码成「4 字节大端长度 + 负载」。
-fn encode_frame<M: Message>(msg: &M) -> Result<Vec<u8>, SessionError> {
-    let mut buf = BytesMut::new();
-    beam_proto::encode(msg, &mut buf).map_err(|e| SessionError::TransportFailed {
-        reason: format!("编码失败: {e}"),
-    })?;
-    let mut out = Vec::with_capacity(FRAME_LEN_PREFIX + buf.len());
-    out.extend_from_slice(&(buf.len() as u32).to_be_bytes());
-    out.extend_from_slice(&buf);
-    Ok(out)
 }
 
 /// 非阻塞写：把待发字节尽量写进流里。
@@ -383,14 +337,15 @@ impl NetTransport {
     /// 取出一条已经完整的控制帧并解码。
     fn take_control_frame(&mut self) -> Option<Result<ControlMsg, SessionError>> {
         match self.ctrl_in.next_frame() {
-            Ok(Some(frame)) => Some(match beam_proto::decode_as::<ControlMsg>(&frame) {
-                Ok(msg) => Ok(msg),
-                Err(e) => Err(SessionError::TransportFailed {
-                    reason: format!("解码控制消息失败: {e}"),
-                }),
-            }),
+            Ok(Some(frame)) => Some(decode_payload::<ControlMsg>(&frame).map_err(|e| {
+                SessionError::TransportFailed {
+                    reason: format!("解码控制消息失败 {}: {e}", e.code_str()),
+                }
+            })),
             Ok(None) => None,
-            Err(e) => Some(Err(e)),
+            Err(e) => Some(Err(SessionError::TransportFailed {
+                reason: format!("控制流分帧失败 {}: {e}", e.code_str()),
+            })),
         }
     }
 }
@@ -403,7 +358,9 @@ impl ControlChannel for NetTransport {
                 reason: reason.clone(),
             });
         }
-        let frame = encode_frame(&msg)?;
+        let frame = encode_frame(&msg).map_err(|e| SessionError::TransportFailed {
+            reason: format!("编码控制消息失败 {}: {e}", e.code_str()),
+        })?;
         self.ctrl_out.push(&frame);
         flush_stream(&mut self.ctrl_out, &mut *self.ctrl_send)
     }
@@ -484,7 +441,9 @@ impl Transport for NetTransport {
                 reason: "输入流未建立（主机侧不接受输入）".to_string(),
             });
         }
-        let frame = encode_frame(&ev)?;
+        let frame = encode_frame(&ev).map_err(|e| SessionError::TransportFailed {
+            reason: format!("编码输入事件失败 {}: {e}", e.code_str()),
+        })?;
         self.input_out.push(&frame);
         let writer = self.input.as_mut().expect("输入流已检查");
         flush_stream(&mut self.input_out, &mut **writer)
@@ -706,29 +665,17 @@ mod tests {
         assert_eq!(err.code(), 9005);
     }
 
+    /// 本 crate **不再自带分帧实现**：分帧格式的唯一真值来源是
+    /// [`beam_net::framing`]。这里钉住客户端**实际使用**的编码路径的线上字节 ——
+    /// 一旦有人在本 crate 里重新引入第二份分帧实现并改坏格式，本测试会立刻失败。
     #[test]
-    fn frame_round_trip_through_length_prefix() {
-        let msg = ControlMsg::Bye;
-        let frame = encode_frame(&msg).expect("编码应当成功");
-        assert_eq!(frame.len(), FRAME_LEN_PREFIX + 2, "帧头 + 族标签 + 负载");
-        let mut decoder = FrameDecoder::default();
-        decoder.push(&frame[..frame.len() - 1]);
-        assert!(decoder.next_frame().expect("解码不应当失败").is_none());
-        decoder.push(&frame[frame.len() - 1..]);
-        let out = decoder
-            .next_frame()
-            .expect("解码不应当失败")
-            .expect("应当有帧");
-        let back: ControlMsg = beam_proto::decode_as(&out).expect("解码应当成功");
-        assert_eq!(back, msg);
-    }
-
-    #[test]
-    fn oversized_frame_is_rejected() {
-        let mut decoder = FrameDecoder::default();
-        decoder.push(&(MAX_FRAME_LEN as u32 + 1).to_be_bytes());
-        let err = decoder.next_frame().expect_err("超长帧必须失败");
-        assert_eq!(err.code(), 9005);
+    fn client_framing_uses_the_shared_beam_net_implementation() {
+        let frame = encode_frame(&ControlMsg::Bye).expect("编码应当成功");
+        assert_eq!(
+            frame,
+            vec![0x00, 0x00, 0x00, 0x02, 0x01, 0x0d],
+            "客户端控制帧的线上字节必须与 beam_net::framing 一致"
+        );
     }
 
     #[test]

@@ -453,8 +453,9 @@ impl BeamService for LocalService {
 
         // 桩实现:模拟一次 §3.9 的 `Streaming → Reconnecting → Streaming` 抖动,
         // 让前端能真实跑通重连提示路径。真实实现由 crates/beam-session 驱动。
-        let in_reconnect_window = elapsed_ms >= RECONNECT_SIM_AT_MS
-            && elapsed_ms < RECONNECT_SIM_AT_MS + RECONNECT_SIM_WINDOW_MS;
+        let in_reconnect_window = (RECONNECT_SIM_AT_MS
+            ..RECONNECT_SIM_AT_MS + RECONNECT_SIM_WINDOW_MS)
+            .contains(&elapsed_ms);
         if let Some(s) = inner.session.as_mut() {
             s.state = if in_reconnect_window {
                 "reconnecting".to_string()
@@ -717,7 +718,7 @@ impl BeamService for LocalService {
         Ok(PerfExportResult {
             format: format.to_string(),
             path: path.to_string_lossy().to_string(),
-            bytes: body.as_bytes().len() as u64,
+            bytes: body.len() as u64,
             rows: snap.samples,
         })
     }
@@ -1012,7 +1013,7 @@ fn perf_json(snap: &PerfSnapshot) -> String {
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as i64;
+    let doe = z - era * 146_097;
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
     let y = yoe + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);

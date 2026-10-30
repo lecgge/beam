@@ -29,6 +29,94 @@ use beam_net::VideoSender as NetVideoSenderTrait;
 use beam_proto::{ControlMsg, EncodedFrame, InputEvent};
 use beam_session::{FramePipeline, InputSink, SessionError, VideoSender};
 
+/// 空输入接收器：接收输入事件，但**不做任何注入**。
+///
+/// ## 为什么需要它
+///
+/// 主机侧要接收客户端的输入流（§5 输入 stream），注入由**平台注入器**
+/// （`beam_input::SendInputSink`）完成。但 §4 规定平台 crate 只能被
+/// host / client 引用 —— 桌面端（`apps/desktop`）**不能**直接依赖
+/// `beam-input`，所以它拿不到注入器。
+///
+/// 因此本 crate 提供一个「接收但不注入」的替身：输入流照常被读走
+/// （不会让客户端的输入通道堵住），但**不假装**注入了按键。
+///
+/// 真实注入器（`SendInput`）本身尚未在本仓实现
+/// （`beam-input` 的 Windows 分支目前是空实现），所以这个替身
+/// 与真实注入器当前的**实际**行为一致 —— 差别只在于责任归属。
+#[derive(Debug, Clone, Default)]
+pub struct NoopInputSink;
+
+impl NoopInputSink {
+    /// 新建一个空输入接收器。
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl beam_input::InputSink for NoopInputSink {
+    fn apply(&mut self, ev: InputEvent) -> Result<(), beam_input::InputError> {
+        // 读走了事件,但不注入。**不**返回错误:输入流本身是好的,
+        // 只是本机没有可用的注入器。
+        let _ = ev;
+        Ok(())
+    }
+}
+
+///
+/// ## 为什么需要它
+///
+/// 主机的「监听 → 握手 → 能力协商 → 控制面」这条链路**不依赖画面**：
+/// 配对闸门（产品方案 §8 的人工确认）、能力协商、控制面消息全都跑在
+/// QUIC 的控制流上。只有「画面」才需要平台后端（WGC 抓屏 + NVENC 硬编）。
+///
+/// 桌面端在**没有**打开 `platform` feature 时（`apps/desktop` 的默认构建、
+/// 以及 CI 的 `cargo check`），拿不到平台后端。如果此时连主链路也不接，
+/// 「已开播的主机不会真的接受客户端接入」这个缺口就补不上。
+///
+/// 因此这里提供一个**诚实**的空流水线：
+///
+/// - 控制面、配对闸门、信任库写入 —— **真的**跑起来；
+/// - 画面 —— 一帧都不产出，**不伪造**。
+///
+/// 打开 `platform` feature 后，桌面端改用
+/// [`crate::platform::PlatformPipeline`]（WGC + NVENC 真后端），
+/// 本类型只是那条路径的降级替身。
+#[derive(Debug, Clone, Default)]
+pub struct EmptyPipeline {
+    errors: PipelineErrors,
+}
+
+impl EmptyPipeline {
+    /// 新建一条空流水线。
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 错误槽（与真实流水线同形；空流水线本身不会产生错误）。
+    pub fn errors(&self) -> PipelineErrors {
+        self.errors.clone()
+    }
+}
+
+impl FramePipeline for EmptyPipeline {
+    fn start(&mut self) -> Result<(), SessionError> {
+        // 没有画面可启动，也**不**假装启动成功：
+        // 控制面照常工作，画面通道保持静默。
+        Ok(())
+    }
+
+    fn poll(&mut self) -> Option<EncodedFrame> {
+        None
+    }
+
+    fn request_idr(&mut self) {
+        // 没有编码器，自然没有 IDR 可请求。客户端会等到真正有画面时才拿到 IDR。
+    }
+
+    fn stop(&mut self) {}
+}
+
 /// 主机侧流水线的错误槽（§3.9）。
 ///
 /// `beam-session` 的 [`FramePipeline::poll`] 没有错误返回通道，

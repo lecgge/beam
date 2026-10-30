@@ -7,8 +7,10 @@
 //! 边界:QUIC 需要 tokio reactor,所以这里必须是 `async fn`,
 //! 由 `tauri::async_runtime::spawn` 驱动;不能用 `futures::executor::block_on`,
 //! 那不会驱动 reactor,连接会挂住。
-
-#![cfg(feature = "beam-crates")]
+//!
+//! 本模块整体由 `main.rs` 里的 `#[cfg(feature = "beam-crates")] mod transport;`
+//! 门控 —— 这里**不再**写一遍内层 `#![cfg]`,否则是重复属性(同一个 cfg
+//! 挂在同一个模块上两次)。
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
@@ -48,23 +50,34 @@ pub struct ProbeRequest {
     pub identity: Identity,
 }
 
+/// 监听所需的参数(§3.2)。
+pub struct ListenRequest {
+    /// 解析后的配置(§3.14)→ 网络参数。
+    pub resolved: ResolvedConfig,
+    /// 本机 TLS 身份(§3.3)。
+    pub identity: Identity,
+    /// 监听地址(§3.2):`0.0.0.0:<port>`。
+    pub bind_addr: SocketAddr,
+}
+
 /// 由解析后的配置组装网络参数(§3.14 → §3.2)。
 fn net_config(resolved: &ResolvedConfig, identity: &Identity) -> NetConfig {
-    let mut net_config = NetConfig::default();
-    net_config.fec_ratio = resolved.network.fec_ratio;
-    net_config.max_datagram = resolved.network.max_datagram;
-    net_config.jitter_frames = resolved.network.jitter_frames;
-    net_config.bitrate_min = resolved.network.bitrate_min;
-    net_config.bitrate_max = resolved.network.bitrate_max;
-    net_config.connect_timeout = crate::service::CONNECT_TIMEOUT;
-    net_config.server_name = TLS_SERVER_NAME.to_string();
-    net_config.bind_addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0);
-    // §3.2:两端都要有 TLS 身份,否则 E2007。
-    net_config.identity = Some(TlsIdentity {
-        cert_chain: identity.certificate_chain(),
-        key: identity.private_key(),
-    });
-    net_config
+    NetConfig {
+        fec_ratio: resolved.network.fec_ratio,
+        max_datagram: resolved.network.max_datagram,
+        jitter_frames: resolved.network.jitter_frames,
+        bitrate_min: resolved.network.bitrate_min,
+        bitrate_max: resolved.network.bitrate_max,
+        connect_timeout: crate::service::CONNECT_TIMEOUT,
+        server_name: TLS_SERVER_NAME.to_string(),
+        bind_addr: SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0),
+        // §3.2:两端都要有 TLS 身份,否则 E2007。
+        identity: Some(TlsIdentity {
+            cert_chain: identity.certificate_chain(),
+            key: identity.private_key(),
+        }),
+        ..NetConfig::default()
+    }
 }
 
 /// 建立真实 QUIC 连接。
@@ -105,7 +118,7 @@ impl FingerprintProbe {
 
     /// 采集到的对端指纹。
     pub fn fingerprint(&self) -> Option<Fingerprint> {
-        self.seen.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        *self.seen.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -132,4 +145,27 @@ pub async fn probe_fingerprint(request: ProbeRequest) -> Result<Fingerprint, Bea
             "未能采集到主机证书指纹(主机可能没有在运行 QUIC 服务)",
         )
     })
+}
+
+/// 起一个 QUIC 监听(§3.2),供桌面端「作为主机」使用。
+///
+/// 证书校验交给 `verifier`:主机侧传 [`beam_host::HostTrustGate`]
+/// (产品方案 §8:未信任的对端**一律拒绝握手**,等用户人工确认后才写信任库)。
+///
+/// 监听本身**不**产生信任:能通过校验的对端一定已经在信任库里。
+pub async fn listen_peer(
+    request: ListenRequest,
+    verifier: Arc<dyn PeerVerifier>,
+) -> Result<beam_host::HostListener, BeamError> {
+    let mut net_config = net_config(&request.resolved, &request.identity);
+    // 监听用的是 `listen_addr`(`bind_addr` 是客户端侧的本地绑定地址)。
+    net_config.listen_addr = request.bind_addr;
+    beam_host::HostListener::listen(net_config, verifier)
+        .await
+        .map_err(|err| {
+            BeamError::retryable(
+                crate::error::E_CONNECTION_TIMEOUT,
+                format!("QUIC 监听失败: {err}"),
+            )
+        })
 }

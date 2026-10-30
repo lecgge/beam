@@ -8,6 +8,19 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+# 平台会话（§3.9 主机编排 + §3.5/§3.6 平台后端）。
+#
+# 打开后把 beam-capture 的 `wgc`（WGC 抓屏）与 beam-encode 的 `ffmpeg`
+# （NVENC/AMF/QSV 硬编）两个后端**传递进来**：本 crate 是 §4 允许引用平台
+# crate 的那一层（host/client），桌面端因此**不需要**直接依赖平台 crate，
+# 只需打开本 feature（`beam-host/platform`）。
+#
+# 默认关闭：不开这个 feature 时本 crate 不碰任何原生 API，
+# 编译产物也不需要 ffmpeg / windows-capture 工具链。
+platform = ["beam-capture/wgc", "beam-encode/ffmpeg"]
+
 [dependencies]
 beam-proto = { workspace = true }
 beam-session = { workspace = true }
@@ -17,6 +30,8 @@ beam-audio = { workspace = true }
 beam-input = { workspace = true }
 beam-discovery = { workspace = true }
 beam-net = { workspace = true }
+# 主机侧信任闸门要用 `PeerVerifier` 与 `TrustStore`（§3.3 信任库 / 产品方案 §8）。
+beam-pair = { workspace = true }
 beam-config = { workspace = true }
 beam-log = { workspace = true }
 # §5 控制流 / 输入流的读写原语（quinn 直接实现了 tokio 的 AsyncRead / AsyncWrite）。
@@ -28,6 +43,15 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 bytes = { workspace = true }
+# 示例要驱动 mDNS 浏览流（`futures::Stream`）。
+futures = { workspace = true }
+
+# 真机回环验证入口（§9 M-1 验证点）：本机起一个监听 + 一个客户端，
+# 验证「监听建立 → 客户端连上 → Hello 协商成功 → 双方状态到 Streaming」。
+# 需要真实的 WGC 抓屏与 NVENC 硬编，因此要求 `platform` feature。
+[[example]]
+name = "host_loopback"
+required-features = ["platform"]
 
 [lints]
 workspace = true

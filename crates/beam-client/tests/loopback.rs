@@ -201,7 +201,6 @@ async fn loopback_hello_negotiate_hello_ack() {
         HostDeps {
             pipeline: Box::new(NoopPipeline),
             sender: Box::new(NoopSender),
-            input: None,
         },
         Some(HostControlDeps {
             control: Box::new(host_transport),
@@ -339,7 +338,6 @@ async fn loopback_client_and_host_can_talk_over_control_stream() {
         HostDeps {
             pipeline: Box::new(NoopPipeline),
             sender: Box::new(NoopSender),
-            input: None,
         },
         Some(HostControlDeps {
             control: Box::new(host_transport),
@@ -547,7 +545,6 @@ async fn loopback_session_streams_frame_from_host_to_client() {
         HostDeps {
             pipeline: Box::new(OneFramePipeline { sent: false }),
             sender: Box::new(host_sender),
-            input: None,
         },
         Some(HostControlDeps {
             control: Box::new(host_transport),

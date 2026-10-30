@@ -34,10 +34,10 @@ use beam_config::{
     AudioMode, ConfigLayers, ResolvedConfig, TomlFileStore,
 };
 use beam_discovery::{Advertiser, Browser, DiscoveryEvent, HostInfo};
-use beam_host::HostConfig;
+use beam_host::{HostConfig, HostListener, HostRuntime, HostSessionHandle, HostTrustGate};
 use beam_pair::{
     default_identity_path, FileKeyStore, Fingerprint, Identity, PairPayload, PairingToken,
-    PeerPerms, TrustStore, TrustedPeer,
+    PeerPerms, PeerVerifier, TrustStore, TrustedPeer,
 };
 use beam_proto::CodecKind;
 use beam_session::{PeerAddr, SessionEvent, SessionHandle, SessionState, StateMachine, Transport};
@@ -127,7 +127,12 @@ struct CrateInner {
     resolved: ResolvedConfig,
     ui: DesktopSettings,
     identity: Identity,
-    trust: TrustStore,
+    /// §3.3 信任库。
+    ///
+    /// 用 `Arc<Mutex<>>` 是因为它要与**主机侧信任闸门**
+    /// ([`HostTrustGate`])共享同一份:用户在弹窗里点了「同意」写库之后,
+    /// 闸门**立刻**就能看到 —— 不需要重建监听,也不需要重新握手。
+    trust: Arc<Mutex<TrustStore>>,
     state: StateMachine,
     advertiser: Option<Advertiser>,
     session: Option<SessionInfo>,
@@ -136,6 +141,9 @@ struct CrateInner {
     /// 帧通道统计句柄(§3.2):E2004(帧过期丢弃)的计数从这里读。
     frame_stats: Option<FrameStatsHandle>,
     /// 待确认的配对请求(§3.3)。
+    ///
+    /// 客户端侧与**主机侧**的请求共用这一个列表:两者都是
+    /// 「用户确认后才写信任库」,前端用同一张卡片呈现(§3.11 `pair://request`)。
     pending_pairs: Vec<PairRequest>,
     /// 自上次上报以来**新出现**的待确认请求(供 `pair://request` 事件)。
     new_pairs: Vec<PairRequest>,
@@ -148,6 +156,20 @@ struct CrateInner {
     config_path: Option<PathBuf>,
     trust_path: Option<PathBuf>,
     desktop_path: Option<PathBuf>,
+    /// 主机侧 QUIC 监听(§3.2 / §3.9)。
+    ///
+    /// §3.11 `start_hosting` 之后存在,`stop_hosting` 时关闭。
+    host_listener: Option<Arc<HostListener>>,
+    /// 主机侧信任闸门(产品方案 §8)。
+    ///
+    /// 未写入信任库的对端**一律拒绝握手**,但指纹被记住;
+    /// 用户人工确认写库后,下一次握手才放行。
+    host_gate: Option<Arc<HostTrustGate>>,
+    /// 正在服务中的主机会话(客户端接入之后)。
+    ///
+    /// 用 `Arc` 包一层:[`HostSessionHandle`] 不可克隆,但需要同时被
+    /// 「状态槽」和「推进循环」持有。
+    host_session: Option<Arc<HostSessionHandle>>,
 }
 
 /// crates/ 适配器。
@@ -207,7 +229,7 @@ impl CrateService {
             None => Identity::generate().expect("生成自签身份不应失败"),
         };
 
-        // §3.3:信任库。
+        // §3.3:信任库。`Arc<Mutex<>>` 便于与主机侧信任闸门共享同一份。
         let trust = match &trust_path {
             Some(path) => TrustStore::load(path).unwrap_or_else(|err| {
                 tracing::warn!(code = %err.code_str(), "读取信任库失败,按空库处理");
@@ -215,6 +237,7 @@ impl CrateService {
             }),
             None => TrustStore::new(),
         };
+        let trust = Arc::new(Mutex::new(trust));
 
         let device_name = device_name();
         let mut host = HostStatus {
@@ -264,6 +287,9 @@ impl CrateService {
                 config_path,
                 trust_path,
                 desktop_path,
+                host_listener: None,
+                host_gate: None,
+                host_session: None,
             })),
             discovery,
             transport_outcome: Arc::new(Mutex::new(None)),
@@ -380,6 +406,31 @@ impl BeamService for CrateService {
         inner.host.state = HostState::Hosting;
         inner.host.revision += 1;
         inner.host.updated_at_ms = now_ms();
+
+        // §3.9 / §3.2:真起一个 QUIC 监听。
+        //
+        // 之前这里只广播 mDNS —— 「已开播的主机」并不会真的接受客户端接入。
+        // 现在起监听,并在后台跑接受循环(见 `spawn_host_listener`)。
+        //
+        // 监听是**异步**的(要建 QUIC 端点),而 `start_hosting` 是同步 command
+        // (跑在 UI 线程上),所以这里只做「安排」,监听结果由后台任务写回状态。
+        let resolved = inner.resolved.clone();
+        let identity = inner.identity.clone();
+        let trust = Arc::clone(&inner.trust);
+        let port = inner.ui.port;
+        let bind_ip = inner
+            .host
+            .local_ip
+            .as_deref()
+            .and_then(|s| s.parse::<Ipv4Addr>().ok())
+            .unwrap_or(Ipv4Addr::UNSPECIFIED);
+        drop(inner);
+        self.spawn_host_listener(resolved, identity, trust, bind_ip, port);
+
+        let mut inner = self.lock();
+        inner.host.state = HostState::Hosting;
+        inner.host.revision += 1;
+        inner.host.updated_at_ms = now_ms();
         Ok(inner.host.clone())
     }
 
@@ -392,6 +443,16 @@ impl BeamService for CrateService {
             ));
         }
         inner.advertiser = None;
+        // §3.11 `stop_hosting`:关掉 QUIC 监听与正在服务的主机会话。
+        if let Some(listener) = inner.host_listener.take() {
+            listener.close();
+        }
+        inner.host_gate = None;
+        if let Some(session) = inner.host_session.take() {
+            // `HostSessionHandle` 的 `Drop` 会取消输入泵;这里再显式停一次会话,
+            // 让对端收到 `Bye`(§5)。
+            session.session.stop();
+        }
         inner.host.state = HostState::Idle;
         inner.host.connected_device = None;
         inner.host.message = None;
@@ -433,13 +494,24 @@ impl BeamService for CrateService {
             },
         };
         // 真实写入信任库(§3.3):人工确认之后才写(产品方案 §8)。
-        inner.trust.upsert(peer);
+        //
+        // 写的是**共享**信任库:主机侧信任闸门(§3.3)拿到的是同一份,
+        // 因此用户点了「同意」之后,下一次握手立刻就能通过 —— 不必重启监听。
+        {
+            let mut trust = inner.trust.lock().unwrap_or_else(|e| e.into_inner());
+            trust.upsert(peer);
+        }
         inner.pending_pairs.retain(|r| r.id != id);
         inner.new_pairs.retain(|r| r.id != id);
         self.save_trust(&inner)?;
-        Ok(device_from_peer(
-            inner.trust.peers().last().expect("刚刚 upsert 过"),
-        ))
+        let peer = inner
+            .trust
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .peers()
+            .last()
+            .cloned();
+        Ok(device_from_peer(&peer.expect("刚刚 upsert 过")))
     }
 
     fn reject_pair(&self, id: &str) -> Result<(), BeamError> {
@@ -462,14 +534,19 @@ impl BeamService for CrateService {
     }
 
     fn remove_device(&self, id: &str) -> Result<(), BeamError> {
-        let mut inner = self.lock();
+        let inner = self.lock();
         let fp = Fingerprint::from_hex(id).map_err(|err| {
             BeamError::invalid(
                 E_DEVICE_NOT_FOUND,
                 format!("指纹非法 {}: {err}", err.code_str()),
             )
         })?;
-        if !inner.trust.remove(&fp) {
+        let removed = inner
+            .trust
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&fp);
+        if !removed {
             return Err(BeamError::invalid(
                 E_DEVICE_NOT_FOUND,
                 format!("设备 {id} 不在信任库里"),
@@ -482,7 +559,8 @@ impl BeamService for CrateService {
 
     fn devices(&self) -> Vec<Device> {
         let inner = self.lock();
-        inner.trust.peers().iter().map(device_from_peer).collect()
+        let trust = inner.trust.lock().unwrap_or_else(|e| e.into_inner());
+        trust.peers().iter().map(device_from_peer).collect()
     }
 
     fn pair_requests(&self) -> Vec<PairRequest> {
@@ -493,6 +571,8 @@ impl BeamService for CrateService {
         let inner = self.lock();
         let trusted: Vec<String> = inner
             .trust
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .peers()
             .iter()
             .map(|p| p.fp.short_hex().to_lowercase())
@@ -540,6 +620,8 @@ impl BeamService for CrateService {
         let discovered_prefix = host.fingerprint.to_lowercase();
         let trusted_fingerprint = inner
             .trust
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .peers()
             .iter()
             .find(|p| p.fp.short_hex().to_lowercase() == discovered_prefix)
@@ -580,7 +662,13 @@ impl BeamService for CrateService {
         // §3.9:真实客户端会话(控制面 + 帧面)。建链在后台进行,
         // 结果通过会话事件与传输结果回报给事件层。
         let identity = inner.identity.clone();
-        let trust = inner.trust.clone();
+        // 客户端握手用的是信任库的一份**快照**:握手期间信任库不会变,
+        // 真正的写库发生在 `approve_pair`(§3.3)。
+        let trust = inner
+            .trust
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let resolved = inner.resolved.clone();
         self.spawn_client_session(resolved, peer, host.name.clone(), identity, trust);
 
@@ -899,13 +987,18 @@ impl CrateService {
         let Some(path) = inner.trust_path.clone() else {
             return Ok(());
         };
-        inner.trust.save(&path).map_err(|err| {
-            BeamError::new(
-                E_CONFIG_IO,
-                format!("写入信任库失败 {}: {err}", err.code_str()),
-                false,
-            )
-        })
+        inner
+            .trust
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .save(&path)
+            .map_err(|err| {
+                BeamError::new(
+                    E_CONFIG_IO,
+                    format!("写入信任库失败 {}: {err}", err.code_str()),
+                    false,
+                )
+            })
     }
 
     /// 在后台建立**真实的客户端会话**(§3.9)。
@@ -999,6 +1092,88 @@ impl CrateService {
         });
     }
 
+    /// 起**主机侧** QUIC 监听,并在后台接受客户端接入(§3.2 / §3.9 / 产品方案 §8)。
+    ///
+    /// 这一段补的是「桌面端作为主机」这一侧:
+    ///
+    /// 1. 用**共享信任库**构造信任闸门([`HostTrustGate`])——
+    ///    未写入信任库的对端**一律拒绝握手**,但它的完整指纹被记住(§3.3);
+    /// 2. 起 QUIC 监听(§3.2);
+    /// 3. 循环接受连接:
+    ///    - **握手被拒** → 闸门已记下指纹 → 生成「待确认的配对请求」
+    ///      → 前端弹窗让用户确认(产品方案 §8 不可省略的安全环节)
+    ///      → 用户点「同意」写信任库 → **下一次握手**才放行;
+    ///    - **握手成功** → 起主机会话(§3.9),并在后台 `pump()`,
+    ///      真实错误(不是 `E6005`「本轮暂无输出」)从这里冒泡到主机状态。
+    ///
+    /// **不阻塞调用方**:`start_hosting` 是同步 command(跑在 UI 线程上),
+    /// 建 QUIC 端点必须异步,所以监听在后台起,结果写回主机状态。
+    fn spawn_host_listener(
+        &self,
+        resolved: ResolvedConfig,
+        identity: Identity,
+        trust: Arc<Mutex<TrustStore>>,
+        bind_ip: Ipv4Addr,
+        port: u16,
+    ) {
+        let inner = self.inner.clone();
+        // 闸门与桌面端共享同一份信任库:用户点「同意」写库后,闸门立刻能看到。
+        let gate = Arc::new(HostTrustGate::new(trust));
+
+        tauri::async_runtime::spawn(async move {
+            let request = crate::transport::ListenRequest {
+                resolved: resolved.clone(),
+                identity: identity.clone(),
+                bind_addr: SocketAddr::new(bind_ip.into(), port),
+            };
+            // §3.3:证书校验交给闸门 —— 未信任的对端在这里就被挡住。
+            let verifier: Arc<dyn PeerVerifier> = Arc::clone(&gate) as Arc<dyn PeerVerifier>;
+            let listener = match crate::transport::listen_peer(request, verifier).await {
+                Ok(listener) => listener,
+                Err(err) => {
+                    // 监听失败 = 开播失败:如实反映到主机状态,不假装在播。
+                    let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
+                    guard.host.state = HostState::Error;
+                    guard.host.message = Some(format!("QUIC 监听失败: {}", err.message));
+                    guard.host.revision += 1;
+                    guard.host.updated_at_ms = now_ms();
+                    tracing::error!(reason = %err.message, "主机 QUIC 监听失败");
+                    return;
+                }
+            };
+            let listener = Arc::new(listener);
+            {
+                let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
+                guard.host_listener = Some(Arc::clone(&listener));
+                guard.host_gate = Some(Arc::clone(&gate));
+                guard.host.message = None;
+                guard.host.revision += 1;
+                guard.host.updated_at_ms = now_ms();
+            }
+
+            // 接受循环。
+            loop {
+                match listener.accept().await {
+                    Ok(conn) => {
+                        // 握手通过 → 对端已在信任库里 → 起主机会话。
+                        tracing::info!("客户端已通过信任校验,建立主机会话");
+                        spawn_host_session(inner.clone(), resolved.clone(), conn);
+                    }
+                    Err(err) => {
+                        if listener.is_closed() {
+                            break;
+                        }
+                        // 握手被拒是**预期**的:未信任的对端会反复重连,
+                        // 每次都产生/刷新一条待确认的配对请求(§3.3)。
+                        collect_host_pair_requests(&inner, &gate);
+                        tracing::debug!(reason = %err, "接受连接失败(可能是对端尚未获得信任)");
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                }
+            }
+        });
+    }
+
     /// 把发现到的、尚未信任的主机变成「待确认的配对请求」(§3.3 / 产品方案 §8)。
     ///
     /// 产品方案第 102 行把「人工确认后才写入信任库」列为不可省略的安全环节:
@@ -1019,6 +1194,8 @@ impl CrateService {
         let trusted: Vec<String> = self
             .lock()
             .trust
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .peers()
             .iter()
             .map(|p| p.fp.short_hex().to_lowercase())
@@ -1125,6 +1302,126 @@ fn report_transport_failure(
     });
 }
 
+/// 起主机会话并在后台推进(§3.9)。
+///
+/// 画面流水线由 `beam-host` 按 feature 决定(§4:桌面端**不能**直接依赖平台 crate):
+/// 开了 `platform` 就是 WGC 抓屏 + NVENC 硬编的真后端,没开就是空流水线
+/// (控制面照常,**一帧画面都不产出**)。
+///
+/// 错误处理:**真实错误**从 [`beam_host::HostSessionHandle::pump`] 冒泡,
+/// 直接反映到主机状态 —— 不用 `.ok()` 吞掉。
+/// 「编码器尚未产出帧」(`E6005`) 在 `beam-host` 侧已被显式容忍,
+/// 不会出现在这里(见决策 D6)。
+fn spawn_host_session(
+    inner: Arc<Mutex<CrateInner>>,
+    resolved: ResolvedConfig,
+    conn: beam_net::Conn,
+) {
+    tauri::async_runtime::spawn(async move {
+        let runtime = HostRuntime::new(HostConfig::from_resolved(&resolved));
+        let (pipeline, errors) = beam_host::default_frame_pipeline(runtime.config());
+        // 输入:桌面端没有平台注入器(§4 禁止直接依赖 beam-input),
+        // 用 beam-host 提供的空接收器把输入流读走 —— 客户端的输入通道不会堵住。
+        let input = beam_host::NoopInputSink::new();
+        let handle = match runtime
+            .start_quic_session_with_pipeline(conn, pipeline, errors, Some(input))
+            .await
+        {
+            Ok(handle) => Arc::new(handle),
+            Err(err) => {
+                let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
+                guard.host.state = HostState::Error;
+                guard.host.message = Some(format!("主机会话建立失败: {err}"));
+                guard.host.revision += 1;
+                guard.host.updated_at_ms = now_ms();
+                tracing::error!(reason = %err, "主机会话建立失败");
+                return;
+            }
+        };
+        {
+            let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard.host_session = Some(Arc::clone(&handle));
+            guard.host.state = HostState::Streaming;
+            // 对端此时还没在控制面上自我介绍(它的设备名/平台要等能力协商),
+            // 所以这里**如实**写成「未知设备 / 未知平台」,不编造。
+            guard.host.connected_device = Some(Device {
+                id: "unknown".to_string(),
+                name: "未知设备".to_string(),
+                platform: PLATFORM_UNKNOWN.to_string(),
+                fingerprint: String::new(),
+                paired_at: String::new(),
+                online: true,
+                streaming: true,
+                last_session: None,
+                perms: DevicePerms {
+                    view: true,
+                    keyboard: true,
+                    mouse: true,
+                    gamepad: true,
+                },
+            });
+            guard.host.message = None;
+            guard.host.revision += 1;
+            guard.host.updated_at_ms = now_ms();
+        }
+
+        // 推进会话:真实错误从这里冒泡(不静默吞掉)。
+        loop {
+            if let Err(err) = handle.pump() {
+                let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
+                guard.host.state = HostState::Error;
+                guard.host.message = Some(format!("串流出错: {err}"));
+                guard.host.revision += 1;
+                guard.host.updated_at_ms = now_ms();
+                tracing::error!(reason = %err, "主机会话出错");
+                return;
+            }
+            if handle.session.is_stopped() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    });
+}
+
+/// 把闸门观察到的「未信任对端」变成**待确认的配对请求**(§3.3 / 产品方案 §8)。
+///
+/// 这是**主机侧**的人工确认入口:
+///
+/// - 闸门在握手时拒绝了未信任的对端,并记下了它的**完整**指纹;
+/// - 这里把观察记录转成配对请求 → `pair://request` 事件 → 前端弹窗;
+/// - 用户点「同意」→ `approve_pair` 写信任库 → **下一次**握手放行。
+///
+/// 请求 id 用**完整指纹**(与客户端侧一致),这样 `approve_pair` 的
+/// `Fingerprint::from_hex` 能直接解析。
+///
+/// 设备名与平台:对端还没有连上控制面,拿不到它的自我介绍,
+/// 因此这里**如实**写成「未知设备 / 未知平台」,不编造。
+fn collect_host_pair_requests(inner: &Arc<Mutex<CrateInner>>, gate: &Arc<HostTrustGate>) {
+    let observed = gate.observed();
+    if observed.is_empty() {
+        return;
+    }
+    let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
+    for peer in observed {
+        let id = peer.fingerprint_hex();
+        if guard.pending_pairs.iter().any(|r| r.id == id) {
+            // 已经在待确认列表里:更新尝试次数即可,不重复生成。
+            continue;
+        }
+        let request = PairRequest {
+            id: id.clone(),
+            name: "未知设备".to_string(),
+            platform: PLATFORM_UNKNOWN.to_string(),
+            address: String::new(),
+            fingerprint: id,
+            requested_at_ms: now_ms(),
+        };
+        guard.pending_pairs.push(request.clone());
+        guard.new_pairs.push(request);
+    }
+}
+
 /// 把 `beam-session` 的事件翻译成桌面端这一层的事件。
 fn translate_session_event(event: SessionEvent) -> Option<SessionEventInfo> {
     match event {
@@ -1143,6 +1440,13 @@ fn translate_session_event(event: SessionEvent) -> Option<SessionEventInfo> {
             Some(SessionEventInfo::Error { code, retryable })
         }
         SessionEvent::Closed => Some(SessionEventInfo::Closed),
+        // §3.2 E2004:丢帧**不是**会话错误,既不结束会话也不进 Error 态。
+        // 桌面端的丢帧计数走 `frame_stats`(在 `session_stats` 里读),
+        // 所以这里不产生会话级事件。
+        SessionEvent::FramesDropped { count, code } => {
+            tracing::debug!(count, code, "传输层丢弃了过期帧");
+            None
+        }
         SessionEvent::StateChanged { .. } => None,
     }
 }
@@ -1175,7 +1479,7 @@ fn build_pairing(identity: &Identity, local_ip: Option<&str>, port: u16) -> Pair
         .as_bytes()
         .iter()
         .take(4)
-        .map(|b| char::from(b'0' + (b % 10) as u8))
+        .map(|b| char::from(b'0' + (b % 10)))
         .collect();
 
     PairingCode {
@@ -1334,7 +1638,7 @@ fn format_date(ms: u64) -> String {
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as i64;
+    let doe = z - era * 146_097;
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
     let y = yoe + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);

@@ -18,5 +18,12 @@ futures = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
+[dev-dependencies]
+# 本机回环测试（tests/loopback.rs）要起**真实 QUIC 端点**（§5 三通道）。
+# beam-net 是工作区内部的 crate，不是新增的第三方依赖。
+beam-net = { workspace = true }
+# 回环测试需要一个异步运行时（tokio 已在工作区依赖表里，见 workspace Cargo.toml）。
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+
 [lints]
 workspace = true
