@@ -17,7 +17,7 @@ import { useDeviceStore, useHostStore, useSessionStore, useToastStore } from '..
  * `sessionStore`(`connect` / `disconnect` 命令 + `session://stats` 500 ms 事件)。
  */
 export function ConnectPage() {
-  const { t } = useI18n()
+  const { t, language } = useI18n()
   const hosts = useDeviceStore((state) => state.hosts)
   const loadHosts = useDeviceStore((state) => state.loadHosts)
 
@@ -48,21 +48,24 @@ export function ConnectPage() {
     const ok = await connect(hostId)
     pushToast(
       ok ? 'success' : 'error',
-      ok ? t('connect.connected', { name }) : errorText(useSessionStore.getState().error),
+      ok ? t('connect.connected', { name }) : errorText(useSessionStore.getState().error, language),
     )
   }
 
   const handleDisconnect = async () => {
     const ok = await disconnect()
     setSeries([])
-    pushToast(ok ? 'info' : 'error', ok ? t('connect.disconnected') : errorText(useSessionStore.getState().error))
+    pushToast(
+      ok ? 'info' : 'error',
+      ok ? t('connect.disconnected') : errorText(useSessionStore.getState().error, language),
+    )
   }
 
   return (
     <div className="page">
       <PageHeader title={t('connect.title')} subtitle={t('connect.subtitle')} />
 
-      {error ? <ErrorBanner code={error.code} message={errorText(error)} /> : null}
+      {error ? <ErrorBanner code={error.code} message={errorText(error, language)} /> : null}
       {backend ? <BackendNotice backend={backend} /> : null}
 
       {session ? (

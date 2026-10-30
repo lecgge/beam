@@ -16,7 +16,7 @@ import { useDeviceStore, useHostStore, useToastStore } from '../stores'
  * `pair://request` 与 `discovery://updated` 事件增量更新。
  */
 export function DevicesPage() {
-  const { t } = useI18n()
+  const { t, language } = useI18n()
   const devices = useDeviceStore((state) => state.devices)
   const pairRequests = useDeviceStore((state) => state.pairRequests)
   const hosts = useDeviceStore((state) => state.hosts)
@@ -38,7 +38,9 @@ export function DevicesPage() {
     const device = await approve(id)
     pushToast(
       device ? 'success' : 'error',
-      device ? t('devices.allowed', { name }) : errorText(useDeviceStore.getState().error),
+      device
+        ? t('devices.allowed', { name })
+        : errorText(useDeviceStore.getState().error, language),
     )
   }
 
@@ -46,7 +48,7 @@ export function DevicesPage() {
     const ok = await reject(id)
     pushToast(
       ok ? 'info' : 'error',
-      ok ? t('devices.denied', { name }) : errorText(useDeviceStore.getState().error),
+      ok ? t('devices.denied', { name }) : errorText(useDeviceStore.getState().error, language),
     )
   }
 
@@ -55,7 +57,7 @@ export function DevicesPage() {
     const ok = await remove(id)
     pushToast(
       ok ? 'success' : 'error',
-      ok ? t('devices.removed', { name }) : errorText(useDeviceStore.getState().error),
+      ok ? t('devices.removed', { name }) : errorText(useDeviceStore.getState().error, language),
     )
   }
 
@@ -63,7 +65,7 @@ export function DevicesPage() {
     <div className="page">
       <PageHeader title={t('devices.title')} subtitle={t('devices.subtitle', { count: devices.length })} />
 
-      {error ? <ErrorBanner code={error.code} message={errorText(error)} /> : null}
+      {error ? <ErrorBanner code={error.code} message={errorText(error, language)} /> : null}
       {backend ? <BackendNotice backend={backend} /> : null}
 
       <Card>

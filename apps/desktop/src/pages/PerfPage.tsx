@@ -16,7 +16,7 @@ import { useHostStore, usePerfStore, useToastStore } from '../stores'
  * Release 构建下后端返回 E11003,页面显示「仅 Debug 构建可用」,而不是报错崩溃。
  */
 export function PerfPage() {
-  const { t } = useI18n()
+  const { t, language } = useI18n()
   const tick = usePerfStore((state) => state.tick)
   const snapshot = usePerfStore((state) => state.snapshot)
   const available = usePerfStore((state) => state.available)
@@ -37,7 +37,7 @@ export function PerfPage() {
     if (result) {
       pushToast('success', t('perf.exported', { path: result.path }))
     } else {
-      pushToast('error', errorText(usePerfStore.getState().error))
+      pushToast('error', errorText(usePerfStore.getState().error, language))
     }
   }
 
@@ -49,7 +49,7 @@ export function PerfPage() {
         extra={<span className="badge warn">{t('perf.debugOnly')}</span>}
       />
 
-      {error ? <ErrorBanner code={error.code} message={errorText(error)} /> : null}
+      {error ? <ErrorBanner code={error.code} message={errorText(error, language)} /> : null}
       {backend ? <BackendNotice backend={backend} /> : null}
 
       {!available && !snapshot ? (

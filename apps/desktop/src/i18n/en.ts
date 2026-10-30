@@ -35,6 +35,8 @@ export const en: Dictionary = {
     copy: 'Copy',
     copied: 'Copied',
     demo: 'Demo data',
+    errorFallback: 'The operation failed; please try again later',
+    retryableHint: 'retryable',
   },
   home: {
     title: 'This PC is ready',
@@ -172,5 +174,100 @@ export const en: Dictionary = {
     crates: 'Backed by crates/',
     stubHint:
       'The backend is currently a local stub: the device list and latency figures are synthetic demo values, not measurements. It switches automatically once crates/beam-host and friends land.',
+  },
+  /**
+   * Error-code texts (§3.11).
+   *
+   * Mirrors `zh-CN.ts` key for key (the `Dictionary` type enforces it at compile time).
+   * The backend fails with `{code:"E2001", message, retryable}` and the UI looks the
+   * text up by `code`; `message` is only used for logs and debugging.
+   */
+  errors: {
+    // E1xxx proto (beam-proto §3.1)
+    E1001: "The peer's protocol version is incompatible; upgrade Beam or use a client on the same version",
+    E1002: 'A received network message could not be decoded (version mismatch or corrupted data); reconnect',
+    E1003: 'The peer sent a message type this build does not know; the versions likely differ, so update Beam',
+    E1004: 'The two sides share no codec, resolution, or frame rate; adjust the quality settings and retry',
+    // E2xxx net (beam-net §3.2)
+    E2001: 'Connection timed out; check the network and retry',
+    E2002: 'The peer rejected the certificate check; make sure the host is trusted',
+    E2003: 'This network does not support connectionless datagrams, so streaming is unavailable',
+    E2004: 'Some video frames expired and were dropped; expect stutter',
+    E2005: 'Video fragments could not be reassembled, so this frame is lost; expect a stutter — check the network or lower the bitrate',
+    E2006: 'Too many packets were lost and the FEC redundancy could not recover them; lower the bitrate or use a wired network',
+    E2007: 'This PC has no TLS certificate, so it cannot start listening; regenerate the device identity and retry',
+    E2008: 'Network I/O failed (the connection dropped or the adapter is faulty); check the network and retry',
+    // E3xxx pair (beam-pair §3.3)
+    E3001: 'The PIN is incorrect; check the digits shown on the host screen',
+    E3002: 'Too many PIN attempts; locked for 60 seconds',
+    E3003: 'The pairing QR code has expired; refresh it and scan again',
+    E3004: 'The device fingerprint does not match what was expected; this could be a man-in-the-middle attempt, so it was rejected',
+    E3005: 'The pairing handshake message is malformed (version mismatch or corrupted data); scan the code again',
+    E3006: 'The local certificate and private key could not be read or written; check disk permissions and free space',
+    E3007: 'The scanned code is not a valid Beam pairing payload; scan it again',
+    // E4xxx discovery (beam-discovery §3.4)
+    E4001: 'LAN discovery failed; check the firewall and network adapter settings',
+    E4002: 'This PC could not register its LAN service, so other devices may not see it; check the firewall settings',
+    E4003: 'LAN hosts could not be browsed, so the device list may be empty; check the firewall settings',
+    E4004: 'The LAN advertisement is invalid, so this host will not show up in the device list',
+    // E5xxx capture (beam-capture §3.5)
+    E5001: 'No capturable display was found',
+    E5002: 'Exclusive-fullscreen apps cannot be captured; DXGI capture was attempted',
+    E5003: 'The display device was lost; pick the display again',
+    E5004: 'The capture backend is not compiled into this build, so no frames can be captured; use a build that includes it',
+    // E6xxx encode (beam-encode §3.6)
+    E6001: 'No hardware encoder is available',
+    E6002: 'The number of concurrent streaming sessions has reached its limit',
+    E6003: 'The encoder does not support these parameters; the quality was lowered automatically',
+    E6004: 'The encoding backend is not compiled into this build, so no video stream can be produced; use a build that includes it',
+    E6005: "The encoder is still buffering, so there is no output for this round (this is expected: hardware encoders have one frame of latency, the next frame will arrive)",
+    // E7xxx audio (beam-audio §3.7)
+    E7001: 'The audio device could not be opened; check whether the default output device is in use',
+    E7002: "Audio encoding failed and this round's audio was dropped; check the audio device and retry",
+    E7003: 'Audio output failed and playback may be interrupted; check the system volume and output device',
+    E7004: 'The audio backend is not compiled into this build, so no audio is captured or streamed',
+    // E8xxx input (beam-input §3.8)
+    E8001: 'No ViGEmBus driver was detected, so the virtual gamepad is unavailable; install ViGEmBus and restart',
+    E8002: 'Beam is not allowed to inject input; run it as administrator',
+    E8003: 'The input backend is not compiled into this build, so no gamepad input can be injected',
+    E8004: 'The key code has no virtual-key mapping, so this key press is not injected; the client may use a key this build does not support',
+    // E9xxx session (beam-session §3.9)
+    E9001: 'This operation is not allowed in the current state',
+    E9002: 'Another streaming session is already active, so disconnect it first; a missing session dependency is reported here too',
+    E9003: 'Reconnecting failed and the session ended (the peer may have gone offline or the network dropped)',
+    E9004: 'The streaming session is already closed; reconnect to continue',
+    E9005: 'The network transfer to the host failed and the picture was interrupted; check the network and reconnect',
+    // E91xx host-app-only session codes (no counterpart in the crates)
+    E9101: 'The device was not found; it may have been removed',
+    E9102: 'The host was not found; refresh the list and retry',
+    // E10xxx decode / render (beam-decode, beam-render §3.10)
+    E10001: 'No hardware decoder is available on this PC, so the host picture cannot be shown',
+    E10002: 'The frame could not be decoded, so it cannot be shown; reconnect or lower the bitrate',
+    E10003: 'The graphics device was reset or removed and the decoder must be rebuilt; reconnect',
+    E10004: 'The decoding backend is not compiled into this build, so the host picture cannot be shown',
+    E10011: 'The render device was lost, so frames cannot be presented; reconnect or switch the display',
+    E10012: 'The swap chain could not be created, so frames cannot be presented; try another display or restart Beam',
+    E10013: 'A frame missed its presentation deadline and was dropped; expect stutter',
+    E10014: 'The rendering backend is not compiled into this build, so the picture cannot be shown',
+    // E11xxx config (beam-config §3.14 shares the segment with the host app)
+    E11001: 'A setting value is invalid, or the config file could not be parsed',
+    E11002: 'The config file could not be read or written, or a setting value is invalid',
+    E11003: 'Performance statistics are available in Debug builds only; an unavailable config store is reported here too, so check disk permissions',
+    // E12xxx shared by the log crate and the host app
+    E12001: 'Unknown command; a failed log initialization is reported here too',
+    // E13xxx perf (beam-perf §3.13)
+    E13001: 'The performance-stats module is disabled, so no performance data can be collected',
+    E13002: 'Exporting the performance data failed; check that the target path is writable',
+    // E14xxx ffi (beam-ffi, used by the Android app)
+    E14001: 'The pairing QR payload is invalid',
+    E14002: 'PIN verification failed',
+    E14003: 'Connecting to the host failed',
+    E14004: 'LAN hosts could not be discovered',
+    E14005: 'This feature is not supported on the current platform',
+    // E15xxx gamestream (beam-gamestream)
+    E15001: 'The GameStream protocol version is incompatible; upgrade the client or use native Beam',
+    E15002: 'There is no capability overlap with the GameStream host, so streaming is impossible',
+    // fallback
+    E9999: 'An unknown error occurred; check the logs for details',
   },
 }

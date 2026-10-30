@@ -2,11 +2,19 @@
  * 错误映射约定。
  *
  * §3.11:command 失败时 Rust 侧返回 `{code:"E2001", message, retryable}`,
- * 前端**按 code 显示中文文案**——`message` 只用于日志与调试细节。
+ * 前端**按 code 显示文案**——`message` 只用于日志与调试细节。
+ *
+ * 文案表放在 i18n 词表里(`i18n/zh-CN.ts` / `i18n/en.ts` 的 `errors` 段):
+ * 中英文两份由 `Dictionary` 类型在编译期约束键名完全一致,这里只负责「码 → 文案」。
+ * 码位覆盖 crates 侧真实会透传上来的错误(见 `i18n/*.ts` 里 `errors` 段的注释),
+ * 因为传输层会把 `beam-net` 等 crate 的 `code_str()` 直接当作 code 上报。
  *
  * Tauri 2 会把 command 的 `Err` 负载序列化成 JSON **字符串**再 reject,
  * 所以这里同时兼容「JSON 字符串」与「已经是对象」两种形态。
  */
+
+import { en } from '../i18n/en'
+import { zhCN, type Dictionary, type Language } from '../i18n/zh-CN'
 
 export interface BeamError {
   /** 形如 `E2001` 的稳定错误码。 */
@@ -18,51 +26,32 @@ export interface BeamError {
 }
 
 /**
- * 错误码 → 中文文案。
+ * 错误文案的语言,与 i18n 的 {@link Language} 取值一致。
  *
- * 码位沿用 §3.1–§3.15 的分段:
- * E1 proto / E2 net / E3 pair / E4 discovery / E5 capture / E6 encode /
- * E7 audio / E8 input / E9 session / E10 decode / E11 config / E12 外壳。
+ * 单独起名是为了让调用点读起来更明确(「给错误文案用的语言」),
+ * 底层仍然是 i18n 的同一个联合类型,不会两处漂移。
  */
-const ERROR_TEXT: Record<string, string> = {
-  // E2xxx net
-  E2001: '连接超时,请检查网络后重试',
-  E2002: '对方拒绝了证书校验,请确认对方是可信主机',
-  E2003: '当前网络不支持无连接数据报,串流不可用',
-  E2004: '部分视频帧已过期丢弃,画面可能有卡顿',
-  // E3xxx pair
-  E3001: 'PIN 码不正确,请核对主机屏幕上的数字',
-  E3002: 'PIN 尝试次数过多,已锁定 60 秒',
-  E3003: '配对二维码已过期,请刷新后重新扫码',
-  E3004: '设备指纹与预期不符,可能是中间人攻击,已拒绝',
-  // E4xxx discovery
-  E4001: '局域网搜索失败,请检查防火墙与网卡设置',
-  // E5xxx capture
-  E5001: '没有找到可抓取的显示器',
-  E5002: '独占全屏应用无法抓取,已尝试切换到 DXGI 模式',
-  E5003: '显示设备已丢失,请重新选择显示器',
-  // E6xxx encode
-  E6001: '没有找到可用的硬件编码器',
-  E6002: '同时串流的会话数已达上限',
-  E6003: '当前参数不被编码器支持,已自动降档',
-  // E9xxx session
-  E9001: '当前状态不允许执行该操作',
-  E9002: '已经有一条串流会话,请先断开',
-  E9003: '重连失败,会话已结束',
-  E9101: '找不到该设备',
-  E9102: '找不到该主机,请刷新列表后重试',
-  // E11xxx config
-  E11001: '设置项取值不合法',
-  E11002: '配置文件读写失败',
-  E11003: '性能统计仅在 Debug 构建可用',
-  // E12xxx 应用外壳
-  E12001: '未知的命令',
-  // 兜底
-  E9999: '发生未知错误',
+export type ErrorLanguage = Language
+
+type ErrorTable = Dictionary['errors']
+type CommonTable = Dictionary['common']
+
+/** 码 → 文案。两套词表都来自 i18n,键名由 `Dictionary` 类型保证一致。 */
+const ERROR_TEXT: Record<ErrorLanguage, ErrorTable> = {
+  'zh-CN': zhCN.errors,
+  en: en.errors,
 }
 
-/** 未登记错误码的兜底文案。 */
-export const FALLBACK_ERROR_TEXT = '操作失败,请稍后重试'
+/** 通用词条(兜底文案、可重试提示)。 */
+const COMMON_TEXT: Record<ErrorLanguage, CommonTable> = {
+  'zh-CN': zhCN.common,
+  en: en.common,
+}
+
+/** 未登记错误码的兜底文案(按语言取)。 */
+export function fallbackErrorText(language: ErrorLanguage = 'zh-CN'): string {
+  return COMMON_TEXT[language]?.errorFallback ?? COMMON_TEXT['zh-CN'].errorFallback
+}
 
 /** 把 Tauri reject 出来的原始值规整成 {@link BeamError}。 */
 export function toBeamError(raw: unknown): BeamError {
@@ -95,19 +84,26 @@ function normalize(raw: Partial<BeamError>): BeamError {
   }
 }
 
-/** 按错误码取中文文案;未登记的码退回兜底文案,并附上后端 message 便于排查。 */
-export function errorText(error: BeamError | null | undefined): string {
+/** 按错误码取文案;未登记的码退回兜底文案,并附上后端 message 便于排查。 */
+export function errorText(error: BeamError | null | undefined, language: ErrorLanguage = 'zh-CN'): string {
   if (!error) return ''
-  const text = ERROR_TEXT[error.code] ?? FALLBACK_ERROR_TEXT
-  if (ERROR_TEXT[error.code]) return text
-  return error.message ? `${text}(${error.message})` : text
+  const table = ERROR_TEXT[language] ?? ERROR_TEXT['zh-CN']
+  const text = table[error.code as keyof ErrorTable]
+  if (text) return text
+  const fallback = fallbackErrorText(language)
+  return error.message ? `${fallback}(${error.message})` : fallback
 }
 
-/** 供 UI 展示的完整描述:中文文案 + 可重试提示。 */
-export function errorDetail(error: BeamError | null | undefined): string {
+/** 供 UI 展示的完整描述:文案 + 可重试提示。 */
+export function errorDetail(
+  error: BeamError | null | undefined,
+  language: ErrorLanguage = 'zh-CN',
+): string {
   if (!error) return ''
-  const base = errorText(error)
-  return error.retryable ? `${base}(可重试)` : base
+  const base = errorText(error, language)
+  if (!error.retryable) return base
+  const hint = (COMMON_TEXT[language] ?? COMMON_TEXT['zh-CN']).retryableHint
+  return `${base}(${hint})`
 }
 
 /** 供调试面板使用的原始码。 */

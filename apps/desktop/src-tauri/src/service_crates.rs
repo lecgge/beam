@@ -1054,8 +1054,13 @@ impl CrateService {
             let transport = match NetTransport::connect(conn).await {
                 Ok(t) => t,
                 Err(e) => {
-                    let err =
-                        BeamError::retryable(E_CONNECTION_TIMEOUT, format!("建立会话失败: {e}"));
+                    // 透传会话层的真实码(`SessionError::TransportFailed` = E9005),
+                    // 不要一律记成连接超时(E2001):两者对用户的建议动作不同。
+                    let err = BeamError::new(
+                        &e.code_str(),
+                        format!("建立会话失败 {}: {e}", e.code_str()),
+                        e.retryable(),
+                    );
                     report_transport_failure(&inner, &outcome_slot, &err, &host_name);
                     return;
                 }

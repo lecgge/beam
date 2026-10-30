@@ -10,9 +10,9 @@
 import { createContext, useContext, useMemo, type ReactNode } from 'react'
 
 import { en } from './en'
-import { zhCN, type Dictionary } from './zh-CN'
+import { zhCN, type Dictionary, type Language } from './zh-CN'
 
-export type Language = 'zh-CN' | 'en'
+export type { Language }
 
 export const LANGUAGES: Language[] = ['zh-CN', 'en']
 

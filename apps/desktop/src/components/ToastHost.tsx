@@ -20,7 +20,7 @@ export function ToastHost() {
   )
 }
 
-/** 错误条:按错误码展示中文文案(§3.11)。 */
+/** 错误条:按错误码展示当前语言的文案(§3.11)。 */
 export function ErrorBanner({
   code,
   message,
@@ -30,13 +30,15 @@ export function ErrorBanner({
   message?: string | null
   onRetry?: () => void
 }) {
-  const { t } = useI18n()
+  const { t, language } = useI18n()
   if (!code) return null
 
   return (
     <div className="error-banner" role="alert">
       <span className="error-code">{code}</span>
-      <span className="error-text">{message || errorText({ code, message: message ?? '', retryable: false })}</span>
+      <span className="error-text">
+        {message || errorText({ code, message: message ?? '', retryable: false }, language)}
+      </span>
       {onRetry ? (
         <button type="button" className="btn ghost small" onClick={onRetry}>
           {t('common.retry')}

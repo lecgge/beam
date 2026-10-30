@@ -23,7 +23,7 @@ import {
  * `deviceStore.devices`(list_devices)、`deviceStore.pairing`(get_pairing_code + pair://code-rotated)。
  */
 export function HomePage() {
-  const { t } = useI18n()
+  const { t, language } = useI18n()
   const status = useHostStore((state) => state.status)
   const error = useHostStore((state) => state.error)
   const busy = useHostStore((state) => state.busy)
@@ -56,12 +56,15 @@ export function HomePage() {
       bitrateMbps: settings?.bitrateMbps,
       gamepad: true,
     })
-    pushToast(ok ? 'success' : 'error', ok ? t('home.started') : errorText(useHostStore.getState().error))
+    pushToast(
+      ok ? 'success' : 'error',
+      ok ? t('home.started') : errorText(useHostStore.getState().error, language),
+    )
   }
 
   const handleStop = async () => {
     const ok = await stop()
-    pushToast(ok ? 'success' : 'error', ok ? t('home.stopped') : errorText(useHostStore.getState().error))
+    pushToast(ok ? 'success' : 'error', ok ? t('home.stopped') : errorText(useHostStore.getState().error, language))
   }
 
   const recent = devices.filter((device) => device.lastSession !== null)
@@ -76,7 +79,7 @@ export function HomePage() {
         })}
       />
 
-      {error ? <ErrorBanner code={error.code} message={errorText(error)} /> : null}
+      {error ? <ErrorBanner code={error.code} message={errorText(error, language)} /> : null}
       {status ? <BackendNotice backend={status.backend} /> : null}
 
       <div className="home-grid">

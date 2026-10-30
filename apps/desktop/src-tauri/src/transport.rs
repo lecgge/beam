@@ -91,9 +91,15 @@ pub async fn connect_peer(request: TransportRequest) -> Result<beam_net::Conn, B
     NetEndpoint::connect(request.addr, net_config, verifier)
         .await
         .map_err(|err| {
-            BeamError::retryable(
+            // 码直接取 `beam-net` 的 `code_str()`(E2xxx 段),前端按码查文案表。
+            //
+            // 可重试性也按 crate 自己的分类走(`NetError::retryable`):
+            // 证书被拒(E2002)、缺本机证书(E2007)重试也没用,
+            // 必须提示用户改配置,而不是弹一个「可重试」。
+            BeamError::new(
                 &err.code_str(),
                 format!("QUIC 握手失败 {}: {}", err.code_str(), err.text()),
+                err.retryable(),
             )
         })
 }

@@ -38,10 +38,12 @@ export const usePerfStore = create<PerfStoreState>((set) => ({
     } catch (raw) {
       const error = toBeamError(raw)
       // Release 构建下后端返回 E11003:不是故障,而是「功能按设计不可用」。
+      // 所以不把它放进 `error` 槽——页面会用 EmptyState 提示「仅 Debug 构建可用」,
+      // 塞进 `error` 槽同一个意思会被提示两遍。
       set({
-        error,
+        error: error.code === 'E11003' ? null : error,
         available: false,
-        snapshot: error.code === 'E11003' ? null : null,
+        snapshot: null,
       })
     }
   },

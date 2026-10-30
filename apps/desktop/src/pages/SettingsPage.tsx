@@ -33,7 +33,7 @@ export function SettingsPage() {
     const ok = await patch(next)
     if (ok && successText) pushToast('success', successText)
     if (!ok) {
-      pushToast('error', errorText(useSettingsStore.getState().error))
+      pushToast('error', errorText(useSettingsStore.getState().error, language))
     }
   }
 
@@ -52,7 +52,7 @@ export function SettingsPage() {
     <div className="page">
       <PageHeader title={t('settings.title')} subtitle={t('settings.subtitle')} />
 
-      {error ? <ErrorBanner code={error.code} message={errorText(error)} /> : null}
+      {error ? <ErrorBanner code={error.code} message={errorText(error, language)} /> : null}
 
       <div className="settings-grid">
         <Card>
