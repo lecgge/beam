@@ -23,20 +23,15 @@ pub const SAMPLES_PER_FRAME: usize = (SAMPLE_RATE as usize * FRAME_DURATION_MS a
 pub const DEFAULT_BITRATE_BPS: u32 = 128_000;
 
 /// 音频模式（§3.7 `audio_mode=host+stream|stream_only|off`）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum AudioMode {
     /// 主机采集并串流。
     HostAndStream,
     /// 只串流（主机不采集）。
     StreamOnly,
     /// 关闭。
+    #[default]
     Off,
-}
-
-impl Default for AudioMode {
-    fn default() -> Self {
-        AudioMode::Off
-    }
 }
 
 /// 音频配置（§3.7）。

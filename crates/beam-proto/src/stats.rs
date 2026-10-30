@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 /// 客户端回报的串流统计（§5 控制消息 `StatsReport`）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatsReport {
     /// 会话号（`Resume` 复用）。
     pub session_id: u64,
@@ -25,22 +25,6 @@ pub struct StatsReport {
     pub e2e_us: u32,
     /// 累计掉帧数。
     pub dropped_frames: u32,
-}
-
-impl Default for StatsReport {
-    fn default() -> Self {
-        Self {
-            session_id: 0,
-            fps: 0,
-            bitrate_bps: 0,
-            loss_ppm: 0,
-            rtt_us: 0,
-            decode_us: 0,
-            render_us: 0,
-            e2e_us: 0,
-            dropped_frames: 0,
-        }
-    }
 }
 
 #[cfg(test)]

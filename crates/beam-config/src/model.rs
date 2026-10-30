@@ -35,10 +35,11 @@ impl Default for AudioMode {
 ///
 /// 这是**全仓唯一**的抓屏后端枚举定义：beam-config 负责持久化与校验，
 /// beam-capture 直接重新导出本类型，不再自带一份平行的定义。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CaptureBackend {
     /// 自动选择（优先 WGC，失败回退 DXGI）。
+    #[default]
     Auto,
     /// Windows Graphics Capture。
     Wgc,
@@ -66,12 +67,6 @@ impl CaptureBackend {
             "dxgi" => Some(CaptureBackend::Dxgi),
             _ => None,
         }
-    }
-}
-
-impl Default for CaptureBackend {
-    fn default() -> Self {
-        CaptureBackend::Auto
     }
 }
 
@@ -928,7 +923,6 @@ mod tests {
                 },
                 ..Default::default()
             },
-            ..Default::default()
         };
         assert_eq!(merge(&layers).capture.backend, "dxgi");
         let no_cli = ConfigLayers {

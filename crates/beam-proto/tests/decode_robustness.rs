@@ -124,7 +124,7 @@ proptest! {
     #[test]
     fn unknown_family_tag_is_rejected(tag in 0u8..=255) {
         // 1 = 控制、2 = 输入、3 = 统计，其余都是非法族标签。
-        prop_assume!(!matches!(tag, 1 | 2 | 3));
+        prop_assume!(!matches!(tag, 1..=3));
         let bytes = [tag, 0x00];
         let out = try_call(|| decode(&bytes));
         prop_assert!(out.is_some(), "decode 在非法族标签上 panic 了: {tag:#04x}");

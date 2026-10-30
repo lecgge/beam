@@ -215,7 +215,7 @@ fn trailing_unknown_bytes_of_any_length_are_ignored() {
     let base = encode_bytes(&msg);
     for extra in 1..=64usize {
         let mut bytes = base.clone();
-        bytes.extend(std::iter::repeat(0x5A).take(extra));
+        bytes.extend(std::iter::repeat_n(0x5A, extra));
         let back: ControlMsg = decode_as(&bytes).expect("尾部追加字节应被忽略");
         assert_eq!(back, msg, "追加 {extra} 字节后解析结果发生漂移");
     }

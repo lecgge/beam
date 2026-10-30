@@ -194,7 +194,7 @@ fn budget_check() -> bool {
         decode_ns = decode_ns.min(t1.elapsed().as_nanos() / u128::from(BATCH));
     }
 
-    let budget_ns = BUDGET.as_nanos() as u128;
+    let budget_ns = BUDGET.as_nanos();
     let ok = encode_ns <= budget_ns && decode_ns <= budget_ns;
     println!(
         "BUDGET CHECK: encode={encode_ns} ns/op, decode={decode_ns} ns/op, budget={budget_ns} ns -> {}",
