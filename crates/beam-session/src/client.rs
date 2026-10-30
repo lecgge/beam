@@ -13,6 +13,25 @@
 //! 客户端收到的**第一帧**必须是关键帧。首帧不是关键帧时，
 //! 客户端发**一次** `RequestIdr` 让主机补一个 IDR（不重复发）。
 //!
+//! ## 重连（§4.1「3 s 无帧 → Reconnecting」、产品方案 §3 第 5 步）
+//!
+//! 断线有两条触发路径，都进 `Reconnecting`：
+//!
+//! 1. **停滞**：连续 `stall_threshold`（默认 3 s）没收到任何帧 / 控制消息；
+//! 2. **传输故障**：控制流或画面流报错（连接真的断了）。
+//!
+//! 进入 `Reconnecting` 之后：
+//!
+//! - 传输工厂重建一条**新连接**（§4.1「新连接/迁移」），
+//!   在新连接上重发 `Hello` 重新做能力协商，并补一条 `Resume{session_id}`
+//!   让主机认回**同一个会话**——**信任已经建立过，不重走 PIN**；
+//! - 新连接上收到任何数据即视为恢复：回到 `Streaming` 并请求一次 IDR；
+//! - 超过 `reconnect_timeout`（默认 30 s）仍未恢复 → `Closed`（`E9003`）。
+//!
+//! 重连期间会话**保留最后一帧**：会话层从不清屏，
+//! 上层用 [`crate::handle::SessionHandle::reconnecting`] 取
+//! [`crate::event::ReconnectingInfo`] 显示「重连中」。
+//!
 //! ## 丢帧上报（§3.2 **E2004**）
 //!
 //! 传输层统计到的过期帧由 [`Transport::take_dropped_frames`] 取出，
@@ -31,10 +50,19 @@ use crate::control::{
 };
 use crate::error::SessionError;
 use crate::event::{
-    FrameConsumer, RateControl, SessionEvent, SessionInput, Transport, TransportFactory,
+    FrameConsumer, RateControl, ReconnectingInfo, SessionEvent, SessionInput, Transport,
+    TransportFactory,
 };
 use crate::handle::{SessionHandle, SessionInner, SessionRunner, SessionTimeouts};
 use crate::state::{SessionState, StateMachine};
+use crate::summary::SessionCounters;
+
+/// 重连尝试间隔（毫秒）。
+///
+/// §4.1 只要求「30 s 内自动重连」：间隔太短会空转（反复建连），
+/// 太长会白白浪费重连窗口。固定 1 s 是个折中：
+/// 30 s 窗口内最多尝试 30 次。
+pub const RECONNECT_RETRY_INTERVAL_MS: u64 = 1_000;
 
 /// 要连接的主机。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -57,8 +85,12 @@ pub struct ClientSessionConfig {
     pub stall_threshold: Duration,
     /// 传输工厂（可选）。
     ///
-    /// 未注入时 [`ClientSession::connect`] 会把会话推进到 `Error` 并给出 `E9002`，
+    /// [`ClientSession::connect`] 只接受 `cfg`，因此**传输只能从这里注入**：
+    /// 留空时会话会明确报 `E9002`（依赖缺失）并停在 `Idle`，
     /// 因为没有传输就无法建立连接——这比静默挂起更容易定位问题。
+    ///
+    /// 工厂会被**保留**在会话里：断线重连时用它重建一条新连接
+    /// （§4.1「新连接/迁移 + Resume{session_id}」）。
     pub transport: Option<Box<dyn TransportFactory>>,
 }
 
@@ -126,6 +158,11 @@ pub(crate) struct ClientRunner {
     peer: PeerAddr,
     consumer: Option<Box<dyn FrameConsumer>>,
     transport: Option<Box<dyn Transport>>,
+    /// 传输工厂：保留下来，重连时用它重建一条**新连接**
+    /// （§4.1「新连接/迁移 + Resume{session_id}」）。
+    ///
+    /// 没有工厂就重建不出传输——此时只能等 `reconnect_timeout` 超时回到列表。
+    factory: Option<Box<dyn TransportFactory>>,
     inner: Weak<SessionInner>,
     ctrl: ControlContext,
     /// 会话号（§5 `Resume{session_id}`）。
@@ -146,6 +183,22 @@ pub(crate) struct ClientRunner {
     last_stats_ms: u64,
     /// 本端统计。
     stats: StatsReport,
+    /// 是否仍需（重新）建立传输：进入 `Reconnecting` 置位，恢复串流才清掉。
+    reconnect_pending: bool,
+    /// 已尝试重连次数（统计用）。
+    reconnect_attempts: u32,
+    /// 进入 `Reconnecting` 的次数（统计用）。
+    reconnects: u32,
+    /// 下次允许重连尝试的时刻（毫秒）。
+    next_retry_ms: u64,
+    /// 最近一次重建传输的时刻（毫秒）。
+    last_rebuild_ms: u64,
+    /// 会话开始时刻（毫秒，统计汇总用）。
+    started_ms: u64,
+    /// 已接收的画面帧数。
+    frames_received: u64,
+    /// 累计丢帧数。
+    dropped_total: u64,
 }
 
 impl ClientRunner {
@@ -194,6 +247,26 @@ impl ClientRunner {
         }
     }
 
+    /// 传输层故障（§4.1：断线要能自动重连，而不是直接判死）。
+    ///
+    /// - 串流中且有传输工厂 → 进 `Reconnecting`，走「重建连接 + `Resume`」；
+    /// - 重连中 → 保持重连态，等下一次重试；
+    /// - 其余状态（协商中 / 连接中 / 无工厂）→ 进 `Error` 态。
+    fn on_transport_error(&mut self, err: &SessionError) {
+        match self.machine.state() {
+            SessionState::Streaming if self.factory.is_some() => {
+                tracing::warn!(reason = %err, "传输故障,进入重连");
+                self.enter_reconnecting();
+            }
+            SessionState::Reconnecting => {
+                // 重连期间传输又坏了：保持重连态，等下一次重试。
+                tracing::warn!(reason = %err, "重连期间传输再次故障");
+                self.reconnect_pending = true;
+            }
+            _ => self.fail(err),
+        }
+    }
+
     fn now_ms(&self) -> u64 {
         self.inner.upgrade().map(|i| i.now_ms()).unwrap_or(0)
     }
@@ -211,12 +284,16 @@ impl ClientRunner {
 
     /// 发送一条控制消息（§5 控制 stream 0）。
     fn send_control(&mut self, msg: ControlMsg) {
-        let result = match self.transport.as_mut() {
+        if let Err(e) = self.try_send_control(msg) {
+            self.on_transport_error(&e);
+        }
+    }
+
+    /// 发送一条控制消息并把错误**交回调用方**（不直接判死会话）。
+    fn try_send_control(&mut self, msg: ControlMsg) -> Result<(), SessionError> {
+        match self.transport.as_mut() {
             Some(t) => t.send_control(msg),
-            None => return,
-        };
-        if let Err(e) = result {
-            self.fail(&e);
+            None => Ok(()),
         }
     }
 
@@ -227,7 +304,104 @@ impl ClientRunner {
             None => return,
         };
         if let Err(e) = result {
-            self.fail(&e);
+            self.on_transport_error(&e);
+        }
+    }
+
+    /// 转到 `Streaming`；已经在串流态时**不重复转移**。
+    ///
+    /// §3.9 的转移表里没有 `Streaming → Streaming`，
+    /// 直接转移会报 `E9001`（非法转移）——重连恢复时很容易撞上
+    /// （先由 `on_data` 恢复，再由 `HelloAck` 触发协商完成）。
+    fn enter_streaming(&mut self) -> bool {
+        if self.machine.state() == SessionState::Streaming {
+            return true;
+        }
+        if self.goto(SessionState::Streaming).is_err() {
+            return false;
+        }
+        self.reconnect_since_ms = None;
+        // 恢复串流：不再需要（重新）建立传输。
+        self.reconnect_pending = false;
+        true
+    }
+
+    /// 进入 `Reconnecting`（§4.1「3 s 无帧 → Reconnecting」）。
+    ///
+    /// 只从 `Streaming` 进入：§3.9 的转移表把 `Reconnecting` 挂在 `Streaming` 之下。
+    /// 重连期间**保留最后一帧**：这里不清屏、不动消费者。
+    fn enter_reconnecting(&mut self) {
+        if self.machine.state() != SessionState::Streaming {
+            return;
+        }
+        if self.goto(SessionState::Reconnecting).is_err() {
+            return;
+        }
+        let now = self.now_ms();
+        self.reconnect_since_ms = Some(now);
+        // 需要重建传输；第一次尝试立即进行（`next_retry_ms = now`）。
+        self.reconnect_pending = true;
+        self.next_retry_ms = now;
+        self.reconnects += 1;
+        tracing::info!(session_id = self.session_id, "进入重连");
+    }
+
+    /// 尝试重建传输并恢复会话（§4.1「新连接/迁移 + Resume{session_id}」）。
+    ///
+    /// 信任已经建立过，因此**不重走配对**：
+    /// 只在新连接上重发 `Hello` 做一次能力协商，
+    /// 再补一条 `Resume{session_id}` 让主机认回同一个会话。
+    ///
+    /// 重建失败不判死：按 [`RECONNECT_RETRY_INTERVAL_MS`] 间隔重试；
+    /// 新连接连上了却没握手成功（收不到 `HelloAck`）时，
+    /// 等一个 `stall_threshold` 再重建一条——直到 `reconnect_timeout`
+    /// 超时（§4.1「超时回到列表」）。
+    fn maybe_reconnect(&mut self) {
+        if self.machine.state() != SessionState::Reconnecting || !self.reconnect_pending {
+            return;
+        }
+        let now = self.now_ms();
+        if now < self.next_retry_ms {
+            return;
+        }
+        // 刚重建过：先给新连接一个 `stall_threshold` 的时间握手 / 收数据，
+        // 别一失败就连着建（§4.1 只要求「30 s 内自动重连」）。
+        let threshold = duration_ms(self.timeouts().stall_threshold);
+        if self.reconnect_attempts > 0 && now.saturating_sub(self.last_rebuild_ms) < threshold {
+            return;
+        }
+        self.next_retry_ms = now + RECONNECT_RETRY_INTERVAL_MS;
+        let Some(factory) = self.factory.as_mut() else {
+            // 没有工厂就重建不出传输：只能等重连超时。
+            return;
+        };
+        match factory.connect() {
+            Ok(transport) => {
+                self.transport = Some(transport);
+                self.reconnect_attempts += 1;
+                self.last_rebuild_ms = now;
+                // 新的一轮串流：首帧策略重新生效（§4.1「首帧 IDR」）。
+                self.first_frame_seen = false;
+                self.idr_requested = false;
+                // 新连接上重新做一次能力协商（`Hello` → `HelloAck`）。
+                self.hello_sent = false;
+                self.send_hello();
+                // §4.1：`Resume{session_id}` 让主机恢复同一个会话（不重新配对）。
+                if let Err(e) = self.try_send_control(ControlMsg::Resume {
+                    session_id: self.session_id,
+                }) {
+                    tracing::warn!(reason = %e, "发送 Resume 失败");
+                    return;
+                }
+                tracing::info!(
+                    session_id = self.session_id,
+                    attempts = self.reconnect_attempts,
+                    "已重建传输并请求恢复会话"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(session_id = self.session_id, reason = %e, "重建传输失败,稍后重试");
+            }
         }
     }
 
@@ -236,7 +410,7 @@ impl ClientRunner {
         self.last_data_ms = self.now_ms();
         if self.machine.state() == SessionState::Reconnecting {
             // §4.1：30 s 内恢复 → 回到 Streaming，并请求 IDR。
-            if self.goto(SessionState::Streaming).is_ok() {
+            if self.enter_streaming() {
                 self.request_idr();
             }
         }
@@ -319,7 +493,9 @@ impl ClientRunner {
             if let Some(inner) = self.inner.upgrade() {
                 inner.set_agreed(Some(agreed));
             }
-            if self.goto(SessionState::Streaming).is_ok() {
+            // 协商完成即进入串流态；已经在串流态时只补发事件，
+            // 避免 `Streaming → Streaming` 的非法转移（§3.9 转移表）。
+            if self.enter_streaming() {
                 self.emit(SessionEvent::Negotiated { config });
             }
         }
@@ -375,10 +551,8 @@ impl ClientRunner {
                 if threshold == 0 {
                     return;
                 }
-                if now.saturating_sub(self.last_data_ms) >= threshold
-                    && self.goto(SessionState::Reconnecting).is_ok()
-                {
-                    self.reconnect_since_ms = Some(now);
+                if now.saturating_sub(self.last_data_ms) >= threshold {
+                    self.enter_reconnecting();
                 }
             }
             SessionState::Reconnecting => {
@@ -396,6 +570,9 @@ impl ClientRunner {
                         retryable: err.retryable(),
                     });
                     self.transport = None;
+                    // 超时后不再重试：回到列表（§4.1「超时回到列表」）。
+                    self.factory = None;
+                    self.reconnect_pending = false;
                     if self.goto(SessionState::Closed).is_ok() {
                         self.emit(SessionEvent::Closed);
                     }
@@ -424,7 +601,7 @@ impl ClientRunner {
                     }
                 }
                 Err(e) => {
-                    self.fail(&e);
+                    self.on_transport_error(&e);
                     return;
                 }
             }
@@ -444,6 +621,7 @@ impl ClientRunner {
             match item {
                 Ok(frame) => {
                     self.on_data();
+                    self.frames_received += 1;
                     // §4.1：首帧必须是 IDR；不是就请求一次。
                     self.check_first_frame_is_idr(&frame);
                     let Some(consumer) = self.consumer.as_mut() else {
@@ -455,7 +633,7 @@ impl ClientRunner {
                     }
                 }
                 Err(e) => {
-                    self.fail(&e);
+                    self.on_transport_error(&e);
                     return;
                 }
             }
@@ -474,6 +652,7 @@ impl ClientRunner {
         if count == 0 {
             return;
         }
+        self.dropped_total += u64::from(count);
         self.emit(SessionEvent::FramesDropped {
             count,
             code: crate::event::FRAME_EXPIRED_CODE,
@@ -530,16 +709,10 @@ impl SessionRunner for ClientRunner {
                 let _ = self.goto(SessionState::Streaming);
             }
             SessionInput::Stalled => {
-                if self.machine.state() == SessionState::Streaming
-                    && self.goto(SessionState::Reconnecting).is_ok()
-                {
-                    self.reconnect_since_ms = Some(self.now_ms());
-                }
+                self.enter_reconnecting();
             }
             SessionInput::Reconnected => {
-                if self.machine.state() == SessionState::Reconnecting
-                    && self.goto(SessionState::Streaming).is_ok()
-                {
+                if self.machine.state() == SessionState::Reconnecting && self.enter_streaming() {
                     self.request_idr();
                 }
             }
@@ -560,6 +733,7 @@ impl SessionRunner for ClientRunner {
 
     fn pump(&mut self) {
         self.check_deadlines();
+        self.maybe_reconnect();
         self.drain_control();
         self.pump_frames();
         self.report_dropped_frames();
@@ -577,6 +751,43 @@ impl SessionRunner for ClientRunner {
         // 否则 QUIC 连接会先于 `Bye` 关闭。
         self.send_control(ControlMsg::Bye);
     }
+
+    fn on_clock_changed(&mut self, now_ms: u64) {
+        // 换时钟 = 换时间基准：把绝对时间戳重置到新时钟的当前时刻，
+        // 否则旧时钟留下的时间戳会让停滞判定永远不成立。
+        self.last_data_ms = now_ms;
+        self.last_stats_ms = now_ms;
+        self.started_ms = now_ms;
+        self.reconnect_since_ms = None;
+        self.next_retry_ms = now_ms;
+        self.last_rebuild_ms = now_ms;
+    }
+
+    fn reconnecting_info(&self) -> Option<ReconnectingInfo> {
+        if self.machine.state() != SessionState::Reconnecting {
+            return None;
+        }
+        let since = self.reconnect_since_ms.unwrap_or_else(|| self.now_ms());
+        Some(ReconnectingInfo {
+            elapsed_ms: self.now_ms().saturating_sub(since),
+            // §4.1 / 产品方案 §3 第 5 步：重连期间保留最后一帧。
+            keep_last_frame: true,
+        })
+    }
+
+    fn counters(&self) -> SessionCounters {
+        SessionCounters {
+            started_ms: self.started_ms,
+            session_id: self.session_id,
+            frames: self.frames_received,
+            dropped_frames: self.dropped_total,
+            reconnects: self.reconnects,
+            rtt_us: self.stats.rtt_us,
+            loss_ppm: self.stats.loss_ppm,
+            fps: self.stats.fps,
+            bitrate_bps: self.stats.bitrate_bps,
+        }
+    }
 }
 
 /// 客户端会话（§3.9）。
@@ -586,6 +797,10 @@ pub struct ClientSession {
 
 impl ClientSession {
     /// 连接主机（§3.9 `ClientSession::connect(peer, cfg) -> SessionHandle`）。
+    ///
+    /// 本入口只接受 `cfg`，因此**传输必须由 `cfg.transport` 注入**：
+    /// 没有传输时会话报 `E9002`（依赖缺失）并停在 `Idle`。
+    /// 需要同时注入解码器时用 [`ClientSession::connect_with`]。
     pub fn connect(peer: PeerAddr, cfg: ClientSessionConfig) -> SessionHandle {
         Self::connect_with(
             peer,
@@ -625,11 +840,12 @@ impl ClientSession {
         });
 
         // 传输工厂优先取显式注入的，其次取配置里的。
-        let factory = deps.transport.or(cfg.transport);
+        // **工厂要留着**：重连时用它重建一条新连接（§4.1「新连接/迁移」）。
+        let mut factory = deps.transport.or(cfg.transport);
         let mut transport = None;
         let mut transport_error = None;
-        if let Some(mut factory) = factory {
-            match factory.connect() {
+        if let Some(f) = factory.as_mut() {
+            match f.connect() {
                 Ok(t) => transport = Some(t),
                 Err(e) => transport_error = Some(e),
             }
@@ -649,6 +865,7 @@ impl ClientSession {
             peer,
             consumer: deps.consumer,
             transport,
+            factory,
             inner: Arc::downgrade(handle.inner()),
             ctrl,
             session_id: next_session_id(),
@@ -660,6 +877,14 @@ impl ClientSession {
             idr_requested: false,
             last_stats_ms: now,
             stats: StatsReport::default(),
+            reconnect_pending: false,
+            reconnect_attempts: 0,
+            reconnects: 0,
+            next_retry_ms: now,
+            last_rebuild_ms: now,
+            started_ms: now,
+            frames_received: 0,
+            dropped_total: 0,
         };
         handle.set_runner(Box::new(runner));
 

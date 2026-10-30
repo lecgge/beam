@@ -11,8 +11,9 @@ use futures::stream::Stream;
 
 use crate::clock::{Clock, SystemClock};
 use crate::error::SessionError;
-use crate::event::{SessionEvent, SessionInput};
+use crate::event::{ReconnectingInfo, SessionEvent, SessionInput};
 use crate::state::SessionState;
+use crate::summary::{SessionCounters, SessionSummary};
 
 /// 会话超时参数（§3.9：`reconnect_timeout=30s`、`stall_threshold=3s`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +47,20 @@ pub(crate) trait SessionRunner: Send {
     ///
     /// 默认实现什么都不做；据此发送 `Bye` 并释放传输。
     fn on_stop(&mut self) {}
+    /// 会话时钟被替换（§3.9：超时判定必须可用假时钟驱动）。
+    ///
+    /// 换时钟等于换**时间基准**：运行体必须把「最后一次收到数据」这类
+    /// 绝对时间戳重置到新时钟的当前时刻。否则旧时钟留下的时间戳比新时钟大，
+    /// `saturating_sub` 恒为 0，停滞判定永远不成立。
+    fn on_clock_changed(&mut self, _now_ms: u64) {}
+    /// 当前重连信息（§4.1「3 s 无帧 → Reconnecting」）；不在重连态时为 `None`。
+    fn reconnecting_info(&self) -> Option<ReconnectingInfo> {
+        None
+    }
+    /// 当前统计计数器（§3.9「统计汇总」）。
+    fn counters(&self) -> SessionCounters {
+        SessionCounters::default()
+    }
 }
 
 /// 会话内部状态（句柄与驱动方共享）。
@@ -148,9 +163,18 @@ impl SessionHandle {
     ///
     /// 单测注入 [`crate::clock::ManualClock`] 后即可推进时间，
     /// 覆盖「3 s 停滞 → Reconnecting」「30 s 超时 → Closed」两条判定。
+    ///
+    /// 换时钟会**重置时间基准**：运行体里「最后一次收到数据」等绝对时间戳
+    /// 会被重置到新时钟的当前时刻（否则旧时钟的时间戳会让停滞判定永远不成立）。
     pub fn set_clock(&self, clock: Arc<dyn Clock>) {
         if let Ok(mut guard) = self.inner.clock.lock() {
             *guard = clock;
+        }
+        let now = self.now_ms();
+        if let Ok(mut guard) = self.inner.runner.lock() {
+            if let Some(runner) = guard.as_mut() {
+                runner.on_clock_changed(now);
+            }
         }
     }
 
@@ -300,6 +324,31 @@ impl SessionHandle {
     /// 是否已停止。
     pub fn is_stopped(&self) -> bool {
         self.inner.stopped.load(Ordering::Relaxed)
+    }
+
+    /// 会话统计汇总（§3.9「统计汇总」）。
+    ///
+    /// 会话结束后依然可以查询：计数器由运行体持有，
+    /// 随句柄一起活到句柄被丢弃为止，不需要在会话结束时额外收尾上报。
+    pub fn summary(&self) -> SessionSummary {
+        let state = self.state();
+        let now = self.now_ms();
+        let guard = self.inner.runner.lock().ok();
+        let counters = match guard.as_ref().and_then(|runner| runner.as_ref()) {
+            Some(runner) => runner.counters(),
+            None => SessionCounters::default(),
+        };
+        counters.snapshot(now, state)
+    }
+
+    /// 当前的重连信息；不在重连态时为 `None`。
+    ///
+    /// 上层据此显示「重连中」并**保留最后一帧**
+    /// （§4.1「3 s 无帧 → Reconnecting」、产品方案 §3 第 5 步）。
+    pub fn reconnecting(&self) -> Option<ReconnectingInfo> {
+        let guard = self.inner.runner.lock().ok()?;
+        let runner = guard.as_ref()?;
+        runner.reconnecting_info()
     }
 
     /// 当前是否只剩**这一份**句柄（其他持有者都已经放开）。

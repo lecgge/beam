@@ -13,6 +13,16 @@
 //! 输入事件走 §5 的**输入单向流**（客户端 → 主机），接收与注入都在 beam-host
 //! （§3.8 的输入任务）。本 crate 不持有输入注入器
 //! （[`HostDeps`] 里没有 `input` 字段），因此只有**一处**会注入输入。
+//!
+//! ## 重连（§4.1「3 s 无帧 → Reconnecting」）
+//!
+//! 主机侧的链路是**客户端连过来的**：客户端重连时会带上
+//! `Resume{session_id}`（§4.1「新连接/迁移 + Resume{session_id}」），
+//! 主机据此认回同一个会话并**补一个 IDR**——客户端已经丢掉了参考帧，
+//! 没有 IDR 就解不出画面。
+//!
+//! 主机自己也会判定停滞：连续 `stall_threshold` 没收到客户端的控制消息
+//! 就进 `Reconnecting`，等客户端的 `Resume` / 新连接把它拉回 `Streaming`。
 
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -21,15 +31,17 @@ use beam_proto::{ControlMsg, StatsReport, StreamConfig};
 
 use crate::clock::duration_ms;
 use crate::control::{
-    caps_from_config, next_session_id, ControlContext, ControlOutcome, ControlRole, PairingConfig,
-    STATS_INTERVAL_MS,
+    caps_from_config, config_from_agreed, next_session_id, ControlContext, ControlOutcome,
+    ControlRole, PairingConfig, STATS_INTERVAL_MS,
 };
 use crate::error::SessionError;
 use crate::event::{
-    ControlChannel, FramePipeline, RateControl, SessionEvent, SessionInput, VideoSender,
+    ControlChannel, FramePipeline, RateControl, ReconnectingInfo, SessionEvent, SessionInput,
+    VideoSender,
 };
 use crate::handle::{SessionHandle, SessionInner, SessionRunner, SessionTimeouts};
 use crate::state::{SessionState, StateMachine};
+use crate::summary::SessionCounters;
 
 /// 主机会话配置（§3.9）。
 #[derive(Debug, Clone)]
@@ -113,6 +125,12 @@ pub(crate) struct HostRunner {
     frames_sent: u32,
     /// 本端统计。
     stats: StatsReport,
+    /// 进入 `Reconnecting` 的次数（统计用）。
+    reconnects: u32,
+    /// 会话开始时刻（毫秒，统计汇总用）。
+    started_ms: u64,
+    /// 已发送的画面帧数（累计）。
+    frames_total: u64,
 }
 
 impl HostRunner {
@@ -198,12 +216,46 @@ impl HostRunner {
         }
     }
 
+    /// 转到 `Streaming`；已经在串流态时**不重复转移**。
+    ///
+    /// §3.9 的转移表里没有 `Streaming → Streaming`，
+    /// 直接转移会报 `E9001`（非法转移）——恢复路径很容易撞上
+    /// （先由 `on_data` 恢复，再由 `HelloAck` 触发协商完成）。
+    fn enter_streaming(&mut self) -> bool {
+        if self.machine.state() == SessionState::Streaming {
+            return true;
+        }
+        if self.goto(SessionState::Streaming).is_err() {
+            return false;
+        }
+        self.reconnect_since_ms = None;
+        true
+    }
+
+    /// 进入 `Reconnecting`（§4.1「3 s 无帧 → Reconnecting」）。
+    ///
+    /// 只从 `Streaming` 进入：§3.9 的转移表把 `Reconnecting` 挂在 `Streaming` 之下。
+    fn enter_reconnecting(&mut self) {
+        if self.machine.state() != SessionState::Streaming {
+            return;
+        }
+        if self.goto(SessionState::Reconnecting).is_err() {
+            return;
+        }
+        self.reconnect_since_ms = Some(self.now_ms());
+        self.reconnects += 1;
+        tracing::info!(
+            session_id = self.session_id,
+            "主机进入重连,等待客户端 Resume"
+        );
+    }
+
     /// 收到任何数据（帧或控制消息）时调用：刷新时间戳、必要时从重连恢复。
     fn on_data(&mut self) {
         self.last_data_ms = self.now_ms();
         if self.machine.state() == SessionState::Reconnecting {
             // §4.1：30 s 内恢复 → 回到 Streaming，并立刻补一个 IDR。
-            if self.goto(SessionState::Streaming).is_ok() {
+            if self.enter_streaming() {
                 self.request_idr();
             }
         }
@@ -230,11 +282,15 @@ impl HostRunner {
             self.send_control(reply);
         }
         if let Some(agreed) = outcome.negotiated {
+            // 主机按**协商结果**出流：分辨率 / 帧率取双方交集（§3.1），
+            // 而不是继续用本机的原始配置。
+            let config = config_from_agreed(&agreed, &self.config());
             if let Some(inner) = self.inner.upgrade() {
                 inner.set_agreed(Some(agreed));
+                inner.set_config(config.clone());
             }
-            let config = self.config();
-            if self.goto(SessionState::Streaming).is_ok() {
+            // 已经在串流态时只补发事件，避免 `Streaming → Streaming` 的非法转移。
+            if self.enter_streaming() {
                 self.emit(SessionEvent::Negotiated { config });
             }
         }
@@ -265,9 +321,7 @@ impl HostRunner {
         if let Some(session_id) = outcome.resumed {
             // §4.1：新连接 / 迁移 → `Resume{session_id}` → 恢复会话并补 IDR。
             self.session_id = session_id;
-            if self.machine.state() == SessionState::Reconnecting
-                && self.goto(SessionState::Streaming).is_ok()
-            {
+            if self.machine.state() == SessionState::Reconnecting && self.enter_streaming() {
                 self.request_idr();
             }
         }
@@ -297,10 +351,8 @@ impl HostRunner {
                 if threshold == 0 {
                     return;
                 }
-                if now.saturating_sub(self.last_data_ms) >= threshold
-                    && self.goto(SessionState::Reconnecting).is_ok()
-                {
-                    self.reconnect_since_ms = Some(now);
+                if now.saturating_sub(self.last_data_ms) >= threshold {
+                    self.enter_reconnecting();
                 }
             }
             SessionState::Reconnecting => {
@@ -371,6 +423,7 @@ impl HostRunner {
                 return;
             }
             self.frames_sent += 1;
+            self.frames_total += 1;
         }
     }
 
@@ -428,16 +481,10 @@ impl SessionRunner for HostRunner {
                 let _ = self.goto(SessionState::Streaming);
             }
             SessionInput::Stalled => {
-                if self.machine.state() == SessionState::Streaming
-                    && self.goto(SessionState::Reconnecting).is_ok()
-                {
-                    self.reconnect_since_ms = Some(self.now_ms());
-                }
+                self.enter_reconnecting();
             }
             SessionInput::Reconnected => {
-                if self.machine.state() == SessionState::Reconnecting
-                    && self.goto(SessionState::Streaming).is_ok()
-                {
+                if self.machine.state() == SessionState::Reconnecting && self.enter_streaming() {
                     self.request_idr();
                 }
             }
@@ -477,6 +524,41 @@ impl SessionRunner for HostRunner {
         self.send_control(ControlMsg::Bye);
         self.deps.pipeline.stop();
         self.pipeline_started = false;
+    }
+
+    fn on_clock_changed(&mut self, now_ms: u64) {
+        // 换时钟 = 换时间基准：把绝对时间戳重置到新时钟的当前时刻，
+        // 否则旧时钟留下的时间戳会让停滞判定永远不成立。
+        self.last_data_ms = now_ms;
+        self.last_stats_ms = now_ms;
+        self.started_ms = now_ms;
+        self.reconnect_since_ms = None;
+    }
+
+    fn reconnecting_info(&self) -> Option<ReconnectingInfo> {
+        if self.machine.state() != SessionState::Reconnecting {
+            return None;
+        }
+        let since = self.reconnect_since_ms.unwrap_or_else(|| self.now_ms());
+        Some(ReconnectingInfo {
+            elapsed_ms: self.now_ms().saturating_sub(since),
+            // §4.1 / 产品方案 §3 第 5 步：重连期间保留最后一帧。
+            keep_last_frame: true,
+        })
+    }
+
+    fn counters(&self) -> SessionCounters {
+        SessionCounters {
+            started_ms: self.started_ms,
+            session_id: self.session_id,
+            frames: self.frames_total,
+            dropped_frames: 0,
+            reconnects: self.reconnects,
+            rtt_us: self.stats.rtt_us,
+            loss_ppm: self.stats.loss_ppm,
+            fps: self.stats.fps,
+            bitrate_bps: self.stats.bitrate_bps,
+        }
     }
 }
 
@@ -534,6 +616,9 @@ impl HostSession {
             last_stats_ms: now,
             frames_sent: 0,
             stats: StatsReport::default(),
+            reconnects: 0,
+            started_ms: now,
+            frames_total: 0,
         };
         handle.set_runner(Box::new(runner));
         handle

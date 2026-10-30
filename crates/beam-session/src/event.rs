@@ -13,6 +13,25 @@ use crate::error::SessionError;
 /// 丢帧**不是**会话错误：它不改变会话状态，只作为统计事件上报（§3.11）。
 pub const FRAME_EXPIRED_CODE: u16 = 2004;
 
+/// 重连信息（§4.1「3 s 无帧 → Reconnecting」、产品方案 §3 第 5 步）。
+///
+/// 上层据此显示「重连中」并**保留最后一帧**：
+/// - `elapsed_ms`：已经重连了多久（用来显示倒计时 / 进度）；
+/// - `keep_last_frame`：是否保留最后一帧画面。
+///
+/// 通过 [`crate::handle::SessionHandle::reconnecting`] 查询；
+/// 不在重连态时返回 `None`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReconnectingInfo {
+    /// 已经重连了多久（毫秒）。
+    pub elapsed_ms: u64,
+    /// 是否保留最后一帧画面。
+    ///
+    /// 恒为 `true`：会话层在重连期间**从不**要求清屏，
+    /// 最后一帧一直留在屏幕上，直到新帧到达把它覆盖掉。
+    pub keep_last_frame: bool,
+}
+
 /// 会话事件（§6：`session` 汇总为 `SessionEvent::Error{code, retryable}`）。
 ///
 /// ## 变体顺序
