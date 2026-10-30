@@ -48,14 +48,14 @@
 | 审计判定 | 条数 | 已完成 | 进行中 | 已排期 | 未开始 |
 |---|---|---|---|---|---|
 | 已实现 | 364 | 9 | 0 | 0 | 355 |
-| 占位 | 43 | 26 | 2 | 0 | 14 |
-| 缺失 | 111 | 47 | 0 | 0 | 51 |
-| 偏差 | 76 | 45 | 0 | 0 | 31 |
+| 占位 | 43 | 30 | 1 | 0 | 11 |
+| 缺失 | 111 | 53 | 2 | 0 | 43 |
+| 偏差 | 76 | 52 | 0 | 0 | 24 |
 | 超出 | 3 | 0 | 0 | 0 | 3 |
-| **合计** | **597** | **127** | **2** | **0** | **454** |
+| **合计** | **597** | **144** | **3** | **0** | **436** |
 
 - 审计判定为**未达成**（占位+缺失+偏差）：**230** 条
-- 其中**已落地**：**134** 条；**仍未排期**：**96** 条
+- 其中**已落地**：**152** 条；**仍未排期**：**78** 条
 
 > 「未开始」不代表这一条没人管，而是**还没排进任何一批**。排期后的条目会出现在「落地进度台账」一节，带批次号与验收方式。
 
@@ -156,8 +156,8 @@
 | 状态 | 条目数 |
 |---|---|
 | 未开始 | 0 |
-| 进行中 | 2 |
-| 已完成 | 128 |
+| 进行中 | 3 |
+| 已完成 | 145 |
 | 已阻塞 | 12 |
 | 暂不做 | 1 |
 | 偏差 | 1 |
@@ -299,6 +299,24 @@
 | 真实 SendInput 注入未自动验证 | 注入有真实副作用（会真的按键），单测与基准都只测「构造 + 入队 + 出队 + 调度」，不含真实 SendInput 调用 | 需真机人工验证 |
 | AN-36 / AN-45 未做 | AN-36（Surface 管理归 :core-renderer）要重构；AN-45（:core-audio 用 AAudio 而不是 AudioTrack）要 NDK/JNI 封装 —— 两者都是 v1 范围 | 下一批 |
 
+| B8 | 2026-10-30 | 第八批：网络健壮性与 FEC + 会话层重连状态机 + WASAPI 采集/输出 + 抓屏实测 | crates/beam-net / crates/beam-session / crates/beam-audio / crates/beam-capture / crates/beam-encode / apps/desktop | 已完成 | cargo fmt --all --check exit 0；cargo check --workspace --all-targets exit 0 / 0 warning；cargo clippy --workspace --all-targets -- -D warnings exit 0 / 0 warning；cargo test --workspace exit 0；cargo test -p beam-net exit 0（默认 65 例 / --features fec 73 例）；cargo bench -p beam-net --bench packetize --features fec exit 0（FEC 超预算，数字见 N-24）；cargo test -p beam-session exit 0（54 例）；cargo test -p beam-audio exit 0（默认与 --features opus 双状态）；桌面端 fmt / clippy / check exit 0 / 0 warning |
+
+- **B8-A 网络健壮性与 FEC** — 写入范围：`crates/beam-net/**`；覆盖条目 N-25, N-26, N-16, N-20, N-12, N-13, N-14
+- **B8-B 会话层重连与能力协商** — 写入范围：`crates/beam-session/**`；覆盖条目 S-03, S-04, S-06, S-07, S-12, S-19, S-21
+- **B8-C WASAPI 采集与输出** — 写入范围：`crates/beam-audio/**`；覆盖条目 A-01, A-04, A-08
+- **B8-D 抓屏实测与配置核实（主会话自办）** — 写入范围：`crates/beam-capture/**`、`crates/beam-encode/**`、`apps/desktop/src-tauri/**`；覆盖条目 C-15, C-16, C-17, EV-06
+
+**B8 追加项（审计中顺带发现，不在原 551 条内）**
+
+| 项 | 说明 | 归属 |
+|---|---|---|
+| FEC 编码超 §3.2 预算 4.6~13.3 倍 | T1 6.587 ms（预算 0.8）、T2 5.318 ms（预算 0.4）、T3 1.381 ms（预算 0.3）。FEC 仍是 feature 默认关闭（D2），开之前必须优化 | 下一批 |
+| 音频 datagram 分包未实现 | 冗余片 type=2 无法表达「属于音频帧」，需 §5 级别的裁决（帧号空间分开 / 帧头腾类型位） | 待裁决 |
+| WASAPI 采集/输出真机未验证 | A-01/A-04 的代码与纯逻辑单测（15 例）都在，但 loopback 能否稳定拿到 5 ms 帧、f32 混音格式转换听感、IsFormatSupported 在真实设备上的返回值都没实测。真机测试已写好（默认 #[ignore] + BEAM_AUDIO_DEVICE_TEST=1 门控）但未跑 | 需真机人工验证 |
+| 音频还没进产品链路 | beam-audio 的采集/编解码/输出都真了，但 beam-host / beam-client 都没有调用它 —— 采集→编码→发送→解码→输出整条未通 | 下一批 |
+| Android 侧未暴露重连信息 | beam-session 已有 SessionHandle::reconnecting()，但 uniffi 导出面还没有对应映射 | 下一批 |
+| §3.9 转移表缺 Negotiating → Reconnecting | 协商期传输失败只能进 Error 态；改转移表属于改文档语义，未擅自改 | 待裁决 |
+
 ### 已裁决事项
 
 | # | 议题 | 裁决 | 裁决日期 | 说明 | 解锁范围 |
@@ -326,6 +344,7 @@
 | S10 | §16 的「手机外框 30」在桌面端没有使用点 | 手机外框是 Android 端手机模型的圆角，桌面端没有这个形状。令牌保留（两端共用同一刻度）但不引用，门禁脚本因此把它排除在「必须被用到」清单外 |  |
 | S11 | 桌面端 PIN 没有端到端校验 | 前端做格式校验 + 尝试预算 + 完整 UI，但后端 connect(host_id) 命令没有 PIN 参数 —— 填对填错都能连上。要闭环需 Rust 侧给 connect 加 PIN 参数 |  |
 | S12 | 通用 UI 组件放在 :core-data 的 ui 包 | §3.12 固定 12 个模块且没有 :core-ui；BeamDialog/BeamToast 放在 :core-data/ui（BeamTokens 已在此）。若要单列 UI 模块，需先改 §3.12 的模块表 |  |
+| S13 | 音频帧的 FEC 冗余片无法与视频区分 | 帧头 type=2 是「FEC 冗余」通用类型，接收端分不清「音频帧的冗余片」与「视频帧的冗余片」。补齐音频分包需要 §5 级别的决定：帧号空间分开，或帧头再腾出一个类型位 |  |
 
 ### 本轮修复与提交记录
 
@@ -349,6 +368,10 @@
 | 2026-10-30 |  | ffmpeg 的原生 opus 编码器 capabilities 带 exp（experimental），avcodec_open2 直接拒绝（-733130664 = AVERROR_EXPERIMENTAL），而且只支持 fltp 采样格式；libopus 变体支持 s16 且非 experimental。§7 要求 LGPL 构建 —— libopus 是 BSD 许可，LGPL 构建带 --enable-libopus 允许，本仓库的 LGPL 构建确实带了 | 5 ms 帧（240 采样 @ 48 kHz）编解码往返互相关 > 0.9（真机实测） |
 | 2026-10-30 |  | 编码器有一帧流水线延迟（首次取包返回 EAGAIN → 返回空包，调用方跳过）；解码器首包是 pre-skip 静音。测试因此改成「连送连解多帧 + 互相关找最佳对齐」，而不是逐点比对或固定相位比对（后者会因相位差拿到假阴性） | 单测 6 例全过 |
 | 2026-10-30 |  | 正确约定是先 AvSetMmThreadCharacteristicsW("Games", &index) 拿到 task index，再用 AvSetMmThreadPriority(index, THREAD_PRIORITY_GAMES)；反过来会拿到 ERROR_INVALID_TASK_INDEX（1551）。task index 还可能失效（服务重启），需要自愈路径（重新注册）。注册失败时退回 SetThreadPriority，并如实把用了哪种方式与错误码记进统计 | 基准实测：注入线程优先级 = MMCSS/Games，注册无报错 |
+| 2026-10-30 |  | 帧头只有一个数据报带 LAST_SHARD 标志（bit1），它丢了接收端就再也判断不出帧在哪里结束 —— 即使冗余足够、其余分片都能恢复，整帧也会一直挂在重组器里最后按 E2004 丢弃。实测恢复率只有 94% 而不是 100%。修法：发送端在整帧负载最前面加 8 字节大端前缀（原始负载字节数 + 本帧的 FEC 组数），前缀随数据片一起受 FEC 保护 ⇒ 组边界不再依赖「某一个数据报有没有到」。**帧头的位宽与语义一字未改**（§5 的表没动），但**线上负载格式变了**（两端一起更新） | 恢复率扫描：丢片数 ≤ 冗余片数 ⇒ 100%；超出 ⇒ 0% 且绝不产出坏帧 |
+| 2026-10-30 |  | 路径 MTU 在黑洞检测时可能掉到 1200 以下，此时 1200 字节的数据报直接发不出去。修法：max_datagram 被连接实际能承载的上限夹一刀（Conn::effective_max_datagram） | beam-net 双 feature 状态测试全绿 |
+| 2026-10-30 |  | B3-A 记下「每帧一次 D3D11 纹理创建，是否落在 1.5ms/1ms 预算内未实测」。perf_span!("capture") 包住的正是这一整段，用已有探针即可测。本机 RTX 3070 / 1920×1080 / release：239 帧，均值 32.4 µs、p50/p95 25/25 µs、p99 75 µs、最大 273.4 µs，而 §3.5 预算 T1 ≤ 1.5 ms ⇒ p99 只占 5% | 数字与口径写进 crates/beam-capture/examples/perf_probe.rs 的模块文档 |
+| 2026-10-30 |  | B3 记过 main 返回后 NVIDIA 驱动侧 atexit 回调访问已释放对象 → 0xC0000005。本轮做了对照实验：「先 drop 设备再让 main 正常返回」与「保持设备存活」两种写法**都是 exit 0** ⇒ 当前驱动版本下复现不出来。因此代码只改成更稳妥的写法（不再用 process::exit(0) 绕过 CRT 收尾、让设备活到进程结束），**不能声称已修复** | cargo run --release -p beam-encode --example perf_probe --features ffmpeg,perf-stats → exit 0 |
 
 ---
 
@@ -506,24 +529,24 @@
 | N-09 | 数据 `AssembledFrame` | crates/beam-proto/src/lib.rs:110-121 | 已实现 | frame_id/pts_us/capture_ts_us/is_key/payload 齐全 | 未开始 |
 | N-10 | 数据 `Feedback{loss,rtt,recv_rate}` | crates/beam-proto/src/message.rs:52-59 | 已实现 | 字段逐项一致 | 未开始 |
 | N-11 | 线程：tokio 多线程运行时 | crates/beam-net/Cargo.toml:20、crates/beam-net/Cargo.toml:24；工作区 tokio features 见 Cargo.toml:45-53 | 已实现 | tokio 启用 `rt-multi-thread`；beam-net 无自己的运行时构造代码（由上层提供） | 未开始 |
-| N-12 | 线程：发送路径专用任务,UDP GSO 批量发包 | 现状 crates/beam-net/src/endpoint.rs:253-261；未找到（已搜索：tokio::spawn、sendmmsg、GSO、send_datagrams、UDP GSO、batch） | 缺失 | `send_frame` 是同步函数，逐包调用 `send_datagram`（单包一次系统调用），既无专用发送任务也无 GSO 批量；全仓 `crates/` 下无任何 GSO/sendmmsg 符号 | 未开始 |
-| N-13 | 线程：接收重组单任务 | crates/beam-net/src/endpoint.rs:277-288 | 偏差 | 重组逻辑内联在调用方 `next_frame()` future 里，随调用方任务执行；没有独立的接收/重组任务（无 tokio::spawn，见 N-12 搜索集） | 未开始 |
-| N-14 | 线程：FEC 解码在 rayon 或 blocking 线程 | crates/beam-net/src/datagram.rs:268-282；自述 crates/beam-net/src/lib.rs:32；未找到（已搜索：rayon、spawn_blocking、blocking、thread::spawn） | 缺失 | `reconstruct_group` 在重组循环内联调用；仓库内无 rayon 依赖，也无 spawn_blocking/专用线程 | 未开始 |
+| N-12 | 线程：发送路径专用任务,UDP GSO 批量发包 | 现状 crates/beam-net/src/endpoint.rs:253-261；未找到（已搜索：tokio::spawn、sendmmsg、GSO、send_datagrams、UDP GSO、batch） | 缺失 | `send_frame` 是同步函数，逐包调用 `send_datagram`（单包一次系统调用），既无专用发送任务也无 GSO 批量；全仓 `crates/` 下无任何 GSO/sendmmsg 符号 | 已完成 |
+| N-13 | 线程：接收重组单任务 | crates/beam-net/src/endpoint.rs:277-288 | 偏差 | 重组逻辑内联在调用方 `next_frame()` future 里，随调用方任务执行；没有独立的接收/重组任务（无 tokio::spawn，见 N-12 搜索集） | 已完成 |
+| N-14 | 线程：FEC 解码在 rayon 或 blocking 线程 | crates/beam-net/src/datagram.rs:268-282；自述 crates/beam-net/src/lib.rs:32；未找到（已搜索：rayon、spawn_blocking、blocking、thread::spawn） | 缺失 | `reconstruct_group` 在重组循环内联调用；仓库内无 rayon 依赖，也无 spawn_blocking/专用线程 | 已完成 |
 | N-15 | 错误码 2001 连接超时 | crates/beam-net/src/endpoint.rs:113-118；crates/beam-net/src/error.rs:8、44-48 | 已实现 | connect 用 `tokio::time::timeout` 真实产出 `NetError::ConnectTimeout` → 2001 | 未开始 |
-| N-16 | 错误码 2002 证书拒绝 | crates/beam-net/src/error.rs:10、51-55；实际产生点 crates/beam-net/src/endpoint.rs:58、64、89、95 | 偏差 | `CertRejected` 只用于「装载本机证书失败 / 构造 QUIC TLS 配置失败」；对端证书被拒时 TLS 握手失败被归为 `NetError::Io`（crates/beam-net/src/endpoint.rs:119-121）→ 上报 E2008，UI 拿不到 E2002 | 未开始 |
+| N-16 | 错误码 2002 证书拒绝 | crates/beam-net/src/error.rs:10、51-55；实际产生点 crates/beam-net/src/endpoint.rs:58、64、89、95 | 偏差 | `CertRejected` 只用于「装载本机证书失败 / 构造 QUIC TLS 配置失败」；对端证书被拒时 TLS 握手失败被归为 `NetError::Io`（crates/beam-net/src/endpoint.rs:119-121）→ 上报 E2008，UI 拿不到 E2002 | 已完成 |
 | N-17 | 错误码 2003 datagram 不支持 | crates/beam-net/src/endpoint.rs:207-208；crates/beam-net/src/error.rs:12、58-59 | 已实现 | quinn `UnsupportedByPeer` / `Disabled` 均映射到 `DatagramUnsupported` → 2003 | 未开始 |
 | N-18 | 错误码 2004 帧过期丢弃 | crates/beam-net/src/error.rs:14、62-66；crates/beam-net/src/datagram.rs:316-328 | 占位 | 变体与码值齐全，但生产代码无处构造：`Reassembler::expire()` 只返回过期帧号数组，doc 注释写「调用方应记为 E2004」而 beam-net 内无此调用方；`NetError::FrameExpired` 全文仅出现在 crates/beam-net/src/error.rs 与其单测（crates/beam-net/src/error.rs:163） | 已完成 |
 | N-19 | 配置：`fec_ratio`（默认 0.2…） | crates/beam-net/src/config.rs:19、81 | 已实现 | `DEFAULT_FEC_RATIO = 0.2`，`NetConfig::default().fec_ratio = 0.2`，并有默认值单测 crates/beam-net/src/config.rs:126 | 未开始 |
-| N-20 | 配置：`fec_ratio`（…码率>150 Mbps 时下调到 0.1） | 规则函数 crates/beam-net/src/config.rs:109-116；发送路径 crates/beam-net/src/endpoint.rs:255 | 偏差 | `adaptive_fec_ratio` 实现正确且有单测（crates/beam-net/src/config.rs:134-141），但发送路径直接使用 `self.cfg.fec_ratio`，从不调用该函数；全仓 `adaptive_fec_ratio` 仅出现在 crates/beam-net/src/config.rs | 未开始 |
+| N-20 | 配置：`fec_ratio`（…码率>150 Mbps 时下调到 0.1） | 规则函数 crates/beam-net/src/config.rs:109-116；发送路径 crates/beam-net/src/endpoint.rs:255 | 偏差 | `adaptive_fec_ratio` 实现正确且有单测（crates/beam-net/src/config.rs:134-141），但发送路径直接使用 `self.cfg.fec_ratio`，从不调用该函数；全仓 `adaptive_fec_ratio` 仅出现在 crates/beam-net/src/config.rs | 已完成 |
 | N-21 | 配置：`max_datagram=1200` | crates/beam-net/src/config.rs:22、82；净负载 crates/beam-net/src/config.rs:98-101 | 已实现 | 默认 1200，扣 16 字节帧头后 1184（§5 负载上限） | 未开始 |
 | N-22 | 配置：`jitter_frames`（有线 0,Wi-Fi 自适应 0–1） | 字段 crates/beam-net/src/config.rs:58、83；未找到（已搜索：jitter、JitterBuffer、抖动缓冲、dejitter、jitter_frames 消费点） | 缺失 | 只有配置字段与默认值 0；仓库内无任何抖动缓冲实现（`jitter` 仅命中 crates/beam-perf/src/stage.rs:24 的统计阶段枚举与 crates/beam-config/src/model.rs:61 的配置字段），Wi-Fi 自适应逻辑不存在 | 已完成 |
 | N-23 | 配置：`bitrate_min/max` | crates/beam-net/src/config.rs:60-62、84-85 | 已实现 | 默认 2 Mbps / 150 Mbps。注意：`RateController` 需调用方手动传入这两个值（crates/beam-net/src/rate.rs:68），未与 `NetConfig` 自动接线 | 未开始 |
-| N-24 | 性能：分包+FEC 编码 T1 ≤0.8 ms、T2 ≤0.4 ms、T3 ≤0.3 ms;重组+FEC 恢复同量级 | 未找到（已搜索：benches 目录、criterion、bench、#[bench]、Instant::now 计时断言） | 缺失 | 全仓没有任何 `benches/` 目录或基准测试依赖；crates/beam-net/Cargo.toml:23-24 只有 tokio dev-dep，无 criterion。T1/T2/T3 预算无任何实测支撑 | 未开始 |
-| N-25 | 测试：丢包/乱序/抖动注入(自写 UDP 代理) | 进程内替代用例 crates/beam-net/src/datagram.rs:384-402、426-450；未找到（已搜索：udp proxy、UdpProxy、proxy、注入、抖动 jitter 注入用例） | 缺失 | 丢包/乱序仅以「进程内少投一片/倒序投递」模拟（不经过真实 UDP）；无自写 UDP 代理，无抖动（时延）注入 | 未开始 |
-| N-26 | 测试：FEC 恢复率 | crates/beam-net/src/datagram.rs:426-450；crates/beam-net/src/fec.rs:248-264 | 偏差 | 只有「丢 2 片仍能恢复」的点状用例；无按丢包率扫描的恢复率统计/断言，无法量化恢复率 | 未开始 |
+| N-24 | 性能：分包+FEC 编码 T1 ≤0.8 ms、T2 ≤0.4 ms、T3 ≤0.3 ms;重组+FEC 恢复同量级 | 未找到（已搜索：benches 目录、criterion、bench、#[bench]、Instant::now 计时断言） | 缺失 | 全仓没有任何 `benches/` 目录或基准测试依赖；crates/beam-net/Cargo.toml:23-24 只有 tokio dev-dep，无 criterion。T1/T2/T3 预算无任何实测支撑 | 进行中 |
+| N-25 | 测试：丢包/乱序/抖动注入(自写 UDP 代理) | 进程内替代用例 crates/beam-net/src/datagram.rs:384-402、426-450；未找到（已搜索：udp proxy、UdpProxy、proxy、注入、抖动 jitter 注入用例） | 缺失 | 丢包/乱序仅以「进程内少投一片/倒序投递」模拟（不经过真实 UDP）；无自写 UDP 代理，无抖动（时延）注入 | 已完成 |
+| N-26 | 测试：FEC 恢复率 | crates/beam-net/src/datagram.rs:426-450；crates/beam-net/src/fec.rs:248-264 | 偏差 | 只有「丢 2 片仍能恢复」的点状用例；无按丢包率扫描的恢复率统计/断言，无法量化恢复率 | 已完成 |
 | N-27 | 测试：码率控制仿真 | crates/beam-net/src/rate.rs:169-206 | 已实现 | 用合成 `Feedback` 序列驱动控制器，断言降/升/保持与上下限 clamp；仿真真实存在（但 `RateController` 未接入真实网络反馈路径，全仓仅 crates/beam-net/src/rate.rs 出现） | 未开始 |
 | N-28 | 里程碑:MVP(无 FEC)/v1(FEC+码率控制+抖动缓冲) | crates/beam-net/Cargo.toml:1-27（无 `[features]`）；FEC 默认开启 crates/beam-net/src/config.rs:81、crates/beam-net/src/endpoint.rs:255 | 偏差 | 无任何 feature 门控：FEC 默认 0.2 恒开（MVP 阶段文档要求「无 FEC」）；码率控制虽已实现但未接线（N-27 注）；抖动缓冲完全缺失（N-22） | 已完成 |
-| N-29 | 职责：视频/音频 datagram 分包与重组 | 视频 crates/beam-net/src/datagram.rs:60-142；音频 未找到（已搜索：FrameKind::Audio、audio packetize、音频分包） | 缺失 | `packetize` 只产出 `FrameKind::Video` / `FrameKind::Fec`（crates/beam-net/src/datagram.rs:120-133）；proto 已有 `FrameKind::Audio`（crates/beam-proto/src/frame.rs:35），beam-net 无音频路径（音频本身属 §3.7 的 v1 范围） | 未开始 |
+| N-29 | 职责：视频/音频 datagram 分包与重组 | 视频 crates/beam-net/src/datagram.rs:60-142；音频 未找到（已搜索：FrameKind::Audio、audio packetize、音频分包） | 缺失 | `packetize` 只产出 `FrameKind::Video` / `FrameKind::Fec`（crates/beam-net/src/datagram.rs:120-133）；proto 已有 `FrameKind::Audio`（crates/beam-proto/src/frame.rs:35），beam-net 无音频路径（音频本身属 §3.7 的 v1 范围） | 进行中 |
 | N-30 | 职责：连接统计 | crates/beam-net/src/endpoint.rs:243-245 | 已实现 | `Conn::stats()` 透出 `quinn::ConnectionStats` | 未开始 |
 
 ##### §3.3 beam-pair
@@ -658,14 +681,14 @@
 
 | # | 文档要求 | 实现位置 | 判定 | 说明 | 状态 |
 |---|---|---|---|---|---|
-| A-01 | 「主机 WASAPI loopback 48 kHz → Opus 5 ms 帧」（WASAPI loopback 采集） | `crates/beam-audio/src/audio.rs:111-152` | 占位 | `WasapiLoopbackSource` 只存 `cfg`/`running` 两个字段（`audio.rs:111-114`）。`start()` 在默认 feature 下返回 `E7004`（`audio.rs:137-141`）；开了 `opus` feature 的分支也只是置标志后 `Ok(())`（`audio.rs:130-136`）。**全 crate 没有任何 WASAPI 调用**（已搜索 `Wasapi`/`WASAPI`/`loopback`，仅命中注释与类型名；`windows` 依赖虽启用了 `Win32_Media_Audio`/`Win32_Media_KernelStreaming`（`crates/beam-audio/Cargo.toml:23-26`）但未被使用）。`next_frame()` 恒返回 `None`（`audio.rs:144-146`）。 | 未开始 |
+| A-01 | 「主机 WASAPI loopback 48 kHz → Opus 5 ms 帧」（WASAPI loopback 采集） | `crates/beam-audio/src/audio.rs:111-152` | 占位 | `WasapiLoopbackSource` 只存 `cfg`/`running` 两个字段（`audio.rs:111-114`）。`start()` 在默认 feature 下返回 `E7004`（`audio.rs:137-141`）；开了 `opus` feature 的分支也只是置标志后 `Ok(())`（`audio.rs:130-136`）。**全 crate 没有任何 WASAPI 调用**（已搜索 `Wasapi`/`WASAPI`/`loopback`，仅命中注释与类型名；`windows` 依赖虽启用了 `Win32_Media_Audio`/`Win32_Media_KernelStreaming`（`crates/beam-audio/Cargo.toml:23-26`）但未被使用）。`next_frame()` 恒返回 `None`（`audio.rs:144-146`）。 | 已完成 |
 | A-02 | 「Opus 5 ms 帧」（Opus 编码） | `crates/beam-audio/src/audio.rs:16-20,167-174` | 占位 | 帧长常量正确（`FRAME_DURATION_MS = 5`，`audio.rs:17`；`SAMPLES_PER_FRAME = 240`，`audio.rs:20`），但 `OpusEncoderImpl::encode()` 恒返回 `Err(AudioError::BackendDisabled)`（`audio.rs:170`），且**无论 `opus` feature 开或关都如此**。`opus` 依赖（`Cargo.toml:28`）在 `src/` 中从未被引用。 | 已完成 |
 | A-03 | 「Windows 客户端 Opus 解码 + WASAPI 输出」（Opus 解码部分） | `crates/beam-audio/src/audio.rs:189-196` | 占位 | `OpusDecoderImpl::decode()` 恒返回 `Err(AudioError::BackendDisabled)`（`audio.rs:192`），feature 开或关都一样。无任何真实解码。 | 已完成 |
-| A-04 | 「Windows 客户端 Opus 解码 + WASAPI 输出」（WASAPI 输出部分） | `crates/beam-audio/src/audio.rs:104-107` | 缺失 | 只有 `trait AudioOutput { fn play(&mut self, pcm:&PcmFrame) -> Result<(), AudioError>; }` 的**接口声明**，**没有任何实现**（已搜索 `impl AudioOutput`：`crates/beam-audio/src/` 零命中；`impl AudioSource` / `impl OpusEncoder` / `impl OpusDecoder` 均有实现，唯独 `AudioOutput` 没有）。也没有 `WasapiAudioOutput` 之类的类型。 | 未开始 |
+| A-04 | 「Windows 客户端 Opus 解码 + WASAPI 输出」（WASAPI 输出部分） | `crates/beam-audio/src/audio.rs:104-107` | 缺失 | 只有 `trait AudioOutput { fn play(&mut self, pcm:&PcmFrame) -> Result<(), AudioError>; }` 的**接口声明**，**没有任何实现**（已搜索 `impl AudioOutput`：`crates/beam-audio/src/` 零命中；`impl AudioSource` / `impl OpusEncoder` / `impl OpusDecoder` 均有实现，唯独 `AudioOutput` 没有）。也没有 `WasapiAudioOutput` 之类的类型。 | 已完成 |
 | A-05 | 「Android 由 core-audio 解码」 | `android/core-audio/src/main/java/dev/beam/core/audio/LowLatencyAudioPlayer.kt:136-148,150-178` | 已实现 | Android 侧是**真实实现**：`MediaCodec.createDecoderByType("audio/opus")` 解码 → `AudioTrack` 低延迟输出（`LowLatencyAudioPlayer.kt:136-148`、`:150-178`），并有 `PcmRingBuffer.kt` 与单测 `src/test/java/dev/beam/core/audio/PcmRingBufferTest.kt`。注：这是 Kotlin 侧实现，超出本次 6 个 Rust crate 的审计范围，在此仅作 §3.7 要求的对照。 | 未开始 |
 | A-06 | 「(可复用 ffi 中的 Opus 解码)」 | 未找到（已搜索：`opus`、`Opus`；`crates/beam-ffi/src/` 零命中） | 缺失 | beam-ffi 的导出面只有 `BeamClient` / `ClientConfig` / `DiscoveryListener` / `FrameSink` / `PeerInfo`（`crates/beam-ffi/src/lib.rs:58`），**不含任何 Opus 解码能力**。Android 侧实际是各自用 `MediaCodec` 自行解码，与文档建议的「复用 ffi 解码」不符。 | 未开始 |
 | A-07 | 「边界:不做混音/回声消除」 | `crates/beam-audio/Cargo.toml:16-28`；`crates/beam-audio/src/` | 已实现 | crate 内无混音/AEC/回声处理代码；依赖仅 `beam-proto` / `bytes` / `thiserror` / `tracing`（+ optional `opus` / `windows`）。Android 侧 `android/core-audio/README.md:44` 亦明确「只解码与直通输出」。 | 未开始 |
-| A-08 | 「错误码 `E7xxx`」 | `crates/beam-audio/src/error.rs:6-12,33-55` | 占位 | 四个错误码常量与变体齐备（7001 设备打开失败 / 7002 Opus 编解码失败 / 7003 音频输出失败 / 7004 后端未启用，`error.rs:6-12`、`33-55`），但**7001/7002/7003 无任何产生路径**：唯一会被抛出的是 `BackendDisabled`。 | 进行中 |
+| A-08 | 「错误码 `E7xxx`」 | `crates/beam-audio/src/error.rs:6-12,33-55` | 占位 | 四个错误码常量与变体齐备（7001 设备打开失败 / 7002 Opus 编解码失败 / 7003 音频输出失败 / 7004 后端未启用，`error.rs:6-12`、`33-55`），但**7001/7002/7003 无任何产生路径**：唯一会被抛出的是 `BackendDisabled`。 | 已完成 |
 | A-09 | 「配置:`audio_mode=host+stream\|stream_only\|off`」 | `crates/beam-audio/src/audio.rs:27-34,44-53`；`crates/beam-config/src/model.rs:19-26,220-229` | 已实现 | 两侧都齐：crate 内 `AudioMode` 三值枚举（`audio.rs:27-34`，默认 `Off`，`audio.rs:36-40`）+ `AudioConfig.mode`（`audio.rs:45`）；全局配置模型 `AudioMode` 枚举（`model.rs:19-26`）、`AudioSettings.mode`（`model.rs:284`）、CLI `--audio`（`model.rs:151`）、环境变量 `BEAM_AUDIO`（`model.rs:187-189`）、字符串解析 `parse_audio_mode`（`model.rs:220-229`，三个取值 `host+stream`/`stream_only`/`off` 全部覆盖）。 | 未开始 |
 | A-10 | 「配置:`bitrate=128k`」 | `crates/beam-audio/src/audio.rs:22-23,48`；`crates/beam-config/src/model.rs:286,331` | 已实现 | `DEFAULT_BITRATE_BPS = 128_000`（`audio.rs:23`）+ `AudioConfig.bitrate_bps`（`audio.rs:48`）；配置模型 `AudioSettings.bitrate_bps` 默认 `128_000`（`model.rs:286,331`）。 | 未开始 |
 | A-11 | 「性能:采集→编码 ≤6 ms」 | `crates/beam-audio/src/audio.rs:201-202` | 缺失 | 只有一个常量 `CAPTURE_TO_ENCODE_BUDGET_MS = 6`（`audio.rs:202`），**没有任何计时/测量代码**；且采集与编码本身都未实现（见 A-01/A-02），该预算无从验证。 | 未开始 |
@@ -759,25 +782,25 @@
 |---|---|---|---|---|---|
 | S-01 | 职责:主/客会话状态机 | `crates/beam-session/src/state.rs:18-51`、`crates/beam-session/src/state.rs:55-97` | 已实现 | `SessionState` 9 态枚举 + `allowed_next()` 转移表 + `can_transition_to()` + `StateMachine::transition()`（`state.rs:136-145`）均为真实逻辑，非桩。 | 未开始 |
 | S-02 | 串联 capture→encode→net | `crates/beam-session/src/host.rs:163-180`、`crates/beam-host/src/adapters.rs:50-83`、`crates/beam-host/src/adapters.rs:116-133` | 已实现 | `HostRunner::pump()` 真实调用 `pipeline.poll()` → `sender.send_frame()`；`CaptureEncodePipeline::poll` 真实调用 `capture.latest()` + `encoder.encode()`（`beam-host/src/adapters.rs:63-74`）。 | 未开始 |
-| S-03 | 串联 net→decode→render | `crates/beam-session/src/client.rs:197-221`、`crates/beam-client/src/adapters.rs:105-107`、`crates/beam-client/src/adapters.rs:41-60` | 偏差 | 会话层结构在（`recv_frame()` → `consumer.consume()` → `decode()`+`present()`），但生产用的 `NetTransport::recv_frame` 恒返回 `None`（`beam-client/src/adapters.rs:105-107`），端到端收帧链路不可用；`send_control`/`send_input` 同样是空实现（`beam-client/src/adapters.rs:82-85`、`:96-99`）。 | 未开始 |
-| S-04 | 能力协商 | 未找到（已搜索：`negotiate`、`beam_proto::negotiate`、`Hello`、`HelloAck` 于 `crates/beam-session/**`、`beam-host/**`、`beam-client/**`、`beam-ffi/**`） | 缺失 | session 只接受外部塞进来的 `SessionInput::Negotiated(StreamConfig)`（`crates/beam-session/src/event.rs:69`），从不调用 `beam_proto::negotiate`（`crates/beam-proto/src/caps.rs:214`），也不收发 `Hello`/`HelloAck`。 | 未开始 |
+| S-03 | 串联 net→decode→render | `crates/beam-session/src/client.rs:197-221`、`crates/beam-client/src/adapters.rs:105-107`、`crates/beam-client/src/adapters.rs:41-60` | 偏差 | 会话层结构在（`recv_frame()` → `consumer.consume()` → `decode()`+`present()`），但生产用的 `NetTransport::recv_frame` 恒返回 `None`（`beam-client/src/adapters.rs:105-107`），端到端收帧链路不可用；`send_control`/`send_input` 同样是空实现（`beam-client/src/adapters.rs:82-85`、`:96-99`）。 | 已完成 |
+| S-04 | 能力协商 | 未找到（已搜索：`negotiate`、`beam_proto::negotiate`、`Hello`、`HelloAck` 于 `crates/beam-session/**`、`beam-host/**`、`beam-client/**`、`beam-ffi/**`） | 缺失 | session 只接受外部塞进来的 `SessionInput::Negotiated(StreamConfig)`（`crates/beam-session/src/event.rs:69`），从不调用 `beam_proto::negotiate`（`crates/beam-proto/src/caps.rs:214`），也不收发 `Hello`/`HelloAck`。 | 已完成 |
 | S-05 | IDR 请求 | `crates/beam-session/src/event.rs:92`、`crates/beam-host/src/adapters.rs:76-78` | 占位 | `FramePipeline::request_idr()` 契约存在，host 适配器真实转发到 `encoder.request_idr()`；但 session 内无任何触发路径（`SessionInput` 无 IDR 变体，`ControlMsg::RequestIdr` 未被处理），全仓仅测试代码调用（`beam-host/src/adapters.rs:240`）。 | 已完成 |
-| S-06 | 重连（里程碑:MVP(无重连)/v1） | `crates/beam-session/src/host.rs:136-145`、`crates/beam-session/src/client.rs:174-183` | 缺失 | 只有 `SessionInput::Stalled`/`Reconnected` 两个外部输入驱动的状态边；没有任何重新建连、定时器或 `Resume` 发送逻辑（已搜索：`Resume`、`reconnect`、`Instant`、`timer`、`timeout(` 于 `crates/beam-session/**`）。 | 未开始 |
-| S-07 | 统计汇总 | `crates/beam-session/src/event.rs:30` | 占位 | `SessionEvent::Stats(StatsReport)` 变体存在，但全仓无任何 `SessionEvent::Stats` 的构造/发射点（已搜索：`SessionEvent::Stats`），host/client 也不做汇总。 | 未开始 |
+| S-06 | 重连（里程碑:MVP(无重连)/v1） | `crates/beam-session/src/host.rs:136-145`、`crates/beam-session/src/client.rs:174-183` | 缺失 | 只有 `SessionInput::Stalled`/`Reconnected` 两个外部输入驱动的状态边；没有任何重新建连、定时器或 `Resume` 发送逻辑（已搜索：`Resume`、`reconnect`、`Instant`、`timer`、`timeout(` 于 `crates/beam-session/**`）。 | 已完成 |
+| S-07 | 统计汇总 | `crates/beam-session/src/event.rs:30` | 占位 | `SessionEvent::Stats(StatsReport)` 变体存在，但全仓无任何 `SessionEvent::Stats` 的构造/发射点（已搜索：`SessionEvent::Stats`），host/client 也不做汇总。 | 已完成 |
 | S-08 | 状态:`Idle → Discovering → Pairing → Connecting → Negotiating → Streaming ⇄ Reconnecting → Closed` | `crates/beam-session/src/state.rs:58-75` | 已实现 | 9 条状态边逐条落地：Idle→{Discovering,Pairing,Connecting,Closed}(:58-63)、Discovering→{Pairing,Connecting,Closed}(:64-68)、Pairing→{Connecting,Closed}(:69)、Connecting→{Negotiating,Closed}(:70)、Negotiating→{Streaming,Closed}(:71)、Streaming→{Reconnecting,Closed}(:72)、Reconnecting→{Streaming,Closed}(:73)、Closed→∅(:74)、Error→{Closed}(:75)。 | 未开始 |
 | S-09 | `Error` 可从任意状态进入 | `crates/beam-session/src/state.rs:82-91` | 已实现 | `can_transition_to` 对 `next==Error` 特判，终态 `Closed` 除外一律允许；测试覆盖 `state.rs:242-254`。 | 未开始 |
 | S-10 | `HostSession::start(cfg, deps) -> SessionHandle` | `crates/beam-session/src/host.rs:190-205` | 已实现 | 签名与文档逐字一致（`cfg: HostSessionConfig, deps: HostDeps`），返回真实 `SessionHandle` 并注入 runner。 | 未开始 |
 | S-11 | `ClientSession::connect(peer, cfg) -> SessionHandle` | `crates/beam-session/src/client.rs:231-240` | 已实现 | 签名逐字一致（`peer: PeerAddr, cfg: ClientSessionConfig`）。 | 未开始 |
-| S-12 | `ClientSession::connect(peer, cfg) -> SessionHandle`（可用性） | `crates/beam-session/src/client.rs:243-297` | 偏差 | 文档给出的唯一入口 `connect` 不接受 deps，无法注入传输 → 必然走 `MissingDependency`（`client.rs:286-295`，报 `E9002`）并停留在 `Idle`；真正可用的注入路径是文档未定义的 `connect_with`（`client.rs:243`）。 | 未开始 |
+| S-12 | `ClientSession::connect(peer, cfg) -> SessionHandle`（可用性） | `crates/beam-session/src/client.rs:243-297` | 偏差 | 文档给出的唯一入口 `connect` 不接受 deps，无法注入传输 → 必然走 `MissingDependency`（`client.rs:286-295`，报 `E9002`）并停留在 `Idle`；真正可用的注入路径是文档未定义的 `connect_with`（`client.rs:243`）。 | 已完成 |
 | S-13 | `SessionHandle::events()->Stream<SessionEvent>` | `crates/beam-session/src/handle.rs:149-162`、`crates/beam-session/src/handle.rs:223-229` | 已实现 | `SessionEventStream: Stream<Item=SessionEvent>` 真实实现 `poll_next`。风险：流只能取一次，第二次调用返回空流（`handle.rs:150-161`）。 | 未开始 |
 | S-14 | `SessionHandle::update(StreamConfig)` | `crates/beam-session/src/handle.rs:165-176` | 已实现 | 真实写入 `SessionInner.config`；但该配置不向编码器/码率控制下发（无调用点，已搜索 `update(`），仅本地存取。 | 未开始 |
 | S-15 | `SessionHandle::stop()` | `crates/beam-session/src/handle.rs:197-205` | 已实现 | 置 `stopped`、状态置 `Closed`、发 `SessionEvent::Closed`。 | 未开始 |
 | S-16 | 边界:不直接调用平台 API,通过 trait(CaptureSource/VideoEncoder/VideoSender/…)注入 | `crates/beam-session/Cargo.toml:11-16`、`crates/beam-session/src/event.rs:86-135` | 已实现 | crate 依赖仅 `beam-proto/bytes/futures/thiserror/tracing`，零平台 crate；平台能力全部经 `FramePipeline`/`VideoSender`/`FrameConsumer`/`InputSink`/`Transport`/`TransportFactory` 注入，适配器在 `beam-host/src/adapters.rs:50-162`、`beam-client/src/adapters.rs:36-61`。 | 未开始 |
 | S-17 | 边界:被 host/client/ffi 依赖 | `crates/beam-host/Cargo.toml:13`、`crates/beam-client/Cargo.toml:13`、`crates/beam-ffi/Cargo.toml:18` | 已实现 | 三者均依赖 `beam-session`，无反向依赖。 | 未开始 |
 | S-18 | 错误码 `E9xxx` | `crates/beam-session/src/error.rs:4-15`、`crates/beam-session/src/error.rs:72-80` | 已实现 | 9001–9005 五码齐备，`is_session_code` 判段（`error.rs:102-104`）；`SessionEvent::Error{code,retryable}` 形态符合 §6（`event.rs:32-37`）。 | 未开始 |
-| S-19 | 配置:`reconnect_timeout=30s`、`stall_threshold=3s` | `crates/beam-session/src/handle.rs:18-32`、`crates/beam-session/src/host.rs:22-33`、`crates/beam-session/src/client.rs:31-47` | 占位 | 三处常量与默认值齐备，但这两个值在 session 内**没有任何读取点**（全仓 `stall_threshold`/`reconnect_timeout` 命中均为定义与赋值处），即「只有常量，没有按阈值实现的判定」。 | 未开始 |
+| S-19 | 配置:`reconnect_timeout=30s`、`stall_threshold=3s` | `crates/beam-session/src/handle.rs:18-32`、`crates/beam-session/src/host.rs:22-33`、`crates/beam-session/src/client.rs:31-47` | 占位 | 三处常量与默认值齐备，但这两个值在 session 内**没有任何读取点**（全仓 `stall_threshold`/`reconnect_timeout` 命中均为定义与赋值处），即「只有常量，没有按阈值实现的判定」。 | 已完成 |
 | S-20 | 测试:状态机表驱动测试 | `crates/beam-session/src/state.rs:153-233` | 已实现 | 9×9 全矩阵对照 `LEGAL` 表（`state.rs:153-215`）+ 终态/Error 专项（`:235-254`）。 | 未开始 |
-| S-21 | 测试:假实现集成测试 | `crates/beam-session/src/host.rs:221-302`、`crates/beam-session/src/client.rs:311-428` | 偏差 | 假实现（`FakePipeline`/`FakeSender`/`FakeTransport`/`FakeConsumer`）确实存在并驱动主链路，但全部写在 `src/` 内 `#[cfg(test)]` 模块；`crates/beam-session/` 下无 `tests/` 目录，无独立集成测试目标，也没有 §8 所述「假 capture/encoder 本机回环跑完整会话」。 | 未开始 |
+| S-21 | 测试:假实现集成测试 | `crates/beam-session/src/host.rs:221-302`、`crates/beam-session/src/client.rs:311-428` | 偏差 | 假实现（`FakePipeline`/`FakeSender`/`FakeTransport`/`FakeConsumer`）确实存在并驱动主链路，但全部写在 `src/` 内 `#[cfg(test)]` 模块；`crates/beam-session/` 下无 `tests/` 目录，无独立集成测试目标，也没有 §8 所述「假 capture/encoder 本机回环跑完整会话」。 | 已完成 |
 
 ##### §4.1 时序与状态机
 | # | 文档要求 | 实现位置 | 判定 | 说明 | 状态 |
