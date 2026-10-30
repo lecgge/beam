@@ -185,6 +185,7 @@ dependencies = [
  "beam-log",
  "beam-net",
  "beam-pair",
+ "beam-perf",
  "beam-proto",
  "beam-session",
  "futures",
@@ -298,6 +299,15 @@ dependencies = [
  "thiserror 2.0.21",
  "time",
  "tracing",
+]
+
+[[package]]
+name = "beam-perf"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

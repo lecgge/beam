@@ -215,3 +215,10 @@ jobs:
       - name: 设计规范令牌核对（§16）
         shell: pwsh
         run: python ../tools/ci/check-design-tokens/check_design_tokens.py
+      # §3.13 的性能采集路径：桌面端的 `perf-stats` feature **默认关闭**
+      # （§7：release 禁止开启），所以默认的 cargo check 不会编译它 ——
+      # 这一步专门编译检查「开了 perf-stats」的那条路径。
+      # 注意：这里只做 check（debug），产物不进 release。
+      - name: src-tauri 性能采集检查（perf-stats）
+        shell: pwsh
+        run: cargo check --features perf-stats

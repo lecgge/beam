@@ -702,26 +702,40 @@ impl BeamService for CrateService {
     fn session_stats(&self) -> Option<SessionStats> {
         let inner = self.lock();
         let session = inner.session.clone()?;
-        // 帧通道统计(§3.2):被丢弃的帧数就是 E2004 的计数。
-        let dropped_frames = inner
-            .frame_stats
-            .as_ref()
-            .map(|handle| handle.snapshot().frames_expired as u32)
-            .unwrap_or(0);
-        // 真实会话还没跑起来(平台后端是占位实现),这里给的是协商后的配置,
-        // 不冒充实测统计:各项耗时字段留 0,由前端按「未采集」显示。
+        // **真实**的会话统计（§3.9）：客户端会话周期上报 `StatsReport`
+        // （fps / 码率 / RTT / 丢包率），`beam-session` 把它汇总成
+        // `SessionSummary`。此前这里用的是「协商后的配置」——那是**请求值**
+        // 不是**实测值**（帧率写死成目标帧率、码率写死成配置码率）。
+        let summary = inner.client_session.as_ref().map(|handle| handle.summary());
+        let fps = summary.as_ref().map(|s| s.fps).unwrap_or(0);
+        let bitrate_bps = summary.as_ref().map(|s| s.bitrate_bps).unwrap_or(0);
+        let rtt_us = summary.as_ref().map(|s| s.rtt_us).unwrap_or(0);
+        let loss_ppm = summary.as_ref().map(|s| s.loss_ppm).unwrap_or(0);
+        let dropped_frames = match inner.frame_stats.as_ref() {
+            Some(handle) => handle.snapshot().frames_expired as u32,
+            // 没有帧通道统计时退回会话层的丢帧计数（也是真实的）。
+            None => summary
+                .as_ref()
+                .map(|s| s.dropped_frames as u32)
+                .unwrap_or(0),
+        };
         Some(SessionStats {
             session_id: session.session_id.clone(),
+            // 各**阶段**耗时（抓屏 / 颜色转换 / 编码 / 解码 / 渲染 / E2E）
+            // 只有 `beam-perf` 的采集器知道，而桌面端默认不开 `perf-stats`
+            // （§7）⇒ 这里如实留 0，前端按「未采集」显示。
             e2e_ms: 0.0,
             capture_ms: 0.0,
             color_convert_ms: 0.0,
             encode_ms: 0.0,
-            network_ms: 0.0,
+            // 网络耗时用**真实**的往返时延（RTT）。
+            network_ms: rtt_us as f32 / 1000.0,
             decode_ms: 0.0,
             render_ms: 0.0,
-            fps: session.fps,
-            bitrate_mbps: inner.resolved.video.bitrate_bps as f32 / 1_000_000.0,
-            loss_pct: 0.0,
+            fps,
+            bitrate_mbps: bitrate_bps as f32 / 1_000_000.0,
+            // 百万分比 → 百分比。
+            loss_pct: loss_ppm as f32 / 10_000.0,
             fec_recovered_pct: 0.0,
             jitter_ms: 0.0,
             dropped_frames,
@@ -915,27 +929,162 @@ impl BeamService for CrateService {
     }
 
     fn perf_snapshot(&self) -> PerfSnapshot {
-        PerfSnapshot {
-            available: false,
-            stages: Vec::new(),
-            metrics: Vec::new(),
-            e2e_series: Vec::new(),
-            samples: 0,
-            captured_at_ms: now_ms(),
+        #[cfg(feature = "perf-stats")]
+        {
+            // §3.13：真实数据来自 `beam-perf` 的全局采集器
+            // （平台层的抓屏 / 颜色转换 / 编码 / 解码 / 渲染埋点）。
+            let snapshot = beam_perf::Perf::snapshot();
+            let stages = snapshot
+                .stages
+                .iter()
+                .map(|(stage, s)| PerfStageStat {
+                    stage: stage.as_str().to_string(),
+                    mean_ms: s.mean_ns as f32 / 1_000_000.0,
+                    p50_ms: s.p50_ns as f32 / 1_000_000.0,
+                    p99_ms: s.p99_ns as f32 / 1_000_000.0,
+                })
+                .collect();
+            let mut metrics = vec![
+                PerfMetric {
+                    name: "fps".to_string(),
+                    value: snapshot.fps.to_string(),
+                    unit: "fps".to_string(),
+                },
+                PerfMetric {
+                    name: "bitrate".to_string(),
+                    value: format!("{:.2}", snapshot.bitrate_bps as f64 / 1_000_000.0),
+                    unit: "Mbps".to_string(),
+                },
+                PerfMetric {
+                    name: "dropped_frames".to_string(),
+                    value: snapshot.dropped_frames.to_string(),
+                    unit: "frames".to_string(),
+                },
+            ];
+            // CPU / GPU / 内存：**没有真实采样源时整项不写** ——
+            // 写成 0 会让「未采集」冒充「实测为 0」。
+            if let Some(cpu) = snapshot.cpu_percent() {
+                metrics.push(PerfMetric {
+                    name: "cpu".to_string(),
+                    value: format!("{cpu:.1}"),
+                    unit: "%".to_string(),
+                });
+            }
+            if let Some(gpu) = snapshot.gpu_percent() {
+                metrics.push(PerfMetric {
+                    name: "gpu".to_string(),
+                    value: format!("{gpu:.1}"),
+                    unit: "%".to_string(),
+                });
+            }
+            if let Some(mem) = snapshot.memory_used_bytes() {
+                metrics.push(PerfMetric {
+                    name: "memory".to_string(),
+                    value: format!("{:.1}", mem as f64 / (1024.0 * 1024.0)),
+                    unit: "MB".to_string(),
+                });
+            }
+            PerfSnapshot {
+                available: true,
+                stages,
+                metrics,
+                // 端到端**序列**：beam-perf 只保留各阶段的统计量
+                // （count/mean/p50/p95/p99/max），不保留逐点序列 ⇒ 这里如实为空，
+                // 不用「只有最后一个点」之类的假序列去糊。
+                e2e_series: Vec::new(),
+                samples: snapshot.samples as u32,
+                captured_at_ms: now_ms(),
+            }
+        }
+        #[cfg(not(feature = "perf-stats"))]
+        {
+            // §3.13 门控：`perf-stats` 没开 ⇒ 没有采集器 ⇒ 如实报「不可用」，
+            // 而不是返回一组 0（那会被前端当成「实测为 0」）。
+            PerfSnapshot {
+                available: false,
+                stages: Vec::new(),
+                metrics: Vec::new(),
+                e2e_series: Vec::new(),
+                samples: 0,
+                captured_at_ms: now_ms(),
+            }
         }
     }
 
     fn perf_tick(&self) -> Option<PerfTick> {
-        None
+        #[cfg(feature = "perf-stats")]
+        {
+            let snapshot = beam_perf::Perf::snapshot();
+            // 一个样本都没有 ⇒ 还没有真实数据 ⇒ 不发事件（不编造）。
+            if snapshot.samples == 0 {
+                return None;
+            }
+            // E2E 阶段耗时：采集器里若没有这一项，就是没有数据（留 0 而不是编造）。
+            let e2e_ms = snapshot
+                .stages
+                .iter()
+                .find(|(stage, _)| stage.as_str() == "e2e")
+                .map(|(_, s)| s.mean_ns as f32 / 1_000_000.0)
+                .unwrap_or(0.0);
+            Some(PerfTick {
+                e2e_ms,
+                fps: snapshot.fps,
+                bitrate_mbps: snapshot.bitrate_bps as f32 / 1_000_000.0,
+                cpu_pct: snapshot.cpu_percent().unwrap_or(0.0) as f32,
+                gpu_pct: snapshot.gpu_percent().unwrap_or(0.0) as f32,
+                memory_mb: snapshot
+                    .memory_used_bytes()
+                    .map(|b| (b / (1024 * 1024)) as u32)
+                    .unwrap_or(0),
+                timestamp_ms: now_ms(),
+            })
+        }
+        #[cfg(not(feature = "perf-stats"))]
+        {
+            None
+        }
     }
 
     fn perf_export(&self, format: &str) -> Result<PerfExportResult, BeamError> {
-        // §3.13:perf-stats 是 beam-perf 的 cargo feature,桌面端默认不引入,
-        // 所以这里明确返回「不可用」,而不是编造数据。
-        Err(BeamError::invalid(
-            E_PERF_UNAVAILABLE,
-            format!("性能统计模块(beam-perf / perf-stats)未接入桌面端,无法导出 {format}"),
-        ))
+        #[cfg(feature = "perf-stats")]
+        {
+            let fmt = match format.to_ascii_lowercase().as_str() {
+                "csv" => beam_perf::ExportFormat::Csv,
+                "json" => beam_perf::ExportFormat::Json,
+                other => {
+                    return Err(BeamError::invalid(
+                        E_PERF_UNAVAILABLE,
+                        format!("不支持的导出格式 {other}（只支持 csv / json）"),
+                    ))
+                }
+            };
+            let mut path = std::env::temp_dir();
+            path.push(format!("beam-perf-export.{format}"));
+            let rows = beam_perf::Perf::snapshot().samples as u32;
+            beam_perf::Perf::export(fmt, &path).map_err(|err| {
+                BeamError::new(
+                    E_PERF_UNAVAILABLE,
+                    format!("性能数据导出失败: {err}"),
+                    false,
+                )
+            })?;
+            let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            Ok(PerfExportResult {
+                format: format.to_string(),
+                path: path.to_string_lossy().to_string(),
+                bytes,
+                rows,
+            })
+        }
+        #[cfg(not(feature = "perf-stats"))]
+        {
+            // §3.13：perf-stats 是 beam-perf 的 cargo feature,桌面端默认不引入,
+            // 所以这里明确返回「不可用」,而不是编造数据。
+            Err(BeamError::invalid(
+                E_PERF_UNAVAILABLE,
+                format!("性能统计模块(beam-perf / perf-stats)未接入桌面端,无法导出 {format}"),
+            ))
+        }
     }
 
     fn rotate_pairing_code_if_due(&self) -> Option<PairingCode> {

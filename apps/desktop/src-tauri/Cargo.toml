@@ -51,6 +51,14 @@ host-platform = ["beam-crates", "beam-host/platform"]
 # 它**不出画面**(硬编后端是关的);真画面要开 host-platform。
 host-platform-wgc = ["beam-crates", "beam-host/platform-wgc"]
 
+# perf-stats:§3.13 的性能采集（各阶段耗时直方图 + CPU/GPU/内存）。
+#
+# **默认关闭** —— §7:「perf-stats feature 默认关闭、release 禁止开启」。
+# 开发/调试构建用 `cargo run --features perf-stats` 打开，
+# 此时 `perf://tick` / `perf_snapshot` / `perf_export` 走**真实**采集数据；
+# 关闭时它们如实返回「不可用」，**不编造**数值。
+perf-stats = ["dep:beam-perf", "beam-perf/perf-stats"]
+
 [build-dependencies]
 tauri-build = { version = "~2.6.3", features = [] }
 
@@ -86,6 +94,8 @@ beam-log = { path = "../../../crates/beam-log", optional = true }
 beam-discovery = { path = "../../../crates/beam-discovery", optional = true }
 beam-pair = { path = "../../../crates/beam-pair", optional = true }
 beam-net = { path = "../../../crates/beam-net", optional = true }
+# §3.13 的性能采集器。可选依赖 + `perf-stats` feature（默认关，见上）。
+beam-perf = { path = "../../../crates/beam-perf", optional = true }
 # §3.1 的协议类型(编解码器枚举等)在 host/client 的公开 API 上直接出现,
 # 桌面端要按名字映射它们,因此需要一个直接依赖。
 beam-proto = { path = "../../../crates/beam-proto", optional = true }
