@@ -1,11 +1,12 @@
 //! 主机运行时组装（§3.9）。
 
 use beam_capture::{CaptureConfig, CaptureSource};
-use beam_config::ResolvedConfig;
+use beam_config::{InputSettings, ResolvedConfig};
 use beam_discovery::{Advertiser, HostInfo};
 use beam_encode::{EncodeConfig, VideoEncoder};
-use beam_input::InputSink as PlatformInputSink;
+use beam_input::{InputInjector, InputSink as PlatformInputSink};
 use beam_net::VideoSender as NetVideoSenderTrait;
+use beam_pair::PeerPerms;
 use beam_proto::StreamConfig;
 use beam_session::{
     HostControlDeps, HostDeps, HostSession, HostSessionConfig, PairingConfig, SessionError,
@@ -13,6 +14,7 @@ use beam_session::{
 };
 
 use crate::adapters::{CaptureEncodePipeline, InputAdapter, NetVideoSender, PipelineErrors};
+use crate::input::map_input_permissions;
 use crate::net::{HostInput, HostTransport};
 
 /// 主机编排层错误。
@@ -48,7 +50,7 @@ pub enum HostError {
 }
 
 /// 主机配置。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct HostConfig {
     /// 串流配置。
     pub stream: StreamConfig,
@@ -64,6 +66,27 @@ pub struct HostConfig {
     pub encode: EncodeConfig,
     /// 本机广播信息。
     pub advertise: Option<HostInfo>,
+    /// 输入设置（§3.14 → §3.9）。
+    ///
+    /// 这是**主机全局上限**：`allow_keyboard` / `allow_mouse` / `gamepad`
+    /// 决定本机最多允许注入哪几类设备。它与协议侧的对端权限取**交集**
+    /// 后才得到真正的注入权限（见 [`crate::input::map_input_permissions`]）。
+    pub input: InputSettings,
+}
+
+impl Default for HostConfig {
+    fn default() -> Self {
+        Self {
+            stream: StreamConfig::default(),
+            capture: CaptureConfig::default(),
+            encode: EncodeConfig::default(),
+            advertise: None,
+            // `beam_config::InputSettings` **没有** `Default` 实现（它只存在于
+            // `ResolvedConfig::default()` 里），因此这里取 `ResolvedConfig::default()`
+            // 的值，保持「配置只有一份真值来源」。
+            input: ResolvedConfig::default().input,
+        }
+    }
 }
 
 impl HostConfig {
@@ -72,6 +95,7 @@ impl HostConfig {
     /// 这是**单一真值来源**的最后一跳：
     /// 抓屏配置直接取 [`beam_capture::CaptureConfig`] 的 `From<&ResolvedConfig>`，
     /// 编码配置直接取 [`beam_encode::EncodeConfig`] 的 `From<&ResolvedConfig>`，
+    /// 输入设置直接取 `ResolvedConfig.input`，
     /// 本 crate 不再自己复制一份配置项。
     pub fn from_resolved(cfg: &ResolvedConfig) -> Self {
         Self {
@@ -91,6 +115,7 @@ impl HostConfig {
             capture: CaptureConfig::from(cfg),
             encode: EncodeConfig::from(cfg),
             advertise: None,
+            input: cfg.input.clone(),
         }
     }
 }
@@ -110,6 +135,11 @@ pub struct HostSessionHandle {
     errors: PipelineErrors,
     /// 输入泵任务；句柄释放时自动取消。
     input_task: Option<tokio::task::JoinHandle<()>>,
+    /// 真实注入器的统计（I-13：入队 → 注入完成的延迟）。
+    ///
+    /// 只有在主机编排层用了**真实注入器**时才有值；
+    /// 调用方自带注入器时为 `None`。
+    input_stats: Option<std::sync::Arc<beam_input::InjectorStats>>,
 }
 
 impl std::fmt::Debug for HostSessionHandle {
@@ -118,6 +148,7 @@ impl std::fmt::Debug for HostSessionHandle {
             .field("session", &self.session)
             .field("has_pipeline_error", &self.errors.has_error())
             .field("has_input_pump", &self.input_task.is_some())
+            .field("has_input_stats", &self.input_stats.is_some())
             .finish()
     }
 }
@@ -162,6 +193,14 @@ impl HostSessionHandle {
     /// 是否有待取走的流水线错误。
     pub fn has_error(&self) -> bool {
         self.errors.has_error()
+    }
+
+    /// 真实注入器的统计（I-13：入队 → 注入完成的延迟）。
+    ///
+    /// 返回 `None` 表示这次会话**没有**用真实注入器
+    /// （调用方自带了注入器，或根本没接输入）。
+    pub fn input_stats(&self) -> Option<&std::sync::Arc<beam_input::InjectorStats>> {
+        self.input_stats.as_ref()
     }
 }
 
@@ -208,6 +247,11 @@ pub fn default_frame_pipeline(
 pub struct HostRuntime {
     cfg: HostConfig,
     advertiser: Option<Advertiser>,
+    /// 当前会话对端（已配对设备）的权限位（§3.3 信任库 → §3.8 单设备闸门）。
+    ///
+    /// `None` = 编排层还不知道对端是谁 → 协议侧不施加限制，只受配置侧约束
+    /// （见 [`crate::input::map_input_permissions`]）。
+    peer_perms: Option<PeerPerms>,
 }
 
 impl HostRuntime {
@@ -216,7 +260,25 @@ impl HostRuntime {
         Self {
             cfg,
             advertiser: None,
+            peer_perms: None,
         }
+    }
+
+    /// 设置当前会话对端（已配对设备）的权限位。
+    ///
+    /// 这是「**单设备闸门**」的开关：调用方（桌面端）从信任库
+    /// （`beam_pair::TrustStore`）里取出对端的 `TrustedPeer.perms` 喂进来，
+    /// 主机编排层据此映射出按设备的注入权限
+    /// （[`crate::input::map_input_permissions`]）。
+    ///
+    /// 不调用它 = 单设备闸门**不生效**（只受配置侧全局上限约束）。
+    pub fn set_peer_permissions(&mut self, perms: Option<PeerPerms>) {
+        self.peer_perms = perms;
+    }
+
+    /// 当前会话对端的权限位。
+    pub fn peer_permissions(&self) -> Option<PeerPerms> {
+        self.peer_perms
     }
 
     /// 启动 mDNS 广播（§3.4）。
@@ -278,6 +340,7 @@ impl HostRuntime {
             session: HostSession::start(session_cfg, deps),
             errors,
             input_task: None,
+            input_stats: None,
         }
     }
 
@@ -371,9 +434,35 @@ impl HostRuntime {
         let _ = session.apply(SessionInput::Connected);
 
         // 输入泵：§5 输入 stream（客户端 → 主机）。
+        //
+        // §3.8 的线程模型：「输入 stream 接收任务 → 有界通道 → 注入线程（高优先级）」。
+        // 本任务就是**接收任务**：它只负责把事件投进注入器的有界通道，
+        // 真正的 `SendInput` 发生在 `beam-input` 的专用注入线程上。
+        //
+        // 注入器从哪来：
+        //
+        // - 调用方给了**占位**注入器（`NoopInputSink`：桌面端受 §4 限制拿不到
+        //   平台 crate）→ 主机编排层换成**真实注入器**
+        //   （`beam_input::InputInjector`：有界通道 + 专用线程 + MMCSS），
+        //   权限 = 配置侧 `InputSettings` × 协议侧对端权限（交集）；
+        // - 调用方给了自己的注入器 → 原样使用（测试 / 特殊场景）。
+        let mut input_stats: Option<std::sync::Arc<beam_input::InjectorStats>> = None;
         let input_task = input.map(|sink| {
             let conn = conn.clone();
-            let mut sink: Box<dyn beam_session::InputSink> = Box::new(InputAdapter::new(sink));
+            let mut sink: Box<dyn beam_session::InputSink> = if sink.is_placeholder() {
+                let perms = map_input_permissions(self.peer_perms.as_ref(), &self.cfg.input);
+                tracing::info!(
+                    keyboard = perms.keyboard,
+                    mouse = perms.mouse,
+                    gamepad = perms.gamepad,
+                    "使用真实注入器(有界通道 + 专用注入线程)"
+                );
+                let injector = InputInjector::new(perms);
+                input_stats = Some(injector.stats());
+                Box::new(InputAdapter::new(injector))
+            } else {
+                Box::new(InputAdapter::new(sink))
+            };
             tokio::spawn(async move {
                 let mut channel = match HostInput::accept(&conn).await {
                     Ok(c) => c,
@@ -403,6 +492,7 @@ impl HostRuntime {
             session,
             errors,
             input_task,
+            input_stats,
         })
     }
 }
@@ -490,5 +580,33 @@ mod tests {
         assert_eq!(cfg.capture.target_fps, resolved.video.fps);
         assert_eq!(cfg.encode.slices, 4);
         assert!(cfg.encode.sfe);
+    }
+
+    #[test]
+    fn config_from_resolved_carries_input_settings() {
+        // §3.14 → §3.9：输入设置必须真的送达 HostConfig（主机全局上限）。
+        let mut resolved = ResolvedConfig::default();
+        resolved.input.allow_keyboard = false;
+        resolved.input.allow_mouse = true;
+        resolved.input.gamepad = true;
+
+        let cfg = HostConfig::from_resolved(&resolved);
+        assert!(!cfg.input.allow_keyboard);
+        assert!(cfg.input.allow_mouse);
+        assert!(cfg.input.gamepad);
+    }
+
+    #[test]
+    fn peer_permissions_are_carried_by_the_runtime() {
+        let mut runtime = HostRuntime::new(HostConfig::default());
+        assert!(runtime.peer_permissions().is_none(), "默认没有对端权限");
+        let perms = PeerPerms {
+            view: true,
+            input: false,
+            audio: true,
+            gamepad: true,
+        };
+        runtime.set_peer_permissions(Some(perms));
+        assert_eq!(runtime.peer_permissions(), Some(perms));
     }
 }

@@ -22,6 +22,15 @@
 //! - [`NetVideoSender`]：网络发送 → `beam_session::VideoSender`；
 //! - [`InputAdapter`]：输入注入 → `beam_session::InputSink`。
 //!
+//! ## 主机侧输入接线（§3.9 / §3.8）
+//!
+//! - [`map_input_permissions`]：把**协议侧**对端权限（`beam_pair::TrustedPeer.perms`）
+//!   与**配置侧**输入设置（`beam_config::InputSettings`）取**交集**，
+//!   映射成按设备的注入权限（`beam_input::InputPermissions`）；
+//! - 输入泵（[`crate::runtime::HostRuntime::start_quic_session_with_pipeline`]）在调用方
+//!   给出**占位**注入器（[`NoopInputSink`]，桌面端受 §4 限制拿不到平台 crate）时，
+//!   换成**真实注入器**（`beam_input::InputInjector`：有界通道 + 专用注入线程 + MMCSS）。
+//!
 //! ## 主机侧 QUIC 接受端（§5）
 //!
 //! [`HostTransport`] 与 [`HostInput`] 是主机侧的 QUIC 适配器：
@@ -63,6 +72,7 @@
 #![forbid(unsafe_code)]
 
 pub mod adapters;
+pub mod input;
 pub mod net;
 pub mod pairing;
 /// 平台会话工厂与监听编排（需要 `platform` 或 `platform-wgc` feature：
@@ -74,6 +84,7 @@ pub mod runtime;
 pub use adapters::{
     CaptureEncodePipeline, EmptyPipeline, InputAdapter, NetVideoSender, NoopInputSink,
 };
+pub use input::map_input_permissions;
 pub use net::{HostInput, HostListener, HostTransport};
 pub use pairing::{HostTrustGate, ObservedPeer};
 pub use runtime::{default_frame_pipeline, HostConfig, HostError, HostRuntime, HostSessionHandle};

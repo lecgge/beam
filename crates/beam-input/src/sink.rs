@@ -38,6 +38,33 @@ use crate::error::InputError;
 pub trait InputSink: Send {
     /// 注入一个输入事件。
     fn apply(&mut self, ev: InputEvent) -> Result<(), InputError>;
+
+    /// 这个注入器是不是「**占位注入器**」。
+    ///
+    /// 占位注入器 = 「拿不到平台注入器时的替身」：调用方受 §4 限制
+    /// **不能**直接依赖平台 crate（`beam-input`），只能先传一个占位。
+    ///
+    /// 主机编排层（`beam-host`）看到占位时，会把它换成**真实**注入器
+    /// （[`crate::injector::InputInjector`]：有界通道 + 专用注入线程 + MMCSS）。
+    /// 这样桌面端（`apps/desktop`）不必、也不能直接依赖 `beam-input`，
+    /// 却仍然能拿到真注入。
+    ///
+    /// 默认 `false`（真注入器）。
+    fn is_placeholder(&self) -> bool {
+        false
+    }
+
+    /// 设置按设备的注入权限（§3.8「权限控制(按设备)」）。
+    ///
+    /// 默认实现**忽略**：对不按设备做权限控制的注入器（例如只记账的假注入器）
+    /// 没有意义。
+    ///
+    /// [`crate::SendInputSink`] 与 [`crate::injector::InputInjector`] 都实现了它；
+    /// 注入线程在每个事件前把**当前**权限同步给注入器，
+    /// 因此运行期改权限能立刻生效。
+    fn set_permissions(&mut self, perms: InputPermissions) {
+        let _ = perms;
+    }
 }
 
 /// 手柄槽位数量上限（Xbox 手柄最多 4 个）。
@@ -191,6 +218,20 @@ fn device_class(ev: &InputEvent) -> DeviceClass {
     }
 }
 
+/// 给定权限下，这个事件当前是否被允许注入（按设备）。
+///
+/// 注入器（[`crate::injector::InputInjector`]）在**注入线程**里也要过这道闸门
+/// （权限是运行期可变的），因此这里抽成 crate 内共用的函数，
+/// 避免两处各写一份而出现语义漂移。
+pub(crate) fn permits_for(perms: &InputPermissions, ev: &InputEvent) -> bool {
+    match device_class(ev) {
+        DeviceClass::Keyboard => perms.keyboard,
+        DeviceClass::Mouse => perms.mouse,
+        // 手柄恒为「允许」：它不由本注入器注入（走 vigem 路径）。
+        DeviceClass::Gamepad => true,
+    }
+}
+
 /// SendInput 键鼠注入器。
 #[derive(Debug, Default)]
 pub struct SendInputSink {
@@ -202,6 +243,11 @@ impl SendInputSink {
     /// 新建注入器（默认三类设备都不允许注入）。
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 新建注入器并直接给出按设备的权限。
+    pub fn with_permissions(perms: InputPermissions) -> Self {
+        Self { perms }
     }
 
     /// 设置按设备的注入权限（§3.8）。
@@ -230,11 +276,7 @@ impl SendInputSink {
     ///
     /// 手柄恒为「允许」：它不由本注入器注入（走 vigem 路径）。
     fn permits(&self, ev: &InputEvent) -> bool {
-        match device_class(ev) {
-            DeviceClass::Keyboard => self.perms.keyboard,
-            DeviceClass::Mouse => self.perms.mouse,
-            DeviceClass::Gamepad => true,
-        }
+        permits_for(&self.perms, ev)
     }
 }
 
@@ -263,6 +305,12 @@ impl InputSink for SendInputSink {
             let _ = ev;
             Ok(())
         }
+    }
+
+    /// 运行期改权限（注入线程在每个事件前同步当前权限）。
+    fn set_permissions(&mut self, perms: InputPermissions) {
+        // 调**固有**方法（同名固有方法优先于 trait 方法）。
+        SendInputSink::set_permissions(self, perms);
     }
 }
 

@@ -23,8 +23,21 @@ windows = { workspace = true, features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
     "Win32_Foundation",
+    # §6：注入线程用 MMCSS "Games"（AvSetMmThreadCharacteristicsW /
+    # AvSetMmThreadPriority）与退路 SetThreadPriority，都在
+    # Win32::System::Threading 里。
+    "Win32_System_Threading",
 ] }
 vigem-client = { workspace = true, optional = true }
+
+[dev-dependencies]
+# I-13 延迟基准（criterion 已在 workspace 里，不动根 Cargo.toml）。
+criterion = { workspace = true }
+
+# 注入热路径基准（harness = false：criterion 自带 harness）。
+[[bench]]
+name = "inject_latency"
+harness = false
 
 [lints]
 workspace = true

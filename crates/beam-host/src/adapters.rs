@@ -29,26 +29,33 @@ use beam_net::VideoSender as NetVideoSenderTrait;
 use beam_proto::{ControlMsg, EncodedFrame, InputEvent};
 use beam_session::{FramePipeline, InputSink, SessionError, VideoSender};
 
-/// 空输入接收器：接收输入事件，但**不做任何注入**。
+/// 空输入接收器：**占位**，主机编排层会把它换成**真实**注入器。
 ///
 /// ## 为什么需要它
 ///
 /// 主机侧要接收客户端的输入流（§5 输入 stream），注入由**平台注入器**
-/// （`beam_input::SendInputSink`）完成。但 §4 规定平台 crate 只能被
+/// （`beam_input::InputInjector` / `SendInputSink`）完成。但 §4 规定平台 crate 只能被
 /// host / client 引用 —— 桌面端（`apps/desktop`）**不能**直接依赖
 /// `beam-input`，所以它拿不到注入器。
 ///
-/// 因此本 crate 提供一个「接收但不注入」的替身：输入流照常被读走
-/// （不会让客户端的输入通道堵住），但**不假装**注入了按键。
+/// 因此本 crate 提供一个「占位」：桌面端把它传给主机编排层，主机编排层看到
+/// [`beam_input::InputSink::is_placeholder`] 为真，就用**真实注入器**
+/// （有界通道 + 专用注入线程 + MMCSS，权限按设备映射）替换它。
 ///
-/// 真实注入器（`SendInput`）本身尚未在本仓实现
-/// （`beam-input` 的 Windows 分支目前是空实现），所以这个替身
-/// 与真实注入器当前的**实际**行为一致 —— 差别只在于责任归属。
+/// ## 名字的历史
+///
+/// 本类型以前叫「空接收器」，语义是「读走输入流但**不**注入」。
+/// 现在 `beam-input` 的真实注入器已经落地（上一批 B6 做了 `SendInput`，
+/// 本批做了注入线程与权限映射），语义变成「读走输入流并**由主机注入**」。
+/// 名字保留是为了不破坏桌面端的调用点（`apps/desktop` 不在本次改动范围内）。
+///
+/// 想要「读走但不注入」的调用方可以自己实现 `beam_input::InputSink`
+/// （默认 `is_placeholder() == false`，主机编排层会原样使用它）。
 #[derive(Debug, Clone, Default)]
 pub struct NoopInputSink;
 
 impl NoopInputSink {
-    /// 新建一个空输入接收器。
+    /// 新建一个空输入接收器（占位）。
     pub fn new() -> Self {
         Self
     }
@@ -56,10 +63,16 @@ impl NoopInputSink {
 
 impl beam_input::InputSink for NoopInputSink {
     fn apply(&mut self, ev: InputEvent) -> Result<(), beam_input::InputError> {
-        // 读走了事件,但不注入。**不**返回错误:输入流本身是好的,
-        // 只是本机没有可用的注入器。
+        // 占位注入器**自己**不注入；主机编排层会先用真实注入器替换它。
+        // 万一被直接使用（例如脱离主机编排层），这里也**不返回错误**：
+        // 输入流本身是好的，只是本机没有可用的注入器。
         let _ = ev;
         Ok(())
+    }
+
+    /// 本类型是**占位**（§4：调用方拿不到平台注入器）。
+    fn is_placeholder(&self) -> bool {
+        true
     }
 }
 
@@ -458,5 +471,18 @@ mod tests {
     #[test]
     fn input_error_code_is_stable() {
         assert_eq!(InputError::ViGEmNotInstalled.code(), 8001);
+    }
+
+    #[test]
+    fn noop_sink_is_marked_as_a_placeholder() {
+        // 占位标记：主机编排层看到它就会换成**真实**注入器（§3.9）。
+        let sink = NoopInputSink::new();
+        assert!(
+            beam_input::InputSink::is_placeholder(&sink),
+            "NoopInputSink 必须是占位,否则桌面端永远拿不到真注入器"
+        );
+        // 真注入器不是占位。
+        let real = SendInputSink::new();
+        assert!(!beam_input::InputSink::is_placeholder(&real));
     }
 }
