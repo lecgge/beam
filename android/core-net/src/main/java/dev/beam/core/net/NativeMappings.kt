@@ -18,10 +18,12 @@ package dev.beam.core.net
  * | 生成物 | 实际形状 |
  * |---|---|
  * | `BeamClient` | `class BeamClient(config: BeamClientConfig)`，方法 `browse` / `pairQr` / `pairPin` / `connect` |
- * | `Session` | `class Session`，方法只有 `state()` / `stop()` |
+ * | `Session` | `class Session`，方法 `state()` / `stop()` / `reconnecting()` / `summary()` |
  * | `SessionEvent` | `sealed class`，变体 `StateChanged` / `Paired` / `Negotiated` / `Stats` / `Error` / `Closed` |
  * | `SessionEvent.Stats` | **嵌套**记录：统计字段在 `stats: SessionStats` 里，不在变体上 |
  * | `SessionStats` | `sessionId: ULong` / `fps: UInt` / `bitrateBps: UInt` / `lossPpm: UInt` / `rttUs: UInt` / `decodeUs: UInt` / `renderUs: UInt` / `e2eUs: UInt` / `droppedFrames: UInt` |
+ * | `ReconnectingInfo` | `elapsedMs: ULong` / `keepLastFrame: Boolean` —— 由 `Session::reconnecting()` **查询**得到（不在重连态时返回 `null`） |
+ * | `SessionSummary` | `sessionId: ULong` / `durationMs: ULong` / `frames: ULong` / `droppedFrames: ULong` / `reconnects: UInt` / `rttUs: UInt` / `lossPpm: UInt` / `fps: UInt` / `bitrateBps: UInt` / `state: SessionState` |
  * | `DiscoveredHost` | `id` / `name` / `version` / `fingerprint` / `port: UInt` / `address` / `fullname` —— **地址与端口是分开的两个字段** |
  * | `Peer` | `id` / `name` / `address` / `fingerprint` / `platform` / `trusted` |
  * | `StreamCfg` | `width` / `height` / `fps` / `codec: String` / `bitrateKbps` / `fecRatio` / `audioEnabled` |
@@ -161,6 +163,50 @@ internal object NativeMappings {
             bitrateKbps = Reflect.readInt(raw, "bitrateKbps", "bitrate_kbps") ?: 20_000,
             fecRatio = fecRatio.coerceIn(0f, 1f),
             audioEnabled = Reflect.readBoolean(raw, "audioEnabled", "audio_enabled") ?: false,
+        )
+    }
+
+    /**
+     * 把 uniffi 的 `ReconnectingInfo` 记录映射成 [ReconnectingInfo]。
+     *
+     * 输入 `null`（不在重连态）时返回 `null` —— 上层据此判断「有没有在重连」，
+     * 而不是拿一个全零的记录去猜。
+     *
+     * 对应 Rust 侧 `beam_session::ReconnectingInfo`，
+     * 经 uniffi 的 `Session::reconnecting()` 查询得到（§4.1）。
+     */
+    fun mapReconnectingInfo(raw: Any?): ReconnectingInfo? {
+        if (raw == null) return null
+        return ReconnectingInfo(
+            elapsedMs = Reflect.readLong(raw, "elapsedMs", "elapsed_ms") ?: 0L,
+            // 会话层在重连期间从不要求清屏 ⇒ 缺字段时按 true 处理。
+            keepLastFrame = Reflect.readBoolean(raw, "keepLastFrame", "keep_last_frame") ?: true,
+        )
+    }
+
+    /**
+     * 把 uniffi 的 `SessionSummary` 记录映射成 [SessionSummary]。
+     *
+     * 对应 Rust 侧 `beam_session::SessionSummary`，
+     * 经 uniffi 的 `Session::summary()` 查询得到（§3.9）。
+     *
+     * 单位换算与 [mapStats] 一致：µs → ms、ppm → 百分比、bit/s → kbit/s。
+     */
+    fun mapSessionSummary(raw: Any?): SessionSummary? {
+        if (raw == null) return null
+        val stateName = Reflect.readEnumName(raw, "state")
+            ?: Reflect.readString(raw, "state")
+        return SessionSummary(
+            sessionId = Reflect.readLong(raw, "sessionId", "session_id") ?: 0L,
+            durationMs = Reflect.readLong(raw, "durationMs", "duration_ms") ?: 0L,
+            frames = Reflect.readLong(raw, "frames") ?: 0L,
+            droppedFrames = Reflect.readLong(raw, "droppedFrames", "dropped_frames") ?: 0L,
+            reconnects = Reflect.readInt(raw, "reconnects") ?: 0,
+            rttMs = (Reflect.readDouble(raw, "rttUs", "rtt_us") ?: 0.0) / 1000.0,
+            lossPercent = (Reflect.readDouble(raw, "lossPpm", "loss_ppm") ?: 0.0) / 10_000.0,
+            fps = Reflect.readDouble(raw, "fps") ?: 0.0,
+            bitrateKbps = (Reflect.readDouble(raw, "bitrateBps", "bitrate_bps") ?: 0.0) / 1000.0,
+            state = if (stateName != null) parseSessionState(stateName) else SessionState.IDLE,
         )
     }
 

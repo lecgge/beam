@@ -31,6 +31,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.nio.ByteBuffer
 
@@ -121,6 +122,7 @@ class StreamViewModel(
     private var connectJob: Job? = null
     private var statsJob: Job? = null
     private var audioJob: Job? = null
+    private var reconnectJob: Job? = null
 
     /** 连接并开始串流。 */
     fun connect(peer: Peer) {
@@ -195,9 +197,11 @@ class StreamViewModel(
         connectJob?.cancel()
         statsJob?.cancel()
         audioJob?.cancel()
+        reconnectJob?.cancel()
         connectJob = null
         statsJob = null
         audioJob = null
+        reconnectJob = null
         session?.close()
         session = null
         decoder?.stop()
@@ -262,7 +266,19 @@ class StreamViewModel(
                     is SessionEvent.Error -> _state.update {
                         it.copy(phase = StreamPhase.ERROR, message = event.message)
                     }
-                    is SessionEvent.StateChanged -> Unit
+                    is SessionEvent.StateChanged -> {
+                        // §4.1：Rust 侧在进入 Reconnecting 时发 StateChanged。
+                        // （`SessionEvent.Reconnecting` 变体当前导出面没有，
+                        //   保留映射只为兼容后续扩展。）
+                        if (event.state == dev.beam.core.net.SessionState.RECONNECTING) {
+                            _state.update {
+                                it.copy(
+                                    phase = StreamPhase.RECONNECTING,
+                                    message = "网络波动，正在重连…",
+                                )
+                            }
+                        }
+                    }
                     // 丢帧（§3.2 E2004）：**不是**故障 —— 不改相位，只在统计里记一笔。
                     is SessionEvent.FramesDropped -> _state.update {
                         val stats = it.stats
@@ -288,6 +304,32 @@ class StreamViewModel(
                 if (player != null) {
                     player.enqueue(packet.data, packet.ptsUs)
                 }
+            }
+        }
+        // 重连状态用的是**查询式**接口 `Session::reconnecting()`，不是事件变体 ——
+        // Rust 侧的 `SessionEvent` 是穷尽匹配，给它加变体会同时打破三处，
+        // 因此导出面选择「查询」而不是「事件」。
+        //
+        // 不在重连态时查询返回 `null` ⇒ `null` 就是「没在重连」。
+        // 这里按 500 ms 轮询：既能在进入重连时立刻亮遮罩，
+        // 也能在恢复后把遮罩撤掉（最后一帧一直留在屏幕上，§4.1）。
+        reconnectJob = viewModelScope.launch {
+            while (isActive) {
+                val info = runCatching { opened.reconnecting() }.getOrNull()
+                _state.update { current ->
+                    if (info != null) {
+                        current.copy(
+                            phase = StreamPhase.RECONNECTING,
+                            message = "网络波动，正在重连…（${info.elapsedMs / 1000} 秒）",
+                        )
+                    } else if (current.phase == StreamPhase.RECONNECTING) {
+                        // 恢复：回到串流相位。
+                        current.copy(phase = StreamPhase.STREAMING, message = null)
+                    } else {
+                        current
+                    }
+                }
+                delay(500)
             }
         }
     }

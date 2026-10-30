@@ -33,7 +33,7 @@
 | 事件 | 频率 | 本模块的处理 |
 |---|---|---|
 | `session://stats` | 500 ms | 写入 `StreamUiState.stats`，统计浮层渲染端到端 / 解码 / 显示耗时、分辨率、编码、丢包与 FEC 恢复率 |
-| `session://reconnecting` | 事件 | `phase = RECONNECTING`，画面保留最后一帧并叠加「正在重连…」遮罩 |
+| `session://reconnecting` | **查询**（`Session::reconnecting()`，500 ms 轮询） | `phase = RECONNECTING`，画面保留最后一帧并叠加「正在重连…（N 秒）」遮罩；查询返回 `null` 即「没在重连」，此时撤掉遮罩 |
 | `session://disconnected` | 事件 | `phase = DISCONNECTED`，显示断开文案 |
 | `session://state-changed` | 事件 | 驱动会话状态机 |
 | 能力协商完成 | 事件 | 用主机的最终配置刷新 `resolutionLabel` / `codecLabel` |

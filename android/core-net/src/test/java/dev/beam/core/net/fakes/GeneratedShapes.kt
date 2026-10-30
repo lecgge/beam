@@ -98,3 +98,27 @@ data class Peer(
     val platform: String,
     val trusted: kotlin.Boolean,
 )
+
+/**
+ * 重连信息（§4.1）。
+ *
+ * 由 uniffi 的 `Session::reconnecting()` **查询**得到，不在重连态时返回 `null`。
+ */
+data class ReconnectingInfo(
+    val elapsedMs: kotlin.ULong,
+    val keepLastFrame: kotlin.Boolean,
+)
+
+/** 会话汇总（§3.9）。 */
+data class SessionSummary(
+    val sessionId: kotlin.ULong,
+    val durationMs: kotlin.ULong,
+    val frames: kotlin.ULong,
+    val droppedFrames: kotlin.ULong,
+    val reconnects: kotlin.UInt,
+    val rttUs: kotlin.UInt,
+    val lossPpm: kotlin.UInt,
+    val fps: kotlin.UInt,
+    val bitrateBps: kotlin.UInt,
+    val state: SessionState,
+)

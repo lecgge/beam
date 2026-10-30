@@ -2,8 +2,10 @@ package dev.beam.core.net
 
 import dev.beam.core.net.fakes.DiscoveredHost as GenHost
 import dev.beam.core.net.fakes.Peer as GenPeer
+import dev.beam.core.net.fakes.ReconnectingInfo as GenReconnecting
 import dev.beam.core.net.fakes.SessionEvent as GenEvent
 import dev.beam.core.net.fakes.SessionStats as GenStats
+import dev.beam.core.net.fakes.SessionSummary as GenSummary
 import dev.beam.core.net.fakes.StreamCfg as GenCfg
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -256,6 +258,64 @@ class NativeMappingsTest {
 
     /** 模拟 uniffi 生成的 `BeamException.PinFailed`（异常类名决定错误码）。 */
     private class PinFailed : RuntimeException("")
+
+    // --------------------------------------------------------------- 重连与汇总
+
+    @Test
+    fun `重连信息被映射`() {
+        val raw = GenReconnecting(elapsedMs = 2_500uL, keepLastFrame = true)
+
+        val mapped = NativeMappings.mapReconnectingInfo(raw)
+
+        assertNotNull(mapped)
+        assertEquals(2_500L, mapped!!.elapsedMs)
+        assertTrue("重连期间必须保留最后一帧", mapped.keepLastFrame)
+    }
+
+    @Test
+    fun `不在重连态时重连信息映射为 null`() {
+        // §4.1：不在重连态时 Rust 侧返回 None ⇒ Kotlin 侧是 null，
+        // 上层据此判断「有没有在重连」，不能拿一个全零记录去猜。
+        assertNull(NativeMappings.mapReconnectingInfo(null))
+    }
+
+    @Test
+    fun `会话汇总被映射并换算单位`() {
+        val raw = GenSummary(
+            sessionId = 7uL,
+            durationMs = 65_000uL,
+            frames = 3_900uL,
+            droppedFrames = 12uL,
+            reconnects = 2u,
+            rttUs = 8_000u,
+            lossPpm = 1_500u,
+            fps = 60u,
+            bitrateBps = 20_000_000u,
+            state = dev.beam.core.net.fakes.SessionState.Closed,
+        )
+
+        val mapped = NativeMappings.mapSessionSummary(raw)
+
+        assertNotNull(mapped)
+        assertEquals(7L, mapped!!.sessionId)
+        assertEquals(65_000L, mapped.durationMs)
+        assertEquals(3_900L, mapped.frames)
+        assertEquals(12L, mapped.droppedFrames)
+        assertEquals(2, mapped.reconnects)
+        // µs → ms
+        assertEquals(8.0, mapped.rttMs, 1e-9)
+        // ppm → 百分比
+        assertEquals(0.15, mapped.lossPercent, 1e-9)
+        assertEquals(60.0, mapped.fps, 1e-9)
+        // bit/s → kbit/s
+        assertEquals(20_000.0, mapped.bitrateKbps, 1e-6)
+        assertEquals(SessionState.CLOSED, mapped.state)
+    }
+
+    @Test
+    fun `会话汇总为空时映射为 null`() {
+        assertNull(NativeMappings.mapSessionSummary(null))
+    }
 
     // --------------------------------------------------------------- 工具
 

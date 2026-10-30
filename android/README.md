@@ -206,7 +206,7 @@ Android 侧消费的控制面事件与桌面端对齐：
 | 事件 | 频率 | Android 消费点 |
 |---|---|---|
 | `session://stats` | 500 ms | `:feature-stream` 统计浮层（`Session.stats` Flow） |
-| `session://reconnecting` | 事件 | `:feature-stream` 断线遮罩（保留最后一帧） |
+| `session://reconnecting` | 查询（`Session::reconnecting()`） | `:feature-stream` 断线遮罩（保留最后一帧） |
 | `session://disconnected` | 事件 | `:feature-stream` 回退到列表页 |
 | `perf://tick` | 250 ms（仅 debug） | `:feature-perf` 面板 |
 | `discovery://updated` | 事件 | `:feature-discovery` 主机列表 |

@@ -110,12 +110,14 @@ uniffi 生成的 Kotlin 绑定依赖 `com.sun.jna.*`，并且用到
 
 | 生成物 | 实际形状 |
 |---|---|
-| `BeamClient` | `class BeamClient(config: BeamClientConfig)`；方法 `browse(listener)` / `pairQr(payload): Peer` / `pairPin(peer, pin)` / `connect(peer, cfg, sink): Session` |
-| `Session` | `class Session`；方法**只有** `state(): SessionState` / `stop()` |
+| `BeamClient` | `class BeamClient(config: BeamClientConfig)`；方法 `browse(listener)` / `pairQr(payload): Peer` / `pairPin(peer, pin): Peer` / `connect(peer, cfg, sink): Session` |
+| `Session` | `class Session`；方法 `state(): SessionState` / `stop()` / **`reconnecting(): ReconnectingInfo?`** / **`summary(): SessionSummary`** |
 | `FrameSink` | `interface FrameSink { onFrame(data: ByteArray, ptsUs: ULong, captureTsUs: ULong, key: Boolean); onEvent(event: SessionEvent) }` |
 | `DiscoveryListener` | `interface DiscoveryListener { onHost(host: DiscoveredHost); onHostLost(fullname: String) }` |
-| `SessionEvent` | `sealed class`；变体 `StateChanged(state)` / `Paired(fingerprint)` / `Negotiated(config)` / **`Stats(stats)`** / `Error(code, message, retryable)` / `Closed` |
+| `SessionEvent` | `sealed class`；变体 `StateChanged(state)` / `Paired(fingerprint)` / `Negotiated(config)` / **`Stats(stats)`** / `Error(code, message, retryable)` / `Closed` / `FramesDropped(count, code)` |
 | `SessionStats` | `sessionId: ULong` / `fps: UInt` / `bitrateBps: UInt` / `lossPpm: UInt` / `rttUs: UInt` / `decodeUs: UInt` / `renderUs: UInt` / `e2eUs: UInt` / `droppedFrames: UInt` |
+| `ReconnectingInfo` | `elapsedMs: ULong` / `keepLastFrame: Boolean` —— **查询式**，不在重连态时返回 `null`（§4.1） |
+| `SessionSummary` | `sessionId: ULong` / `durationMs: ULong` / `frames: ULong` / `droppedFrames: ULong` / `reconnects: UInt` / `rttUs: UInt` / `lossPpm: UInt` / `fps: UInt` / `bitrateBps: UInt` / `state: SessionState` —— **查询式**，会话结束后依然可查（§3.9） |
 | `DiscoveredHost` | `id` / `name` / `version` / `fingerprint` / `port: UInt` / `address` / `fullname` —— **地址与端口是分开的两个字段** |
 | `Peer` | `id` / `name` / `address` / `fingerprint` / `platform` / `trusted` |
 | `StreamCfg` | `width` / `height` / `fps` / `codec: String` / `bitrateKbps` / `fecRatio` / `audioEnabled` |
@@ -131,6 +133,21 @@ uniffi 生成的 Kotlin 绑定依赖 `com.sun.jna.*`，并且用到
 3. **Kotlin 会修饰 inline class 的 getter 名**：`val fps: UInt` 的 getter 在 JVM 上
    叫 `getFps-<hash>`，不是 `getFps`。只按精确名字查找方法会让**所有无符号整型字段
    读成 null** —— `Reflect.findMethodByName` 已容忍该后缀。
+
+### 4.1.1 为什么重连与汇总是「查询」而不是「事件」
+
+`SessionEvent` 在 `beam-session` / `beam-ffi` / 桌面端 `service_crates.rs` 各有一处
+**穷尽匹配**；给它加一个变体会同时打破三处。因此导出面选择**查询式方法**：
+
+| 查询 | 返回 | 语义 |
+|---|---|---|
+| `Session::reconnecting()` | `ReconnectingInfo?` | 不在重连态时是 `null`（§4.1） |
+| `Session::summary()` | `SessionSummary` | 会话结束后依然可查（§3.9） |
+
+Kotlin 侧对应 [Session.reconnecting] / [Session.summary]，
+映射在 `NativeMappings.mapReconnectingInfo` / `NativeMappings.mapSessionSummary`。
+`NativeSession` 用反射调用；生成物是旧版 `.so`（没有这两个方法）时返回 `null`，
+不会崩。
 
 ### 4.2 `Result` 被 uniffi 提升
 

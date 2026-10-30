@@ -481,6 +481,23 @@ private class NativeSession(
         }
     }
 
+    /**
+     * 当前的重连信息；不在重连态时返回 `null`（§4.1）。
+     *
+     * 生成物里没有这个方法时（旧的 `.so`）同样返回 `null` ——
+     * 「查不到重连信息」与「没有在重连」在上层可以合并处理。
+     */
+    override fun reconnecting(): ReconnectingInfo? {
+        val method = Reflect.findMethodByName(handle.javaClass, "reconnecting") ?: return null
+        return NativeMappings.mapReconnectingInfo(Reflect.invoke(handle, method))
+    }
+
+    /** 会话汇总（§3.9）；生成物里没有这个方法时返回 `null`。 */
+    override fun summary(): SessionSummary? {
+        val method = Reflect.findMethodByName(handle.javaClass, "summary") ?: return null
+        return NativeMappings.mapSessionSummary(Reflect.invoke(handle, method))
+    }
+
     override fun sendInput(event: InputEvent) {
         // Rust 侧导出面目前**没有**输入通道（`crates/beam-ffi/src/ffi.rs` 的
         // `Session` 只导出 `state()` / `stop()`）。这里如实报错，不做假实现。

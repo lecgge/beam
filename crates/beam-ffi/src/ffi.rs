@@ -13,6 +13,8 @@
 //! | `data class BeamClientConfig` | [`BeamClientConfig`] | 客户端配置 |
 //! | `data class DiscoveredHost` | [`DiscoveredHost`] | 发现结果 |
 //! | `data class SessionStats` | [`SessionStats`] | 统计上报 |
+//! | `data class ReconnectingInfo` | [`ReconnectingInfo`] | 重连信息（§4.1） |
+//! | `data class SessionSummary` | [`SessionSummary`] | 会话汇总（§3.9） |
 //! | `sealed class SessionEvent` | [`SessionEvent`] | 控制面事件 |
 //! | `enum SessionState` | [`SessionState`] | 会话状态（§3.9） |
 //! | `class Session` | [`Session`] | 会话句柄 |
@@ -28,6 +30,8 @@
 //! | [`Peer`] | [`crate::client::PeerInfo`] | [`Peer::to_core`] / [`Peer::from_core`] |
 //! | [`StreamCfg`] | `beam_proto::StreamConfig` | [`StreamCfg::to_core`] / [`StreamCfg::from_core`] |
 //! | [`DiscoveredHost`] | `beam_discovery::DiscoveredHost` | [`DiscoveredHost::from_core`] |
+//! | [`ReconnectingInfo`] | `beam_session::ReconnectingInfo` | [`ReconnectingInfo::from_core`] |
+//! | [`SessionSummary`] | `beam_session::SessionSummary` | [`SessionSummary::from_core`] |
 //! | [`SessionEvent`] | `beam_session::SessionEvent` | [`SessionEvent::from_core`] |
 //! | [`SessionState`] | `beam_session::SessionState` | [`SessionState::from_core`] |
 //!
@@ -47,7 +51,8 @@ use std::sync::Arc;
 use beam_discovery::DiscoveredHost as CoreDiscoveredHost;
 use beam_proto::{CodecKind, StatsReport, StreamConfig as CoreStreamConfig};
 use beam_session::{
-    SessionEvent as CoreSessionEvent, SessionHandle, SessionState as CoreSessionState,
+    ReconnectingInfo as CoreReconnectingInfo, SessionEvent as CoreSessionEvent, SessionHandle,
+    SessionState as CoreSessionState, SessionSummary as CoreSessionSummary,
 };
 
 use crate::client::{
@@ -384,6 +389,82 @@ impl SessionStats {
     }
 }
 
+/// 重连信息（§4.1「3 s 无帧 → Reconnecting」）。
+///
+/// 不在重连态时 [`Session::reconnecting`] 返回 `None`；
+/// 在重连态时它给出「已经重连了多久」与「是否保留最后一帧」。
+///
+/// 之所以做成**查询式方法**而不是新增 `SessionEvent` 变体：
+/// `SessionEvent` 是**穷尽匹配**（`beam-session` / `beam-ffi` /
+/// 桌面端 `service_crates.rs` 各有一处），加变体会同时打破三处。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct ReconnectingInfo {
+    /// 已经重连了多久（毫秒）。
+    pub elapsed_ms: u64,
+    /// 是否保留最后一帧画面。
+    ///
+    /// 恒为 `true`：会话层在重连期间从不要求清屏（§4.1）。
+    pub keep_last_frame: bool,
+}
+
+impl ReconnectingInfo {
+    /// 由内部重连信息构造。
+    pub fn from_core(info: &CoreReconnectingInfo) -> Self {
+        Self {
+            elapsed_ms: info.elapsed_ms,
+            keep_last_frame: info.keep_last_frame,
+        }
+    }
+}
+
+/// 会话汇总（§3.9「统计汇总」）。
+///
+/// 会话结束后依然可以查询：计数器由运行体持有，随句柄一起活到句柄被丢弃。
+///
+/// 同样做成**查询式方法**（[`Session::summary`]）而不是事件，
+/// 理由与 [`ReconnectingInfo`] 相同。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct SessionSummary {
+    /// 会话号（§5 `Resume{session_id}` 复用同一个值）。
+    pub session_id: u64,
+    /// 会话时长（毫秒）。
+    pub duration_ms: u64,
+    /// 已发送（主机）/ 已接收（客户端）的画面帧数。
+    pub frames: u64,
+    /// 累计丢帧数（§3.2 **E2004**）。
+    pub dropped_frames: u64,
+    /// 重连次数（进入 `Reconnecting` 的次数）。
+    pub reconnects: u32,
+    /// 最近一次上报的往返时延（微秒）。
+    pub rtt_us: u32,
+    /// 最近一次上报的丢包率（百万分比，`0..=1_000_000`）。
+    pub loss_ppm: u32,
+    /// 最近一次上报的实际帧率。
+    pub fps: u32,
+    /// 最近一次上报的实际码率（bit/s）。
+    pub bitrate_bps: u32,
+    /// 会话当前（或结束时的）状态。
+    pub state: SessionState,
+}
+
+impl SessionSummary {
+    /// 由内部会话汇总构造。
+    pub fn from_core(summary: &CoreSessionSummary) -> Self {
+        Self {
+            session_id: summary.session_id,
+            duration_ms: summary.duration_ms,
+            frames: summary.frames,
+            dropped_frames: summary.dropped_frames,
+            reconnects: summary.reconnects,
+            rtt_us: summary.rtt_us,
+            loss_ppm: summary.loss_ppm,
+            fps: summary.fps,
+            bitrate_bps: summary.bitrate_bps,
+            state: SessionState::from_core(summary.state),
+        }
+    }
+}
+
 /// 会话事件（§6 错误传播 / §3.11 事件流）。
 #[derive(Debug, Clone, PartialEq, uniffi::Enum)]
 pub enum SessionEvent {
@@ -555,6 +636,27 @@ impl Session {
     /// 当前会话状态。
     pub fn state(&self) -> SessionState {
         SessionState::from_core(self.core.state())
+    }
+
+    /// 当前的重连信息；**不在**重连态时返回 `None`（§4.1）。
+    ///
+    /// 上层据此显示「重连中」并**保留最后一帧**
+    /// （`keep_last_frame = true`）。
+    ///
+    /// 这是**查询式**接口而不是 `SessionEvent` 变体 ——
+    /// `SessionEvent` 在 `beam-session` / `beam-ffi` / 桌面端各有一处
+    /// **穷尽匹配**，加变体会同时打破三处；查询式接口不改变既有语义。
+    pub fn reconnecting(&self) -> Option<ReconnectingInfo> {
+        self.core
+            .reconnecting()
+            .map(|info| ReconnectingInfo::from_core(&info))
+    }
+
+    /// 会话汇总（§3.9）：帧数 / 丢帧 / RTT / 丢包率 / 帧率 / 码率 / 重连次数。
+    ///
+    /// 会话结束后依然可以查询（计数器随句柄存活）。
+    pub fn summary(&self) -> SessionSummary {
+        SessionSummary::from_core(&self.core.summary())
     }
 
     /// 主动结束会话（§3.9 `stop()`）。
