@@ -170,6 +170,10 @@ struct CrateInner {
     /// 用 `Arc` 包一层:[`HostSessionHandle`] 不可克隆,但需要同时被
     /// 「状态槽」和「推进循环」持有。
     host_session: Option<Arc<HostSessionHandle>>,
+    /// §3.11 `session://reconnecting` 是否已经报过（进入重连态时报一次）。
+    ///
+    /// 「取走即清空」的语义靠它实现：重连期间不重复报，离开重连态后重新武装。
+    reconnect_notice_sent: bool,
 }
 
 /// crates/ 适配器。
@@ -290,6 +294,7 @@ impl CrateService {
                 host_listener: None,
                 host_gate: None,
                 host_session: None,
+                reconnect_notice_sent: false,
             })),
             discovery,
             transport_outcome: Arc::new(Mutex::new(None)),
@@ -727,9 +732,39 @@ impl BeamService for CrateService {
     }
 
     fn reconnect_notice(&self) -> Option<ReconnectingInfo> {
-        // 不合成重连通知:只有真实传输层报告断线时才应该产生。
-        // 当前 `beam-session` 的帧传输封装尚未落地,这里恒为 `None`。
-        None
+        // §3.11 `session://reconnecting`：由会话层的**真实**重连状态驱动，不合成。
+        //
+        // `beam_session::SessionHandle::reconnecting()` 在会话进入
+        // `Reconnecting` 时返回 `Some(ReconnectingInfo{elapsed_ms, keep_last_frame})`，
+        // 离开重连态后返回 `None`。此前这里恒为 `None`（那是因为会话层还没有
+        // 重连状态机），于是产品方案 §3 第 5 步的「3 秒无帧显示重连中」
+        // 在桌面上永远看不到。
+        //
+        // 「取走即清空」的语义：**只在进入重连态的那一次**报；重连期间不重复刷屏；
+        // 离开重连态后重新武装，下一次重连还能再报。
+        let mut inner = self.lock();
+        let info = inner.client_session.as_ref().and_then(|h| h.reconnecting());
+        match info {
+            Some(info) => {
+                if inner.reconnect_notice_sent {
+                    return None;
+                }
+                inner.reconnect_notice_sent = true;
+                Some(ReconnectingInfo {
+                    session_id: inner
+                        .session
+                        .as_ref()
+                        .map(|s| s.session_id.clone())
+                        .unwrap_or_default(),
+                    elapsed_ms: info.elapsed_ms,
+                    keep_last_frame: info.keep_last_frame,
+                })
+            }
+            None => {
+                inner.reconnect_notice_sent = false;
+                None
+            }
+        }
     }
 
     fn settings(&self) -> Settings {
