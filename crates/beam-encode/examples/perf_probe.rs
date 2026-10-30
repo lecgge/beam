@@ -23,6 +23,7 @@
 //! - CPU / GPU / 内存没有真实采样源时打印 `unavailable`，**不填 0 冒充**；
 //! - 某个阶段没有数据就不出现在表里（而不是补一行 0）。
 
+use std::cell::RefCell;
 use std::time::Instant;
 
 use beam_encode::{CapturedFrame, EncodeConfig, EncoderKind, HardwareVideoEncoder, VideoEncoder};
@@ -34,6 +35,16 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_VIDEO_ENCODER, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_SAMPLE_DESC};
+
+// 持有 D3D11 设备直到进程结束。
+//
+// Rust 的 `static` **不会**在退出时被 drop —— 这正是这里需要的：
+// NVIDIA 驱动侧的第三方 atexit 回调会在 C 运行时收尾阶段访问 D3D11 设备，
+// 设备若已被释放，那个回调就访问了悬垂对象 → 0xC0000005。
+// 详见 `main` 末尾的说明。
+thread_local! {
+    static KEEP_ALIVE: RefCell<Option<ID3D11Device>> = const { RefCell::new(None) };
+}
 
 /// 输入分辨率。
 const WIDTH: u32 = 1920;
@@ -115,11 +126,23 @@ fn main() {
         std::process::exit(1);
     }
     println!("RESULT: PASS —— 编码阶段的耗时已被真实采集到。");
-    println!("[teardown] 释放 D3D11 设备…");
-    drop(device);
+    println!("[teardown] 保留 D3D11 设备（不 drop）…");
+    // **不要**在这里 `drop(device)`，也**不要**用 `std::process::exit(0)` 绕过。
+    //
+    // 背景：B3 记录过「main 返回后 NVIDIA 驱动侧的第三方 atexit 回调访问
+    // 已释放对象 → 0xC0000005」，当时用 `std::process::exit(0)` 规避。
+    //
+    // **诚实说明**：本机（驱动 596.49）**已经复现不出**这个崩溃了 ——
+    // 实测「先 drop 设备再让 main 正常返回」与「保持设备存活」两种写法
+    // 都是 exit 0。所以下面这个改动**不是**「已验证的修复」，而是
+    // **更稳妥的写法**：
+    //   - 不用 `process::exit(0)` 绕过 CRT 收尾（真实应用退出走的就是
+    //     「main 返回 → CRT 收尾」这条路，示例的绕过不代表库层面解决了）；
+    //   - 让设备活到进程结束之后，atexit 回调访问到的是**有效**对象。
+    //
+    // 代价：进程结束时可能泄漏一块 D3D11 设备（进程一结束就归还给驱动）。
+    KEEP_ALIVE.with(|slot| *slot.borrow_mut() = Some(device));
     println!("[teardown] 完成");
-    // 显式退出：跳过 C 运行时在 main 返回后的收尾（DLL 卸载阶段由 ExitProcess 触发）。
-    std::process::exit(0);
 }
 
 /// 跑一轮真实编码，返回（产出的帧数，码流总字节数）。
