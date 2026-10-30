@@ -41,8 +41,9 @@ use beam_pair::verifier::{rustls_client_verifier, rustls_verifier};
 use beam_proto::{AssembledFrame, EncodedFrame};
 
 use crate::config::{adaptive_fec_ratio, NetConfig};
-use crate::datagram::{packetize, Reassembler};
+use crate::datagram::{packetize_with_codec, Reassembler};
 use crate::error::NetError;
+use crate::fec::FecCodec;
 use crate::jitter::JitterBuffer;
 
 /// TLS 密码学错误的错误码区间（quinn：`0x100 | TLS alert`）。
@@ -220,6 +221,7 @@ impl NetEndpoint {
             connection,
             cfg,
             link: Arc::new(LinkEstimate::default()),
+            fec: Arc::new(FecCodec::new()),
         })
     }
 
@@ -241,6 +243,7 @@ impl NetEndpoint {
             connection,
             cfg: self.cfg.clone(),
             link: Arc::new(LinkEstimate::default()),
+            fec: Arc::new(FecCodec::new()),
         })
     }
 
@@ -270,6 +273,20 @@ pub struct Conn {
     cfg: NetConfig,
     /// 链路估计（码率 / 丢包率），供发送路径自适应 FEC 比例。
     link: Arc<LinkEstimate>,
+    /// **跨帧复用**的 FEC 编解码器（缓存 RS 矩阵，§3.2 性能预算）。
+    ///
+    /// ## 为什么必须挂在连接上
+    ///
+    /// `ReedSolomon::new(k, m)` 要在 GF(2⁸) 上求逆一个 `k×k` 矩阵（O(k³)）：
+    /// 实测 T1 档位（`k=132`）单次 **4.894 ms**，而整帧「分包 + FEC 编码」
+    /// 只要 6.635 ms —— 也就是说 **74% 的时间花在重建矩阵上**，
+    /// 真正的 GF 乘加只有 0.773 ms。
+    ///
+    /// 挂在连接上之后，矩阵**每条连接只建一次**（且只在真的需要 FEC 时才建），
+    /// 之后每帧只付 GF 乘加的钱。
+    /// `FecCodec` 内部的缓存表本身就是 `Arc<Mutex<..>>`，
+    /// 因此这里用 `Arc` 共享即可，`Conn` 的克隆体也共享同一份矩阵。
+    fec: Arc<FecCodec>,
 }
 
 impl Conn {
@@ -462,11 +479,15 @@ impl VideoSender for Conn {
         // 数据报大小按连接当前能承载的上限夹一刀（见
         // [`Conn::effective_max_datagram`]）：路径 MTU 掉下来时，
         // 1200 B 的数据报会直接发不出去。
-        let packets = packetize(
+        //
+        // FEC 编解码器取自连接（跨帧复用），让 RS 矩阵只建一次 ——
+        // 见 [`Conn::fec`] 的注释。
+        let packets = packetize_with_codec(
             &f,
             self.current_fec_ratio(),
             self.effective_max_datagram(),
             false,
+            &self.fec,
         )?;
         for p in packets {
             self.send_datagram(&p.to_datagram())?;

@@ -144,11 +144,39 @@ impl Packet {
 ///
 /// `ratio` 是 FEC 冗余比例；`fec` feature 关闭（MVP）时不生效，
 /// 发送端不会产生任何冗余分片，详见 [`crate::fec::effective_parity_shard_count`]。
+///
+/// ## 性能：生产路径请用 [`packetize_with_codec`]
+///
+/// 本函数**每次调用都新建一个 [`FecCodec`]**，因此它内部的 RS 矩阵缓存
+/// 在调用之间**不共享** —— 而 `ReedSolomon::new(k, m)` 要在 GF(2⁸) 上
+/// 求逆一个 `k×k` 矩阵（O(k³)），实测 T1 档位单次 4.894 ms，
+/// 是「分包 + FEC 编码」总耗时 6.635 ms 的 **74%**。
+///
+/// 连续发帧时应当复用同一个编解码器（见 [`packetize_with_codec`]），
+/// 让矩阵只建一次、之后每帧只做 GF 乘加。
 pub fn packetize(
     frame: &beam_proto::EncodedFrame,
     ratio: f32,
     max_datagram: usize,
     slice_boundary: bool,
+) -> Result<Vec<Packet>, NetError> {
+    let codec = FecCodec::new();
+    packetize_with_codec(frame, ratio, max_datagram, slice_boundary, &codec)
+}
+
+/// 同 [`packetize`]，但**复用调用方持有的 FEC 编解码器**。
+///
+/// `codec` 内部按 `(k, m)` 缓存 `ReedSolomon`（见 [`crate::fec::FecCodec`]），
+/// 因此同一个编解码器连续处理多帧时，RS 矩阵只构建一次。
+/// 发送路径由 [`crate::endpoint::Conn`] 持有这样一个长生命周期的编解码器。
+///
+/// 传进来的编解码器可以是任意状态：`(k, m)` 变了会自动新建矩阵。
+pub fn packetize_with_codec(
+    frame: &beam_proto::EncodedFrame,
+    ratio: f32,
+    max_datagram: usize,
+    slice_boundary: bool,
+    codec: &FecCodec,
 ) -> Result<Vec<Packet>, NetError> {
     let max_payload = max_datagram.saturating_sub(FRAME_HEADER_LEN).max(1);
     let payload = frame.to_payload();
@@ -196,7 +224,6 @@ pub fn packetize(
     padded[4..8].copy_from_slice(&(groups as u32).to_be_bytes());
     padded[LEN_PREFIX..LEN_PREFIX + payload.len()].copy_from_slice(payload);
 
-    let mut codec = FecCodec::new();
     let group_len = k + m;
     let mut packets = Vec::with_capacity(groups * group_len);
 
@@ -321,6 +348,21 @@ impl Reassembler {
     /// 新建重组器。
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 用**已有的** FEC 编解码器新建重组器。
+    ///
+    /// 目的：让多个重组器共享同一份 RS 矩阵（以及 `reed-solomon-erasure`
+    /// 内部的解码矩阵 LRU 缓存）。克隆 [`FecCodec`] 很便宜 ——
+    /// 它只是共享 `Arc<ReedSolomon>`，不会复制矩阵。
+    ///
+    /// 典型用法：接收端把一个编解码器交给所有重组器，
+    /// 于是「解码矩阵求逆」只在整条连接上发生一次，而不是每帧一次。
+    pub fn with_codec(codec: FecCodec) -> Self {
+        Self {
+            codec,
+            ..Self::default()
+        }
     }
 
     /// 投喂一个数据报；帧完整时返回 `Some`。
@@ -554,6 +596,25 @@ mod tests {
             assert!(p.to_datagram().len() <= 1200, "数据报不得超过 max_datagram");
             assert!(p.payload.len() <= 1184);
         }
+    }
+
+    /// 复用编解码器**不得**改变分包的字节结果。
+    ///
+    /// `packetize_with_codec` 只是把「新建编解码器」换成「复用编解码器」，
+    /// 线上格式必须**逐字节一致** —— 这条测试就是防止
+    /// 「为了提速而悄悄改了协议」。
+    #[test]
+    fn shared_codec_produces_identical_packets() {
+        let payload: Vec<u8> = (0..9000u32).map(|i| (i % 251) as u8).collect();
+        let f = frame(payload);
+        let once = packetize(&f, 0.2, 1200, false).expect("应当能分包");
+
+        let codec = FecCodec::new();
+        let reused = packetize_with_codec(&f, 0.2, 1200, false, &codec).expect("应当能分包");
+        let reused_again = packetize_with_codec(&f, 0.2, 1200, false, &codec).expect("应当能分包");
+
+        assert_eq!(once, reused, "复用编解码器不得改变分包结果");
+        assert_eq!(once, reused_again, "连续复用也不得改变分包结果");
     }
 
     #[test]

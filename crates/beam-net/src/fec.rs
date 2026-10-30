@@ -25,7 +25,7 @@
 #[cfg(feature = "fec")]
 use std::collections::HashMap;
 #[cfg(feature = "fec")]
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "fec")]
 use reed_solomon_erasure::galois_8::Field;
@@ -178,13 +178,40 @@ impl FecGroup {
     }
 }
 
+/// RS 编解码器缓存表：`(k, m)` → RS 编解码器。
+///
+/// 放在 `Arc<Mutex<..>>` 里 ⇒ 克隆 `FecCodec` 时**共享同一张表**，
+/// 而不是复制一份空表（复制空表等于缓存没开）。
+#[cfg(feature = "fec")]
+type CodecCache = Arc<Mutex<HashMap<(usize, usize), Arc<ReedSolomon<Field>>>>>;
+
 /// FEC 编解码器，缓存 RS 矩阵，避免每帧重建（§3.2 性能预算）。
 ///
 /// `fec` feature 关闭时内部不持有任何 RS 矩阵，编解码方法直接返回错误。
-#[derive(Debug, Default)]
+///
+/// ## 为什么要复用同一个实例
+///
+/// `ReedSolomon::new(k, m)` 要在 GF(2⁸) 上求逆一个 `k×k` 矩阵（O(k³)），
+/// 实测 T1 档位（`k = 132`）单次 **4.894 ms**；而同一个实例内部的
+/// `reed-solomon-erasure` 还带一个解码矩阵 LRU 缓存，
+/// 复用实例能让**编码矩阵与解码矩阵都只算一次**。
+///
+/// ## 为什么缓存放在 `Arc<Mutex<..>>` 里
+///
+/// 克隆 `FecCodec` 时必须**共享同一份缓存**，而不是复制一份空表：
+/// 复制空表会让每个克隆体各建各的矩阵，缓存等于没开。
+/// 因此这里用 `Arc<Mutex<HashMap<..>>>`，
+/// 克隆只是多一个指向同一张表的句柄。
+///
+/// 用法：
+/// - 发送路径挂在 [`crate::endpoint::Conn`] 上（跨帧复用）；
+/// - 接收路径挂在 [`crate::datagram::Reassembler`] 上（跨帧复用），
+///   也可以用 [`crate::datagram::Reassembler::with_codec`] 与别的重组器共享。
+#[derive(Debug, Default, Clone)]
 pub struct FecCodec {
+    /// `(k, m)` → RS 编解码器（共享缓存，见类型文档）。
     #[cfg(feature = "fec")]
-    codecs: HashMap<(usize, usize), Arc<ReedSolomon<Field>>>,
+    codecs: CodecCache,
 }
 
 impl FecCodec {
@@ -193,10 +220,31 @@ impl FecCodec {
         Self::default()
     }
 
+    /// 缓存里当前有多少个 RS 编解码器。
+    ///
+    /// 用来在测试里钉住「矩阵只建一次」这条性能约束：
+    /// 连续处理 N 帧之后，这个数应当仍然是 1（同一个 `(k, m)`）。
+    /// `fec` feature 关闭时恒为 0（根本不会建矩阵）。
+    pub fn cached_codec_count(&self) -> usize {
+        #[cfg(feature = "fec")]
+        {
+            self.codecs
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .len()
+        }
+        #[cfg(not(feature = "fec"))]
+        {
+            0
+        }
+    }
+
     /// 为组生成冗余片。
     ///
     /// `m = 0`（feature 关闭，或 `ratio = 0`）时什么都不做。
-    pub fn encode_group(&mut self, group: &mut FecGroup) -> Result<(), NetError> {
+    ///
+    /// 只借用 `&self`：RS 实例在内部缓存里，`FecCodec` 本身是可共享的。
+    pub fn encode_group(&self, group: &mut FecGroup) -> Result<(), NetError> {
         if group.m == 0 {
             return Ok(());
         }
@@ -204,7 +252,7 @@ impl FecCodec {
     }
 
     /// 恢复缺失片；不可恢复时返回 `E2006`。
-    pub fn reconstruct_group(&mut self, group: &mut FecGroup) -> Result<(), NetError> {
+    pub fn reconstruct_group(&self, group: &mut FecGroup) -> Result<(), NetError> {
         if group.is_complete() {
             return Ok(());
         }
@@ -219,7 +267,7 @@ impl FecCodec {
 
     /// 真正的 RS 编码（仅 `fec` feature 打开时存在）。
     #[cfg(feature = "fec")]
-    fn encode_group_rs(&mut self, group: &mut FecGroup) -> Result<(), NetError> {
+    fn encode_group_rs(&self, group: &mut FecGroup) -> Result<(), NetError> {
         let codec = self.codec(group.k, group.m)?;
         let mut flat: Vec<Vec<u8>> = Vec::with_capacity(group.k + group.m);
         for i in 0..group.k {
@@ -247,7 +295,7 @@ impl FecCodec {
 
     /// `fec` feature 关闭时的占位：无法生成冗余片。
     #[cfg(not(feature = "fec"))]
-    fn encode_group_rs(&mut self, group: &mut FecGroup) -> Result<(), NetError> {
+    fn encode_group_rs(&self, group: &mut FecGroup) -> Result<(), NetError> {
         Err(NetError::ReassemblyFailed {
             reason: format!("当前构建未启用 `fec` feature,无法生成 {} 片冗余", group.m),
         })
@@ -255,7 +303,7 @@ impl FecCodec {
 
     /// 真正的 RS 恢复（仅 `fec` feature 打开时存在）。
     #[cfg(feature = "fec")]
-    fn reconstruct_group_rs(&mut self, group: &mut FecGroup) -> Result<(), NetError> {
+    fn reconstruct_group_rs(&self, group: &mut FecGroup) -> Result<(), NetError> {
         let codec = self.codec(group.k, group.m)?;
         let mut flat: Vec<Option<Vec<u8>>> = group.shards.clone();
         codec
@@ -269,7 +317,7 @@ impl FecCodec {
 
     /// `fec` feature 关闭时的占位：无法恢复丢片。
     #[cfg(not(feature = "fec"))]
-    fn reconstruct_group_rs(&mut self, group: &mut FecGroup) -> Result<(), NetError> {
+    fn reconstruct_group_rs(&self, group: &mut FecGroup) -> Result<(), NetError> {
         Err(NetError::FecUnrecoverable {
             missing: group.missing(),
             parity: group.m,
@@ -277,16 +325,23 @@ impl FecCodec {
     }
 
     /// 取（并缓存）`k + m` 的 RS 编解码器。
+    ///
+    /// 缓存表在 `Arc<Mutex<..>>` 里 ⇒ **克隆体共享同一张表**，
+    /// 命中时不会重新求逆矩阵。
     #[cfg(feature = "fec")]
-    fn codec(&mut self, k: usize, m: usize) -> Result<Arc<ReedSolomon<Field>>, NetError> {
-        if let Some(codec) = self.codecs.get(&(k, m)) {
+    fn codec(&self, k: usize, m: usize) -> Result<Arc<ReedSolomon<Field>>, NetError> {
+        let mut cache = self
+            .codecs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(codec) = cache.get(&(k, m)) {
             return Ok(Arc::clone(codec));
         }
         let codec = ReedSolomon::<Field>::new(k, m).map_err(|e| NetError::ReassemblyFailed {
             reason: format!("创建 RS 编解码器失败(k={k}, m={m}): {e}"),
         })?;
         let codec = Arc::new(codec);
-        self.codecs.insert((k, m), Arc::clone(&codec));
+        cache.insert((k, m), Arc::clone(&codec));
         Ok(codec)
     }
 }
@@ -348,11 +403,46 @@ mod tests {
         }
     }
 
+    /// §3.2 性能预算的回归钉子：连续编码多组，RS 矩阵只能建一次。
+    ///
+    /// `ReedSolomon::new(k, m)` 要在 GF(2⁸) 上求逆一个 `k×k` 矩阵，
+    /// 实测 T1 档位单次 4.894 ms —— 如果每帧都重建，预算必然超标。
+    #[test]
+    #[cfg(feature = "fec")]
+    fn repeated_encoding_reuses_the_rs_matrix() {
+        let data = shards(10, 64, 1);
+        let codec = FecCodec::new();
+        for _ in 0..8 {
+            let mut group = FecGroup::encode(&data, 0.2).expect("应当能建组");
+            codec.encode_group(&mut group).expect("应当能编码");
+        }
+        assert_eq!(
+            codec.cached_codec_count(),
+            1,
+            "8 次编码只应建 1 个 RS 矩阵（同一个 (k, m)）"
+        );
+    }
+
+    /// 克隆体必须与原体**共享**缓存表，而不是复制一份空表。
+    ///
+    /// 复制空表 ⇒ 每个克隆体各建各的矩阵 ⇒ 缓存等于没开
+    /// （这正是 B9 批次之前的实现方式）。
+    #[test]
+    #[cfg(feature = "fec")]
+    fn cloned_codec_shares_the_matrix_cache() {
+        let codec = FecCodec::new();
+        let clone = codec.clone();
+        assert!(
+            Arc::ptr_eq(&codec.codecs, &clone.codecs),
+            "克隆体必须共享同一张缓存表"
+        );
+    }
+
     #[test]
     #[cfg(feature = "fec")]
     fn can_recover_one_lost_shard() {
         let data = shards(10, 64, 1);
-        let mut codec = FecCodec::new();
+        let codec = FecCodec::new();
         let mut group = FecGroup::encode(&data, 0.2).expect("应当能建组");
         codec.encode_group(&mut group).expect("应当能编码");
         assert_eq!(group.shards().len(), 12);
@@ -371,7 +461,7 @@ mod tests {
     #[test]
     fn unrecoverable_group_reports_e2006() {
         let data = shards(4, 32, 2);
-        let mut codec = FecCodec::new();
+        let codec = FecCodec::new();
         let mut group = FecGroup::encode(&data, 0.0).expect("应当能建组");
         group.shards[0] = None;
         let err = codec
@@ -385,7 +475,7 @@ mod tests {
     fn feature_off_cannot_reconstruct() {
         // MVP 构建：即使收到了足够多的片，也没有 RS 代码可用，必须报 E2006。
         let data = shards(4, 32, 5);
-        let mut codec = FecCodec::new();
+        let codec = FecCodec::new();
         let mut group = FecGroup::encode(&data, 0.2).expect("应当能建组");
         group.shards[0] = None;
         let err = codec

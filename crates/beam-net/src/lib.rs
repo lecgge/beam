@@ -187,8 +187,8 @@ pub use beam_pair::PeerVerifier;
 
 pub use config::{adaptive_fec_ratio, NetConfig, TlsIdentity};
 pub use datagram::{
-    group_index, packetize, with_group_index, EncodedFrameView, Packet, Reassembler,
-    GROUP_INDEX_MASK, GROUP_INDEX_SHIFT, MAX_GROUPS_PER_FRAME,
+    group_index, packetize, packetize_with_codec, with_group_index, EncodedFrameView, Packet,
+    Reassembler, GROUP_INDEX_MASK, GROUP_INDEX_SHIFT, MAX_GROUPS_PER_FRAME,
 };
 pub use endpoint::{Conn, NetEndpoint, VideoReceiver, VideoSender, VideoStream};
 pub use error::{message, NetError};

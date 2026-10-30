@@ -208,7 +208,7 @@ fn dropping_more_data_shards_than_parity_fails_explicitly() {
     // 编解码器层面：冗余不足时必须报 E2006（FEC 不可恢复）。
     // 这里直接用公开 API 造一个「只收到 k-1 片」的组：可用片数 < k ⇒ 不可恢复。
     let data: Vec<Vec<u8>> = (0..k).map(|i| vec![i as u8; 16]).collect();
-    let mut codec = FecCodec::new();
+    let codec = FecCodec::new();
     let mut group = beam_net::FecGroup::new(k, m, 16);
     for (i, d) in data.iter().enumerate().take(k - 1) {
         assert!(group.insert(i, d));
