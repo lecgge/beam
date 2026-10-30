@@ -1278,7 +1278,51 @@ impl CrateService {
             let factory = ReadyTransportFactory::new(Box::new(demux) as Box<dyn Transport>);
 
             let runtime = ClientRuntime::new(ClientConfig::from_resolved(&resolved));
-            let handle = runtime.connect_default(peer, Some(Box::new(factory)));
+
+            // §3.10 / 产品方案第 45 行:客户端画面上屏到**独立原生窗口**
+            // (不走 WebView)。分工:
+            // - L3(`beam-client`)建窗口 + 组装「硬解 + D3D11 flip-model 交换链」;
+            // - 外壳(L4,本文件)不碰 Win32 / D3D11(§4 分层)。
+            #[cfg(feature = "client-video")]
+            let title = format!("Beam 串流 - {host_name}");
+            #[cfg(feature = "client-video")]
+            let session = match runtime.connect_to_window(
+                peer,
+                &title,
+                u32::from(resolved.video.width),
+                u32::from(resolved.video.height),
+                Some(Box::new(factory)),
+            ) {
+                Ok(session) => Some(session),
+                Err(err) => {
+                    report_transport_failure(
+                        &inner,
+                        &outcome_slot,
+                        &BeamError::new(E_PRESENT_FAILED, err.to_string(), false),
+                        &host_name,
+                    );
+                    return;
+                }
+            };
+
+            // `session`（含窗口）必须活到循环结束 ⇒ 它比 `handle` 后声明,
+            // 因此在作用域结束时**先**释放会话、**后**释放窗口(顺序正确)。
+            #[cfg(feature = "client-video")]
+            let handle = match session.as_ref() {
+                Some(session) => session.handle.clone(),
+                None => return,
+            };
+
+            // 没开 `client-video` feature 时:**如实**说明上屏不可用,
+            // 而不是让会话看起来「在串流」却一帧都不出。
+            #[cfg(not(feature = "client-video"))]
+            let handle = {
+                let handle = runtime.connect_default(peer, Some(Box::new(factory)));
+                tracing::warn!(
+                    "未启用 `client-video` feature:解码/上屏后端不可用(E10014),本次会话不会有画面"
+                );
+                handle
+            };
             {
                 let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
                 guard.client_session = Some(handle.clone());

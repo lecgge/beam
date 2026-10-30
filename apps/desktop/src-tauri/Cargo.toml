@@ -51,6 +51,16 @@ host-platform = ["beam-crates", "beam-host/platform"]
 # 它**不出画面**(硬编后端是关的);真画面要开 host-platform。
 host-platform-wgc = ["beam-crates", "beam-host/platform-wgc"]
 
+# client-video:客户端真实解码 + 上屏（§3.10 / 产品方案第 45 行）。
+#
+# 打开它会:
+# - 打开 `beam-client/video`（L3 组装线:`beam-render/d3d11` + `beam-decode/ffmpeg`）;
+# - 需要 ffmpeg 开发库（LGPL 构建,§7）与 FFMPEG_DIR 环境变量。
+#
+# 桌面端**不直接**依赖 `beam-decode` / `beam-render`（§4 分层）,
+# 只负责提供原生窗口句柄（见 `src/video_window.rs`）。
+client-video = ["beam-crates", "beam-client/video"]
+
 # perf-stats:§3.13 的性能采集（各阶段耗时直方图 + CPU/GPU/内存）。
 #
 # **默认关闭** —— §7:「perf-stats feature 默认关闭、release 禁止开启」。

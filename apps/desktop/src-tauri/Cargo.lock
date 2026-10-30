@@ -171,6 +171,7 @@ version = "0.1.0"
 dependencies = [
  "beam-proto",
  "bytes",
+ "ffmpeg-next",
  "thiserror 2.0.21",
  "tracing",
  "windows 0.62.2",
@@ -329,6 +330,7 @@ dependencies = [
  "beam-proto",
  "thiserror 2.0.21",
  "tracing",
+ "windows 0.62.2",
 ]
 
 [[package]]

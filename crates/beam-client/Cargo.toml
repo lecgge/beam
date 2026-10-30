@@ -16,6 +16,15 @@ default = []
 # 不开这个 feature 时音频链路**接线仍然完整**，但 `OpusDecoderImpl::new` 返回
 # E7004（后端未启用）⇒ 客户端降级为「只有画面」，错误码写进日志与统计。
 opus = ["beam-audio/opus"]
+# 客户端真实解码 + 上屏（§3.10）。
+#
+# - `beam-render/d3d11`：D3D11 flip-model 交换链（原生窗口上屏）；
+# - `beam-decode/ffmpeg`：D3D11VA 硬解（需要 FFMPEG_DIR 指向 LGPL 构建的 ffmpeg，§7）。
+#
+# §4 的分层要求：平台 crate（decode/render）**只能**被 host/client 引用，
+# 因此「打开这两个后端」的开关必须放在本 crate（L3），
+# 桌面端（L4）只能通过 `beam-client/video` 间接打开，不能直接依赖平台 crate。
+video = ["beam-render/d3d11", "beam-decode/ffmpeg"]
 
 [dependencies]
 beam-proto = { workspace = true }

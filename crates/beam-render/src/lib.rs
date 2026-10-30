@@ -79,6 +79,7 @@ mod perf;
 pub mod error;
 pub mod renderer;
 mod slot;
+pub mod window;
 
 #[cfg(feature = "d3d11")]
 mod d3d11;
@@ -88,6 +89,7 @@ pub use renderer::{
     D3D11Renderer, FrameHandle, FramePacer, FrameStatistics, RenderConfig, RenderThread, Renderer,
     WindowHandle,
 };
+pub use window::{VideoWindow, WindowError};
 
 /// 解码后的帧（定义在协议层，§4 分层说明）。
 pub use beam_proto::DecodedFrame;

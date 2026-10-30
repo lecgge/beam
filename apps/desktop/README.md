@@ -166,6 +166,39 @@ beam-log     = { path = "../../crates/beam-log",     optional = true }
 > crate 落地后:取消注释上面五行 → 把 feature 改成上面的写法 →
 > 新增一个实现 `BeamService` 的适配器 → `cargo check --features beam-crates`。
 
+### 客户端真实上屏（§3.10 / 产品方案第 45 行）
+
+`client-video` feature 打开**客户端**的真实解码 + 上屏:
+
+```toml
+client-video = ["beam-crates", "beam-client/video"]
+```
+
+它同时打开:
+
+| crate 的 feature | 打开的东西 | 需要什么 |
+|---|---|---|
+| `beam-render/d3d11` | 独立原生窗口 + D3D11 flip-model 交换链 | Windows |
+| `beam-decode/ffmpeg` | D3D11VA 硬解（HEVC / H.264） | LGPL ffmpeg 开发库（`FFMPEG_DIR`,§7） |
+
+**§4 分层**:桌面端**不直接**依赖 `beam-decode` / `beam-render`,
+只经由 `beam-client`（L3）拿到已经建好的窗口与交换链
+（`beam_client::VideoWindow` / `ClientRuntime::connect_to_window`）。
+
+没开这个 feature 时,客户端会话**照常建立**（控制面、配对、输入回传都在),
+但**画面不会上屏** —— 这一点在日志里如实说明(`E10014`),
+不会伪装成「在串流」。
+
+本机自检（需要 `video` feature 与 ffmpeg）:
+
+```powershell
+$env:FFMPEG_DIR = "$env:TEMP\beam-tools\ffmpeg-lgpl-conda\root\Library"
+cargo test -p beam-client --features video --test video_present -- --ignored
+```
+
+该自检验证的是「独立原生窗口 + D3D11 交换链 + 硬解上下文」三步都真的建得起来;
+**「画面真的出现在窗口里」属于端到端验收**,需要一条真实的主机串流链路,未在本机自动验证。
+
 ### 当前后端是桩实现,界面会明确标注
 
 `LocalService` 里,**主机名、本机 IPv4、端口、设置项是真实取值**;

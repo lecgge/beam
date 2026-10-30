@@ -42,6 +42,12 @@ pub const E_RECONNECT_FAILED: &str = "E9003";
 pub const E_DEVICE_NOT_FOUND: &str = "E9101";
 pub const E_HOST_NOT_FOUND: &str = "E9102";
 
+// ---- E10xxx decode-render(§3.10)----
+/// 客户端上屏失败（原生窗口建不出来 / 交换链创建失败 / 硬解后端不可用）。
+///
+/// 与 `beam-render` 的 `E10012`（交换链创建失败）对齐。
+pub const E_PRESENT_FAILED: &str = "E10012";
+
 // ---- E11xxx config(§3.14)----
 pub const E_CONFIG_INVALID: &str = "E11001";
 pub const E_CONFIG_IO: &str = "E11002";

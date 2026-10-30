@@ -13,12 +13,41 @@ use beam_session::{
 
 use crate::adapters::DecodeRenderConsumer;
 
+/// 会话 + 它的原生串流窗口（§3.10 / 产品方案第 45 行）。
+///
+/// ## 字段顺序有讲究
+///
+/// **窗口必须比会话活得久**：D3D11 交换链挂在窗口（`HWND`）上，
+/// 窗口先被销毁、交换链后被销毁，DXGI 就会拿着一个已死的 `HWND` 收尾。
+/// Rust 的结构体字段按**声明顺序** drop，因此窗口字段放在**后面** ——
+/// 这样会话先走、窗口后走。
+///
+/// 上层只要把整个 [`WindowedSession`] 持有到会话结束即可，不必操心顺序。
+#[derive(Debug)]
+pub struct WindowedSession {
+    /// 会话句柄。
+    pub handle: SessionHandle,
+    /// 原生串流窗口（**必须**活到会话结束）。
+    pub window: crate::VideoWindow,
+}
+
 /// 客户端编排层错误。
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
     /// 发现服务不可用（`E4xxx`）。
     #[error("发现服务不可用: {reason}")]
     DiscoveryUnavailable {
+        /// 原因。
+        reason: String,
+    },
+    /// 上屏后端不可用（§3.10）。
+    ///
+    /// 典型原因：`video` feature 没开（`beam-render` 的 `d3d11` 后端没编进来）、
+    /// 交换链创建失败、或原生窗口句柄无效。
+    ///
+    /// **如实报错，不静默降级** —— 上层必须知道「画面没上屏」。
+    #[error("上屏后端不可用: {reason}")]
+    PresentationUnavailable {
         /// 原因。
         reason: String,
     },
@@ -142,6 +171,110 @@ impl ClientRuntime {
         transport: Option<Box<dyn TransportFactory>>,
     ) -> SessionHandle {
         self.connect(peer, D3D11VaDecoder::new(), D3D11Renderer::new(), transport)
+    }
+
+    /// 建立客户端会话，并把解码结果上屏到**原生窗口**（§3.10 / 产品方案第 45 行）。
+    ///
+    /// ## 为什么这个入口在 L3（`beam-client`）而不在桌面端
+    ///
+    /// §4 规定平台 crate（decode / render）**只能**被 host / client 引用，
+    /// 桌面端（L4）不得直接依赖 `beam-decode` / `beam-render`。
+    /// 因此「解码 + 上屏」这条组装线必须住在本 crate，
+    /// 上层只提供**一个原生窗口句柄**。
+    ///
+    /// ## 参数
+    ///
+    /// - `title`：原生窗口的标题。
+    /// - `width` / `height`：窗口客户区尺寸（像素）。
+    /// - `transport`：可选的传输工厂（见 [`ClientRuntime::connect`]）。
+    ///
+    /// ## 返回值
+    ///
+    /// 返回 `(会话句柄, 窗口)`：**窗口必须活到会话结束** ——
+    /// 它是交换链的宿主，提前销毁会让上屏失败。
+    /// 调用方把它存着即可（`Drop` 时自动关闭）。
+    ///
+    /// ## 失败怎么办
+    ///
+    /// 失败一律返回 [`ClientError::PresentationUnavailable`]，**如实报错**：
+    /// 窗口建不出来、交换链建不出来、解码后端没编进来，都不静默降级
+    /// （静默降级会让上层以为「在串流」，实际上一帧都没上屏）。
+    ///
+    /// ## feature
+    ///
+    /// 真实上屏需要 `video` feature（它同时打开 `beam-render/d3d11`、
+    /// `beam-decode/ffmpeg` 与 `beam-window/windows-api`）。
+    /// 没开时本方法**照常存在**，但如实报错。
+    #[cfg(feature = "video")]
+    pub fn connect_to_window(
+        &self,
+        peer: PeerAddr,
+        title: &str,
+        width: u32,
+        height: u32,
+        transport: Option<Box<dyn TransportFactory>>,
+    ) -> Result<WindowedSession, ClientError> {
+        // 先建原生窗口（§3.10 / 产品方案第 45 行：不走 WebView）。
+        let window = crate::VideoWindow::create(title, width, height).map_err(|e| {
+            ClientError::PresentationUnavailable {
+                reason: format!("创建原生串流窗口失败: {e}"),
+            }
+        })?;
+
+        let mut renderer = D3D11Renderer::new();
+        let render_cfg = beam_render::RenderConfig {
+            width,
+            height,
+            refresh_rate: self.cfg.stream.fps,
+            ..beam_render::RenderConfig::default()
+        };
+        renderer
+            .attach(beam_render::WindowHandle(window.hwnd()), render_cfg)
+            .map_err(|e| ClientError::PresentationUnavailable {
+                reason: format!("交换链创建失败 {}: {e}", e.code_str()),
+            })?;
+
+        // §3.10「解码纹理直接交给 D3D11 flip-model 交换链」：
+        // D3D11 **不允许跨设备拷贝**，因此解码器必须复用渲染器的**同一个设备**。
+        let device = renderer
+            .device()
+            .ok_or_else(|| ClientError::PresentationUnavailable {
+                reason: "渲染器没有 D3D11 设备（beam-render 的 d3d11 后端未编译进来）".to_string(),
+            })?;
+        let decode_cfg = beam_decode::DecodeConfig {
+            codec: self.cfg.stream.codec,
+            ..beam_decode::DecodeConfig::default()
+        };
+        let decoder = D3D11VaDecoder::open_with_device(decode_cfg, device).map_err(|e| {
+            ClientError::PresentationUnavailable {
+                reason: format!("硬解后端不可用 {}: {e}", e.code_str()),
+            }
+        })?;
+
+        Ok(WindowedSession {
+            handle: self.connect(peer, decoder, renderer, transport),
+            window,
+        })
+    }
+
+    /// 建立客户端会话，并把解码结果上屏到**原生窗口**（§3.10 / 产品方案第 45 行）。
+    ///
+    /// 没开 `video` feature 时的版本：**如实报错**，不静默降级。
+    ///
+    /// 见开 `video` feature 的版本（同名方法）了解完整语义。
+    #[cfg(not(feature = "video"))]
+    pub fn connect_to_window(
+        &self,
+        _peer: PeerAddr,
+        _title: &str,
+        _width: u32,
+        _height: u32,
+        _transport: Option<Box<dyn TransportFactory>>,
+    ) -> Result<WindowedSession, ClientError> {
+        Err(ClientError::PresentationUnavailable {
+            reason: "当前构建未启用 `video` feature（beam-render/d3d11 + beam-decode/ffmpeg + beam-window/windows-api），无法上屏"
+                .to_string(),
+        })
     }
 
     /// 用给定的校验器建立传输工厂。

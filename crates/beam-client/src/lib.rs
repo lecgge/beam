@@ -68,5 +68,10 @@ pub use audio::{
 /// §3.7 的音频配置类型**转出**给上层（桌面端 L4 不能直接依赖 beam-audio L1，
 /// 见 §4 的分层规则）。
 pub use beam_audio::{AudioConfig, AudioMode};
-pub use runtime::{ClientConfig, ClientError, ClientRuntime};
+/// §3.10 / 产品方案第 45 行：独立原生串流窗口。
+///
+/// §4：窗口本体在 L1 平台 crate（`beam-render`）里，桌面端（L4）**不得**直接依赖它；
+/// 这里重导出，让 L4 只经由本 crate 拿到窗口类型。
+pub use beam_render::VideoWindow;
+pub use runtime::{ClientConfig, ClientError, ClientRuntime, WindowedSession};
 pub use transport::{DemuxTransport, DemuxTransportFactory};
