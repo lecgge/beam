@@ -1,24 +1,35 @@
 //! GPU 上的 RGB→NV12 颜色转换（§3.6 职责第一项）。
 //!
-//! §3.6：「GPU 上 RGB→NV12（D3D11 VideoProcessor 或 compute shader）」。
-//! 本模块用 **D3D11 VideoProcessor** 实现：
+//! §3.6：「GPU 上 RGB→NV12（**D3D11 VideoProcessor 或 compute shader**）」——
+//! 两条路都被文档允许。本模块提供**两条**后端：
 //!
-//! 1. 抓屏纹理（RGBA/BGRA）作为 VideoProcessor 的输入源；
-//! 2. 一张 NV12 纹理作为输出目标；
-//! 3. `VideoProcessorBlt` 完成缩放 + 色彩空间转换，全程留在 GPU 上。
+//! 1. **D3D11 VideoProcessor**（本模块的 [`VideoProcessorPath`]）：
+//!    抓屏纹理（RGBA/BGRA）作为 VideoProcessor 的输入源；
+//!    一张 NV12 纹理作为输出目标；
+//!    `VideoProcessorBlt` 完成缩放 + 色彩空间转换，全程留在 GPU 上。
 //!
-//! 转换结果有两种用法：
+//! 2. **compute shader**（[`crate::color_compute`]）：驱动不支持 VideoProcessor 时回退。
+//!
+//! ## 本机的实际情况
+//!
+//! 本机（RTX 3070 / 驱动 596.49）的 VideoProcessor **建不出输入视图**
+//! （`CreateVideoProcessorInputView` 恒返回 `E_INVALIDARG`）；
+//! 为排除「参数写错」，做过 96 组参数变体矩阵（见 `examples/color_vp_probe.rs`），
+//! **一组都没建出来** ⇒ 是驱动侧的能力缺失，不是参数问题。
+//!
+//! 因此对外的门面 [`RgbToNv12`] 是「VideoProcessor 优先、建不出来就回退
+//! compute shader」，两条后端产出的 NV12 像素口径一致（BT.709 + limited range）。
+//!
+//! ## 转换结果有两种用法
 //!
 //! - **D3D11 硬件帧路径**：NV12 纹理与 ffmpeg 帧池在同一个 `ID3D11Device` 上，
 //!   可以直接 `CopyResource` 进编码器的帧（零拷贝，§3.6「D3D11 硬件帧上下文」）。
 //! - **NV12 上传路径**：编码器不支持 `AV_PIX_FMT_D3D11` 时（例如部分 QSV 构建），
 //!   把 NV12 纹理回读到内存，按 `AV_PIX_FMT_NV12` 送帧。
 //!
-//! **验证状态**：本机 D3D11 VideoProcessor 的
-//! `CreateVideoProcessorInputView` / `CreateVideoProcessorOutputView` 返回
-//! `E_INVALIDARG(0x80070057)`，**RGB→NV12 这条转换链路在本机走不通**。
-//! 已验证的路径是「NV12 纹理 → D3D11 硬件帧 → NVENC」
-//! （见 `examples/nvenc_encode_smoke.rs`）。
+//! **验证状态**：compute shader 路径已在本机真机验证 ——
+//! Y 平面**逐字节**等于 CPU 参考实现（BT.709 + limited range），
+//! 耗时 1080p 约 1.0 ms、4K 约 2.1 ms（单帧，含 GPU 同步）。
 
 use std::ffi::c_void;
 use std::mem::ManuallyDrop;
@@ -46,7 +57,7 @@ use crate::error::EncError;
 ///
 /// 生命周期与抓屏纹理绑定：所有纹理必须来自**同一个** `ID3D11Device`，
 /// 否则 VideoProcessor 无法在源与目标之间做 blit。
-pub struct RgbToNv12 {
+pub(crate) struct VideoProcessorPath {
     /// 源纹理所在的设备。
     ///
     /// 保留这份引用是为了让设备活得比 VideoProcessor / 视图更久。
@@ -77,16 +88,16 @@ pub struct RgbToNv12 {
     src_format: DXGI_FORMAT,
 }
 
-impl std::fmt::Debug for RgbToNv12 {
+impl std::fmt::Debug for VideoProcessorPath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RgbToNv12")
+        f.debug_struct("VideoProcessorPath")
             .field("width", &self.width)
             .field("height", &self.height)
             .finish()
     }
 }
 
-impl RgbToNv12 {
+impl VideoProcessorPath {
     /// 针对给定的源纹理建立转换器。
     ///
     /// 源纹理已经是 NV12 时不会建立 VideoProcessor（无需转换），
@@ -188,10 +199,8 @@ impl RgbToNv12 {
         reason = "VideoProcessorBlt 与输入视图创建都是 unsafe 的 D3D11 调用"
     )]
     pub fn convert(&mut self, src: &ID3D11Texture2D) -> Result<ID3D11Texture2D, EncError> {
-        // §3.13「颜色转换」阶段：GPU 上的 RGB→NV12。
-        // 源纹理本来就是 NV12 时这里是一次**透传**（直接返回源纹理），
-        // 记下来的耗时同样是真实测量值（调用本身的耗时），不填 0 冒充。
-        let _color_span = perf_span!("color_convert");
+        // §3.13「颜色转换」阶段的计时在**门面** [`RgbToNv12::convert`] 里，
+        // 两条后端共用同一个埋点。
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         unsafe { src.GetDesc(&mut desc) };
 
@@ -259,6 +268,129 @@ impl RgbToNv12 {
     /// ffmpeg 的 `AV_PIX_FMT_D3D11` 帧约定：`data[0]` 放 `ID3D11Texture2D *`。
     pub fn nv12_ptr(&self) -> *mut c_void {
         self.nv12.as_raw()
+    }
+}
+
+/// GPU 上的 RGB→NV12 转换器（对外门面）。
+///
+/// §3.6：「GPU 上 RGB→NV12（**D3D11 VideoProcessor 或 compute shader**）」——
+/// 两条路都被文档允许，本门面按下面的顺序挑选：
+///
+/// 1. **源纹理已经是 NV12** → 直接透传（无需转换）；
+/// 2. **D3D11 VideoProcessor** → 驱动支持时优先用它（硬件缩放 + 色彩转换，
+///    一步到位）；
+/// 3. **compute shader** → VideoProcessor 建不出来时回退
+///    （本机 RTX 3070 / 驱动 596.49 上 VideoProcessor 的
+///    `CreateVideoProcessorInputView` 恒返回 `E_INVALIDARG`，
+///    96 组参数变体全灭，见 `examples/color_vp_probe.rs`）。
+///
+/// 两条后端产出**同样的 NV12 像素**（BT.709 + limited range），
+/// 因此回退不改变画质口径。
+pub struct RgbToNv12 {
+    inner: Inner,
+}
+
+/// 门面内部的三种状态。
+enum Inner {
+    /// 源纹理本来就是 NV12：透传。
+    Passthrough(ID3D11Texture2D),
+    /// D3D11 VideoProcessor 后端。
+    VideoProcessor(VideoProcessorPath),
+    /// compute shader 后端。
+    Compute(crate::color_compute::ComputeConverter),
+}
+
+impl std::fmt::Debug for RgbToNv12 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RgbToNv12")
+            .field("backend", &self.backend())
+            .finish()
+    }
+}
+
+impl RgbToNv12 {
+    /// 针对给定的源纹理建立转换器。
+    ///
+    /// VideoProcessor 建不起来时会**自动回退**到 compute shader；
+    /// 两条路都不行才报错（`E6003`）。
+    pub fn new(src: &ID3D11Texture2D) -> Result<Self, EncError> {
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        #[allow(
+            unsafe_code,
+            reason = "GetDesc 是 unsafe 的 D3D11 COM 调用（本函数只读源纹理的描述）"
+        )]
+        unsafe {
+            src.GetDesc(&mut desc)
+        };
+
+        if desc.Format == DXGI_FORMAT_NV12 {
+            // 已经是 NV12，不需要转换。
+            return Ok(Self {
+                inner: Inner::Passthrough(src.clone()),
+            });
+        }
+
+        match VideoProcessorPath::new(src) {
+            Ok(path) => Ok(Self {
+                inner: Inner::VideoProcessor(path),
+            }),
+            Err(vp_err) => match crate::color_compute::ComputeConverter::new(src) {
+                Ok(compute) => {
+                    tracing::info!(
+                        "D3D11 VideoProcessor 不可用({vp_err}),改用 compute shader 做 RGB→NV12(§3.6 允许的两条路之一)"
+                    );
+                    Ok(Self {
+                        inner: Inner::Compute(compute),
+                    })
+                }
+                Err(cs_err) => Err(EncError::UnsupportedParam {
+                    what: format!(
+                        "RGB→NV12 两条路都不可用: VideoProcessor={vp_err}; compute shader={cs_err}"
+                    ),
+                }),
+            },
+        }
+    }
+
+    /// 当前实际使用的后端名（诊断用）。
+    pub fn backend(&self) -> &'static str {
+        match &self.inner {
+            Inner::Passthrough(_) => "passthrough",
+            Inner::VideoProcessor(_) => "video-processor",
+            Inner::Compute(_) => "compute-shader",
+        }
+    }
+
+    /// 把源纹理转换成 NV12，返回转换结果。
+    ///
+    /// 源纹理格式/尺寸变了会自动重建底层转换器。
+    pub fn convert(&mut self, src: &ID3D11Texture2D) -> Result<ID3D11Texture2D, EncError> {
+        // §3.13「颜色转换」阶段：GPU 上的 RGB→NV12。
+        // 源纹理本来就是 NV12 时这里是一次**透传**（直接返回源纹理），
+        // 记下来的耗时同样是真实测量值（调用本身的耗时），不填 0 冒充。
+        // `perf_span!` 在 perf-stats 关闭时展开成 unit —— 但**必须**保留这个绑定：
+        // 打开时它是一个 span 守卫，绑定与否决定了测量区间是否覆盖整段代码。
+        #[allow(
+            clippy::let_unit_value,
+            reason = "perf-stats 关闭时宏展开成 unit，但守卫必须绑定"
+        )]
+        let _color_span = perf_span!("color_convert");
+        match &mut self.inner {
+            Inner::Passthrough(nv12) => Ok(nv12.clone()),
+            Inner::VideoProcessor(path) => path.convert(src),
+            Inner::Compute(compute) => compute.convert(src),
+        }
+    }
+
+    /// NV12 目标纹理的裸指针（`ID3D11Texture2D *`）。
+    ///
+    /// ffmpeg 的 `AV_PIX_FMT_D3D11` 帧约定：`data[0]` 放 `ID3D11Texture2D *`。
+    pub fn nv12_ptr(&self) -> *mut c_void {
+        match &self.inner {
+            Inner::Passthrough(tex) => tex.as_raw(),
+            Inner::VideoProcessor(path) => path.nv12_ptr(),
+            Inner::Compute(compute) => compute.nv12_ptr(),
+        }
     }
 }
 

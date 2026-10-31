@@ -285,6 +285,12 @@ impl FfmpegVideoEncoder {
         // 2) 组帧 + 送帧收包：§3.13 的「编码」阶段。
         //    一次性的编码器上下文建立（`open_native`）不在计时范围内——
         //    那是一次性开销，不是每帧耗时，混进来会污染直方图。
+        // `perf_span!` 在 perf-stats 关闭时展开成 unit —— 但**必须**保留这个绑定：
+        // 打开时它是一个 span 守卫，绑定与否决定了测量区间是否覆盖整段代码。
+        #[allow(
+            clippy::let_unit_value,
+            reason = "perf-stats 关闭时宏展开成 unit，但守卫必须绑定"
+        )]
         let _encode_span = perf_span!("encode");
         let frame = self.build_frame(native, f, &nv12)?;
 

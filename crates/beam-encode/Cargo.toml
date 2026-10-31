@@ -34,6 +34,8 @@ tracing = { workspace = true }
 windows = { workspace = true, features = [
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Direct3D",
+    # §3.6 的 compute shader 颜色转换要运行时编译 HLSL（D3DCompile）。
+    "Win32_Graphics_Direct3D_Fxc",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Foundation",

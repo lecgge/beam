@@ -4,7 +4,7 @@
 //!
 //! ## 职责
 //!
-//! GPU 上 RGB→NV12（D3D11 VideoProcessor）；
+//! GPU 上 RGB→NV12（D3D11 VideoProcessor 或 compute shader，§3.6）；
 //! NVENC / AMF / QSV 硬编（ffmpeg-next 封装，D3D11 硬件帧上下文）；
 //! 低延迟参数；切片输出；强制 IDR；码率热更新。
 //!
@@ -74,15 +74,19 @@
 //! - ✅ **「NVENC 出码流」已在本机真机验证**（§9 M-1 验证点②）：
 //!   见 `examples/nvenc_encode_smoke.rs`——真的用 NVENC 编出 HEVC 码流，
 //!   再用软件解码器把码流解回来核对分辨率。
-//! - ⚠️ **「GPU 上 RGB→NV12」未验证**：本机 D3D11 VideoProcessor 的
-//!   `CreateVideoProcessorInputView` / `CreateVideoProcessorOutputView` 返回
-//!   `E_INVALIDARG(0x80070057)`，VideoProcessor 这条转换路走不通；
-//!   已跑通的是「NV12 纹理 → D3D11 硬件帧 → NVENC」。
+//! - ✅ **「GPU 上 RGB→NV12」已在本机真机验证**（§3.6）：走 **compute shader**
+//!   路径（见 [`color_compute`]），Y 平面**逐字节**等于 CPU 参考实现
+//!   （BT.709 + limited range），耗时 1080p 约 1.0 ms、4K 约 2.1 ms
+//!   （单帧，含 GPU 同步）。
+//!   D3D11 VideoProcessor 那条路在本机驱动上**建不出输入视图**（96 组参数变体
+//!   全灭，见 `examples/color_vp_probe.rs`），因此实现为「VideoProcessor 优先、
+//!   建不出来就回退 compute shader」。
 //! - ⚠️ 真实**抓屏纹理**接入（WGC 纹理 → 编码器）尚未联调：本批的验证入口自造纹理。
 //!
 //! 验证入口（都需要把 `$FFMPEG_DIR\bin` 加进 `PATH`——conda 的 ffmpeg 包只带自己的 DLL，
 //! 第三方运行库 zlib / dav1d / opus / libxml2 … 是单独的 conda 包）：
 //!
+//! - `cargo test -p beam-encode --test color_compute --release -- --nocapture`
 //! - `cargo run -p beam-encode --example nvenc_encode_smoke --features ffmpeg`
 //! - `cargo run -p beam-encode --example probe_encoders --features ffmpeg`
 
@@ -97,6 +101,12 @@ mod perf;
 pub mod encoder;
 pub mod error;
 pub mod params;
+
+/// GPU 上的 RGB→NV12 —— compute shader 路径（§3.6）。
+///
+/// 与 ffmpeg 无关，因此**不**受 `ffmpeg` feature 门控。
+#[cfg(windows)]
+pub mod color_compute;
 
 #[cfg(all(windows, feature = "ffmpeg"))]
 pub mod color;
