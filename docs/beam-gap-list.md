@@ -48,11 +48,11 @@
 | 审计判定 | 条数 | 已完成 | 进行中 | 已排期 | 未开始 |
 |---|---|---|---|---|---|
 | 已实现 | 364 | 10 | 0 | 0 | 354 |
-| 占位 | 43 | 33 | 1 | 0 | 8 |
+| 占位 | 43 | 34 | 1 | 0 | 8 |
 | 缺失 | 111 | 54 | 3 | 0 | 41 |
 | 偏差 | 76 | 54 | 0 | 0 | 22 |
 | 超出 | 3 | 0 | 0 | 0 | 3 |
-| **合计** | **597** | **151** | **4** | **0** | **428** |
+| **合计** | **597** | **152** | **4** | **0** | **428** |
 
 - 审计判定为**未达成**（占位+缺失+偏差）：**230** 条
 - 其中**已落地**：**159** 条；**仍未排期**：**71** 条
@@ -157,10 +157,9 @@
 |---|---|
 | 未开始 | 0 |
 | 进行中 | 4 |
-| 已完成 | 152 |
+| 已完成 | 153 |
 | 已阻塞 | 12 |
 | 暂不做 | 1 |
-| 偏差 | 1 |
 
 ### 批次记录
 
@@ -345,6 +344,18 @@
 | FEC 帧的热路径仍未走 DirectByteBuffer（F-07 / P6-06） | 查证：uniffi 0.29 的 Kotlin 后端没有 ByteBuffer 直传；0.32 的 `lower_type_name_for_arg` 只对「Kotlin → Rust」方向的借用 `Bytes` 生效，**回调方向（Rust → Kotlin）仍然映射成 ByteArray**。因此零拷贝回调需要手写 JNI ⇒ 仍卡在待决事项 S4（新增 `jni` 依赖 + 放开 `beam-ffi` 的 `forbid(unsafe_code)`） | 待裁决 |
 | §3.10 的 `beam-render` 职责是否包含「创建独立原生串流窗口」 | 本批把窗口放进 `beam-render`（交换链与宿主窗口成对），§3.10 原文只写「D3D11 flip-model 交换链上屏；叠加层由 Tauri 窗口负责」。**语义没变**（客户端仍渲染到独立原生窗口），只是承载代码的 crate 变了。若认为这属于改文档口径，请裁决是否补一句 | 待裁决 |
 
+| B11 | 2026-10-31 | 第十一批：GPU 上的 RGB→NV12 走 compute shader（§3.6 允许的第二条路） | crates/beam-encode | 已完成 | cargo fmt --all --check exit 0；cargo check --workspace --all-targets exit 0 / 0 warning；cargo clippy --workspace --all-targets -- -D warnings exit 0 / 0 warning；cargo clippy -p beam-encode --features ffmpeg --all-targets -- -D warnings exit 0（此前这条本来就不过）；cargo test --workspace exit 0（47 套件 / 455 passed / 0 failed / 9 ignored）；cargo test -p beam-encode --test color_compute --release exit 0（Y 平面自 NV12 纹理读回、与 CPU 参考逐字节一致，偏差 0；色度经影子平面偏差 0；1080p 1.02 ms、4K 2.10 ms，含 GPU 同步）；桌面端 clippy --all-targets -- -D warnings exit 0 |
+
+- **B11 compute shader 颜色转换（主会话自办）** — 写入范围：`crates/beam-encode/**`；覆盖条目 E-01
+
+**B11 追加项（审计中顺带发现，不在原 551 条内）**
+
+| 项 | 说明 | 归属 |
+|---|---|---|
+| 真实 WGC 抓屏纹理 → 编码器的端到端联调未做 | 本批的验证入口自造 BGRA8 纹理；真实链路是「WGC 抓屏 → compute shader 转 NV12 → NVENC → 客户端解码」，端到端（含 NVENC 出码流后解码回来与源画面逐像素比对）未验证 | 需人工验证 |
+| 本机驱动的两个 D3D11 限制（已绕开，但要记住） | ① 带 D3D11_BIND_VIDEO_ENCODER 的纹理**不能参与拷贝**（拷进去/拷出来都是全 0）⇒ 颜色转换必须由 shader **直写** NV12 的平面；② NV12 staging 的平面 1（UV）映射返回 E_INVALIDARG ⇒ 色度的校验改用「影子平面」（同一 shader 写出的普通 R8G8 纹理） | 已记录 |
+| VideoProcessor 这条路在本机不可用（96 组变体全灭） | 代码保留 VideoProcessor 优先（其它驱动上它更省事：硬件缩放+色彩转换一步到位），建不出来才回退 compute shader。探针 examples/color_vp_probe.rs 留着，方便换机器时再验一次 | 已记录 |
+
 ### 已裁决事项
 
 | # | 议题 | 裁决 | 裁决日期 | 说明 | 解锁范围 |
@@ -406,6 +417,8 @@
 | 2026-10-31 | 真 bug：ffmpeg D3D11VA 硬解上下文被释放两次 ⇒ 退出时堆破坏 | `FfmpegD3D11VaDecoder` 把 `AVHWDeviceContext` 的 `device` 字段指向自己 AddRef 出来的 `ID3D11Device`，同时在 Rust 结构体里**又存了一份**该设备引用。而 ffmpeg 的 `AVD3D11VADeviceContext` 头文件写明：「Deallocating the AVHWDeviceContext will always release this interface」⇒ 设备被 Release 两次 ⇒ 交换链与解码纹理都建在这个设备上，提前释放让它们踩到野指针。实测：打开硬解上下文后立刻释放 ⇒ STATUS_ACCESS_VIOLATION。改法：把那一份 AddRef 的所有权**移交给 ffmpeg**（`mem::forget`），Rust 侧不再持有 | 硬解上下文开→关不再崩；`cargo test -p beam-client --features video --test video_present -- --ignored` 通过 |
 | 2026-10-31 | 真 bug：`AVBufferRef` 被 unref 两次 ⇒ use-after-free | `(*ctx).hw_device_ctx = hw.as_ptr()` 把 `AVBufferRef` **无引用地**塞给 libavcodec；`avcodec_free_context` 会 unref 它，之后 `HwDevice::drop` 又 unref 一次 ⇒ use-after-free ⇒ 实测 STATUS_HEAP_CORRUPTION。改法：交给 libavcodec 前先 `av_buffer_ref` 加一份引用（`avctx` 与 `avci` 各持一份，`avcodec_free_context` 负责归还） | 两个崩溃点（堆破坏 / 访问违例）都消除；上屏自检全绿 |
 | 2026-10-31 | 桌面端客户端此前**根本没有上屏路径** | 此前 `ClientRuntime::connect_default` 用的 `D3D11Renderer` **没有绑定任何窗口**，且 `beam-render/d3d11` / `beam-decode/ffmpeg` 两个 feature 默认关闭 ⇒ 客户端即便收到帧也只会得到 `E10014`（后端未启用）。本批补上 `client-video` feature 与 `connect_to_window` 入口（建窗口 → 建交换链 → 用同一设备开硬解），桌面端只调 L3 入口 | cargo check/clippy 两种 feature 状态全绿；本机自检三步（窗口/交换链/硬解）全过 |
+| 2026-10-31 | D3D11 VideoProcessor 在本机驱动上建不出输入视图（不是参数问题） | `CreateVideoProcessorInputView` 恒返回 E_INVALIDARG(0x80070057)。为排除「参数写错」，做了 96 组变体矩阵（FourCC 三种取值 × Usage 四种 × 源/目标纹理绑定各两种）—— **一组都没建出来** ⇒ 驱动侧的能力缺失。文档 §3.6 允许「D3D11 VideoProcessor **或** compute shader」，因此实现 compute shader 路径 | examples/color_vp_probe.rs 留在仓库里，换机器时可再验一次；生产路径已自动回退到 compute shader |
+| 2026-10-31 | compute shader 的 RGB→NV12 已真机验证（逐字节等于 CPU 参考） | 内嵌 HLSL 用 D3DCompile 运行时编译，compute shader **直写** NV12 纹理的 Y/UV 两个平面（纹理带 VIDEO_ENCODER | UNORDERED_ACCESS ⇒ NVENC 直接吃、shader 直接写，零拷贝）。色彩矩阵 BT.709 + limited range。期间修掉两个真实缺陷：① 着色器把 UV 平面按「宽 × 半高」写（NV12 的 UV 其实是 **宽/2 × 高/2** 个 R8G8 采样）；② NV12 纹理不能靠「先写单平面纹理再拷进去」来填（带 VIDEO_ENCODER 的纹理不能参与拷贝） | Y 平面自 NV12 纹理读回与 CPU 参考逐字节一致（偏差 0）；色度经影子平面偏差 0；单帧 1080p 1.02 ms / 4K 2.10 ms |
 
 ---
 
@@ -684,7 +697,7 @@
 
 | # | 文档要求 | 实现位置 | 判定 | 说明 | 状态 |
 |---|---|---|---|---|---|
-| E-01 | 「GPU 上 RGB→NV12(D3D11 VideoProcessor 或 compute shader)」 | `crates/beam-encode/src/encoder.rs:200-205` | 占位 | 只有一行注释「真实实现：D3D11 硬件帧上下文 → D3D11 VideoProcessor 颜色转换 → NVENC/AMF/QSV」（`encoder.rs:203`），实际代码 `let _ = f;` 后返回 `Err(EncError::BackendDisabled)`。无 VideoProcessor、无 compute shader、无 NV12 格式代码。 | 偏差 |
+| E-01 | 「GPU 上 RGB→NV12(D3D11 VideoProcessor 或 compute shader)」 | `crates/beam-encode/src/encoder.rs:200-205` | 占位 | 只有一行注释「真实实现：D3D11 硬件帧上下文 → D3D11 VideoProcessor 颜色转换 → NVENC/AMF/QSV」（`encoder.rs:203`），实际代码 `let _ = f;` 后返回 `Err(EncError::BackendDisabled)`。无 VideoProcessor、无 compute shader、无 NV12 格式代码。 | 已完成 |
 | E-02 | 「NVENC/AMF/QSV 硬编(ffmpeg-next 封装,D3D11 硬件帧上下文)」 | `crates/beam-encode/src/encoder.rs:198-211`；`crates/beam-encode/Cargo.toml:30` | 占位 | `ffmpeg-next` 声明为 optional 依赖，但 `src/` 中**从未被引用**（已搜索 `ffmpeg_next` / `ffmpeg::`，`crates/` 全目录零命中）。`EncoderKind` 三个变体（`encoder.rs:45-54`）只用于名字解析（`encoder.rs:74-82`），不驱动任何编码器选择。 | 已完成 |
 | E-03 | 「低延迟参数」 | `crates/beam-encode/src/encoder.rs:98-99` | 占位 | `EncoderCaps.low_latency: bool` 字段存在（注释还写了「ultra-low-latency / vbr_latency / veryfast」），但 `probe()` 恒返回空列表（`encoder.rs:161-171`），该字段**没有任何生产者**，也没有任何低延迟开关传给编码器。 | 已完成 |
 | E-04 | 「切片输出」 | `crates/beam-encode/src/encoder.rs:117-118`；`crates/beam-proto/src/lib.rs:89-90` | 占位 | 数据结构齐备：`EncodeConfig.slices: u32`（`encoder.rs:118`）+ `EncodedFrame.slices: Vec<Bytes>`（`beam-proto/src/lib.rs:90`），但 `encode()` 从不产出切片（恒报错）。文档标注切片属 v1（§3.6 第 135 行「里程碑:MVP / v1(切片、SFE)」）。 | 已完成 |
