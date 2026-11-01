@@ -8,7 +8,19 @@ use std::net::Ipv4Addr;
 use serde::{Deserialize, Serialize};
 
 /// mDNS 服务类型（§3.4）。
+///
+/// 这是**文档口径**的名字（§3.4 写的就是 `_beam._udp.local`）。
 pub const SERVICE_TYPE: &str = "_beam._udp.local";
+
+/// 同一服务类型的 **FQDN 形式**（结尾带点）。
+///
+/// `mdns-sd` 的 `register` / `browse` 都要求服务类型以
+/// `._tcp.local.` 或 `._udp.local.` **结尾**（带那个点），
+/// 否则直接返回 `RegisterFailed`：
+/// 「mDNS service … must end with '._tcp.local.' or '._udp.local.'」。
+///
+/// 少了这个点 ⇒ mDNS 广播**根本注册不上去**，局域网里根本发现不了主机。
+pub const SERVICE_TYPE_FQDN: &str = "_beam._udp.local.";
 
 /// TXT 字段名。
 pub mod txt {
@@ -163,5 +175,16 @@ mod tests {
         assert_eq!(host.id, "abc");
         assert_eq!(host.port, 4827);
         assert_eq!(host.fingerprint, "01234567");
+    }
+
+    /// `mdns-sd` 的 `register` / `browse` 都要求服务类型以
+    /// `._tcp.local.` / `._udp.local.` **结尾**（带那个点）。
+    ///
+    /// 少了这个点 ⇒ mDNS 广播**根本注册不上去**（`RegisterFailed`），
+    /// 局域网里发现不了任何主机。
+    #[test]
+    fn service_type_fqdn_is_usable_by_mdns_sd() {
+        assert!(SERVICE_TYPE_FQDN.ends_with("._udp.local."));
+        assert_eq!(SERVICE_TYPE_FQDN, format!("{SERVICE_TYPE}."));
     }
 }

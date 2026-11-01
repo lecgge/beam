@@ -179,13 +179,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // ---------------------------------------------------------------- [4]
     println!("[4/6] 客户端首次连接：主机尚未人工确认 → 握手应当被拒绝");
-    let first = NetEndpoint::connect(
-        listen_addr,
-        client_cfg.clone(),
-        Arc::new(client_trust.clone()),
-    )
-    .await;
-    match &first {
+    // 主机侧必须**同时** accept：quinn 的握手要靠 accept 被推进。
+    // 先 connect 后 accept 的话，主机这边没人推进握手 ⇒ 客户端只会等到超时（E2001），
+    // 而且主机**根本看不到客户端的证书** ⇒ 闸门无从记录指纹
+    // （这个顺序错误曾经让本示例永远走不到第 5 步）。
+    let (host_first, client_first) = tokio::join!(
+        listener.accept(),
+        NetEndpoint::connect(
+            listen_addr,
+            client_cfg.clone(),
+            Arc::new(client_trust.clone()),
+        ),
+    );
+    match &client_first {
         Ok(_) => println!("      不该成功：主机在未确认前就放行了客户端"),
         Err(err) => println!(
             "      客户端握手被拒绝：{} ({})",
@@ -194,7 +200,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         ),
     }
     // 主机侧：被拒绝的那次握手同样会回到 accept 上。
-    match listener.accept().await {
+    match host_first {
         Ok(_) => println!("      不该成功：主机接受了未确认的客户端"),
         Err(err) => println!("      主机拒绝该连接：{err}"),
     }
@@ -375,12 +381,35 @@ async fn client_side(
     };
 
     // 画面通道(§5 datagram)：统计主机真的送过来的帧。
+    //
+    // 同时**每 500 ms 发一条 `Feedback`**（§4.1「输入 stream / Feedback」）：
+    // 主机侧的停滞判定看的是「有没有收到客户端的数据」，真实客户端正是靠
+    // 周期性的 Feedback 续命的。这里不发，主机会在 3 s 后自己进 Reconnecting。
+    //
+    // 客户端还必须比主机**活得久**：客户端一断开，主机的控制流就断了
+    // ⇒ 主机会话必然进 Error 态（这是正常的断开语义，不是故障）。
+    // 所以客户端的时限比主机长，主机在自己的时限到时记录到的仍是 Streaming。
     let mut video = conn.video_stream();
-    let deadline = Instant::now() + Duration::from_secs(8);
+    let deadline = Instant::now() + Duration::from_secs(10);
     let mut frames = 0u32;
+    let mut next_feedback = Instant::now();
     while Instant::now() < deadline {
-        if video.try_next_frame()?.is_some() {
-            frames += 1;
+        match video.try_next_frame() {
+            Ok(Some(_)) => frames += 1,
+            Ok(None) => {}
+            // 主机侧到期后收工断开 ⇒ 数据报读失败是**预期**的
+            // （示例的时限到点，主机先走），不是失败。
+            Err(_) => break,
+        }
+        if Instant::now() >= next_feedback {
+            next_feedback = Instant::now() + Duration::from_millis(500);
+            let feedback = ControlMsg::Feedback(beam_proto::Feedback {
+                loss: 0,
+                rtt: std::time::Duration::from_millis(1),
+                recv_rate: 0,
+            });
+            send.write_all(&encode_frame(&feedback)).await?;
+            send.flush().await?;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -402,7 +431,7 @@ async fn host_side(
         .await?;
     println!("      主机已接受连接并启动平台会话(WGC 抓屏 + NVENC 硬编)");
 
-    let deadline = Instant::now() + Duration::from_secs(12);
+    let deadline = Instant::now() + Duration::from_secs(8);
     let mut last = handle.state();
     let mut error = None;
     while Instant::now() < deadline {

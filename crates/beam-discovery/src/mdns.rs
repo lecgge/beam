@@ -12,7 +12,7 @@ use futures::stream::Stream;
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 
 use crate::error::DiscoveryError;
-use crate::records::{host_from_txt, txt, DiscoveredHost, HostInfo, SERVICE_TYPE};
+use crate::records::{host_from_txt, txt, DiscoveredHost, HostInfo, SERVICE_TYPE_FQDN};
 
 /// 广播本机信息。
 pub struct Advertiser {
@@ -42,7 +42,7 @@ impl Advertiser {
 
         let properties: HashMap<String, String> = info.to_txt().into_iter().collect();
         let service = ServiceInfo::new(
-            SERVICE_TYPE,
+            SERVICE_TYPE_FQDN,
             &info.name,
             &format!("{}.local.", info.name),
             std::net::IpAddr::V4(info.address),
@@ -111,7 +111,7 @@ impl Browser {
             reason: e.to_string(),
         })?;
         let raw = daemon
-            .browse(SERVICE_TYPE)
+            .browse(SERVICE_TYPE_FQDN)
             .map_err(|e| DiscoveryError::BrowseFailed {
                 reason: e.to_string(),
             })?;

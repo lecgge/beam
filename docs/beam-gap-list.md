@@ -47,12 +47,12 @@
 
 | 审计判定 | 条数 | 已完成 | 进行中 | 已排期 | 未开始 |
 |---|---|---|---|---|---|
-| 已实现 | 364 | 10 | 0 | 0 | 354 |
+| 已实现 | 364 | 12 | 0 | 0 | 352 |
 | 占位 | 43 | 34 | 1 | 0 | 8 |
 | 缺失 | 111 | 54 | 4 | 0 | 40 |
 | 偏差 | 76 | 54 | 0 | 0 | 22 |
 | 超出 | 3 | 0 | 0 | 0 | 3 |
-| **合计** | **597** | **152** | **5** | **0** | **427** |
+| **合计** | **597** | **154** | **5** | **0** | **425** |
 
 - 审计判定为**未达成**（占位+缺失+偏差）：**230** 条
 - 其中**已落地**：**160** 条；**仍未排期**：**70** 条
@@ -157,7 +157,7 @@
 |---|---|
 | 未开始 | 0 |
 | 进行中 | 5 |
-| 已完成 | 153 |
+| 已完成 | 155 |
 | 已阻塞 | 12 |
 | 暂不做 | 1 |
 
@@ -378,6 +378,18 @@
 | E2E 交叉校验还差「分段路径」 | 采集器是每进程的：主机侧（抓屏/颜色转换/编码）与客户端侧（解码/上屏）的阶段直方图分处两个进程，要把主机侧的阶段耗时传过来才能求和做交叉校验 | 下一批 |
 | E2E 的真实数字仍未测出 | 测量链路已通，但没有真实串流会话，E2E 的实际数值（目标 T0 ≤30 ms / T1 ≤27 ms）未实测 | 需人工验证 |
 
+| B14 | 2026-11-01 | 第十四批：mDNS 服务类型修复 + 真机回环首次整链跑通 | crates/beam-discovery / crates/beam-host（examples） | 已完成 | cargo fmt --all --check exit 0；cargo check --workspace --all-targets exit 0 / 0 warning；cargo clippy --workspace --all-targets -- -D warnings exit 0 / 0 warning；cargo test --workspace exit 0（48 套件 / 462 passed / 0 failed / 9 ignored）；cargo run -p beam-host --example host_loopback --features platform --release exit 0：**本机真机整链首次跑通** —— mDNS 广播与发现 ✓、信任闸门拒绝未信任对端并记录指纹 ✓、人工确认后写库 ✓、重连协商到 Streaming ✓、**客户端收到 241 帧真实画面**（WGC 抓屏 → compute shader 颜色转换 → NVENC → QUIC datagram） |
+
+- **B14 发现层修复与真机回环（主会话自办）** — 写入范围：`crates/beam-discovery/**`、`crates/beam-host/**`；覆盖条目 D-01, D-06
+
+**B14 追加项（审计中顺带发现，不在原 551 条内）**
+
+| 项 | 说明 | 归属 |
+|---|---|---|
+| 客户端的「解码 + 上屏」这一段仍未在真机链路上验证 | 回环里的客户端是**最小实现**（只数帧，不解码不上屏）；真实客户端的 D3D11VA 硬解 + D3D11 flip-model 上屏（B10 的原生窗口路径）还没在这条链路上跑过 | 下一批 |
+| 回环示例的三个顺序/时限问题（都在示例里，不是产品代码） | ① 先 connect 后 accept ⇒ quinn 没人推进握手，客户端只能超时，主机也看不到客户端证书；② 最小客户端不发 Feedback ⇒ 主机 3 s 停滞判定触发；③ 客户端时限短于主机 ⇒ 客户端先断开，主机会话按正常断开语义进 Error 态，示例的判据却要求主机仍是 Streaming | 已修 |
+| mDNS 在真实局域网里的可达性未验证 | 本机回环只能证明「广播能被同一台机器浏览到」；跨机器的组播可达性、路由器是否放行 `_beam._udp` 的组播，仍需两台机器实测 | 需人工验证 |
+
 ### 已裁决事项
 
 | # | 议题 | 裁决 | 裁决日期 | 说明 | 解锁范围 |
@@ -444,6 +456,8 @@
 | 2026-11-01 | §5 的 ClockSync 此前是「协议有、实现无」：两端都没发也没算 | 协议里 `ClockSync{t0,t1,t2,t3}` 一直存在，主机侧也有一句应答代码，但**客户端从不发请求、也从不算偏移** ⇒ §5「客户端通过 ClockSync 求偏移」落空，§3.13 的 E2E 延迟也就没有基准。另外发现一个隐患：应答若也走通用控制处理路径，会**再回一条 ClockSync** ⇒ 两端无限乒乓 | 客户端每 5 s 发请求、按 NTP 式算偏移并可查；单测钉住「不回声」与「5 s 节拍」 |
 | 2026-11-01 | 顺带修掉一个我自己引入的时钟口径隐患 | B12 给 `Clock` 加 `now_us()` 时，`SystemClock::now_ms()` 与 `now_us()` 各自用了独立的 `static START` ⇒ 两个零点会差几微秒，破坏「微秒 = 毫秒 × 1000」的一致性，也会让时钟偏移带上一个恒定偏差。改成共用同一个零点 | 两个口径现在严格一致（`now_us()/1000 == now_ms`） |
 | 2026-11-01 | §3.13 的 E2E 阶段此前没有任何地方记录 | `Stage::E2E` 与 `beam_perf::e2e::clock_based_e2e_us` 一直存在，但客户端上屏后从没算过 E2E ⇒ 时间戳路径缺了「客户端上屏时刻」这一半。现在：`FrameConsumer` 新增默认空实现的 `on_clock_sync`（会话层把偏移送给消费者）→ `DecodeRenderConsumer` 在上屏后取客户端时刻并算出 E2E 记进采集器 | E2E 时间戳路径打通；偏移 100 ms 的场景测得 E2E ≈ 200 ms（单测钉住） |
+| 2026-11-01 | 真 bug：mDNS 服务类型少了结尾的点 ⇒ 广播根本注册不上去 | `SERVICE_TYPE = "_beam._udp.local"`，而 `mdns-sd` 的 `register` / `browse` 都要求服务类型以 `._tcp.local.` / `._udp.local.` **结尾**（带点），否则直接返回 `RegisterFailed`。⇒ 主机广播不出去、客户端浏览不到，**局域网发现完全不可用**。改法：保留文档口径的 `SERVICE_TYPE`，另加 `SERVICE_TYPE_FQDN`（带点）供注册与浏览使用 | 真机回环里客户端广播成功、主机浏览到了它（名字 + 指纹前 8 位）；加单测钉住 FQDN 形式 |
+| 2026-11-01 | 真机回环（host_loopback）此前**从未跑通**，卡在三个地方 | ① 先 connect 后 accept：quinn 的握手要靠 accept 被推进，没人推进 ⇒ 客户端超时、主机看不到客户端证书 ⇒ 信任闸门无从记录指纹；② 最小客户端不发 Feedback ⇒ 主机 3 s 停滞判定触发；③ 客户端时限短于主机 ⇒ 客户端先断开，主机按正常断开语义进 Error 态。三个都在**示例**里（产品代码没问题） | 本机真机整链首次跑通：双方到 Streaming，客户端收到 241 帧真实画面 |
 
 ---
 
@@ -654,12 +668,12 @@
 
 | # | 文档要求 | 实现位置 | 判定 | 说明 | 状态 |
 |---|---|---|---|---|---|
-| D-01 | 职责：mDNS 广播 `_beam._udp.local` | crates/beam-discovery/src/records.rs:11 | 已实现 | `SERVICE_TYPE = "_beam._udp.local"`，注册时直接使用（crates/beam-discovery/src/mdns.rs:44-51） | 未开始 |
+| D-01 | 职责：mDNS 广播 `_beam._udp.local` | crates/beam-discovery/src/records.rs:11 | 已实现 | `SERVICE_TYPE = "_beam._udp.local"`，注册时直接使用（crates/beam-discovery/src/mdns.rs:44-51） | 已完成 |
 | D-02 | 职责：TXT 字段 id/name/ver/fp(前 8 位)/port | crates/beam-discovery/src/records.rs:14-25、46-58 | 已实现 | 五个字段名与文档一致；`fp` 广播时按字符截前 8 位（crates/beam-discovery/src/records.rs:52-55），有单测 crates/beam-discovery/src/records.rs:133-150 | 未开始 |
 | D-03 | 边界：只发现不连接 | crates/beam-discovery/Cargo.toml:11-17；crates/beam-discovery/src/mdns.rs:1-187 | 已实现 | 无 quinn/socket/连接代码，本 crate 只广播与浏览 | 未开始 |
 | D-04 | 边界：依赖 mdns-sd | crates/beam-discovery/Cargo.toml:13 | 已实现 | 依赖存在并真实使用（crates/beam-discovery/src/mdns.rs:12） | 未开始 |
 | D-05 | 接口：`Advertiser::start(info)` | crates/beam-discovery/src/mdns.rs:33-64 | 已实现 | 真建 `ServiceDaemon`、注册 `ServiceInfo`、返回可 unregister 的实例 | 未开始 |
-| D-06 | 接口：`Browser::start() -> impl Stream<Item=DiscoveryEvent>` | crates/beam-discovery/src/mdns.rs:109-141；`impl Stream` crates/beam-discovery/src/mdns.rs:149-155 | 已实现 | `Browser::start()` 返回 `Result<Browser, DiscoveryError>`，且 `Browser: Stream<Item = DiscoveryEvent>`（多一层 Result，语义等价）；浏览事件经独立线程 + 无界通道转成 Stream（crates/beam-discovery/src/mdns.rs:118-135） | 未开始 |
+| D-06 | 接口：`Browser::start() -> impl Stream<Item=DiscoveryEvent>` | crates/beam-discovery/src/mdns.rs:109-141；`impl Stream` crates/beam-discovery/src/mdns.rs:149-155 | 已实现 | `Browser::start()` 返回 `Result<Browser, DiscoveryError>`，且 `Browser: Stream<Item = DiscoveryEvent>`（多一层 Result，语义等价）；浏览事件经独立线程 + 无界通道转成 Stream（crates/beam-discovery/src/mdns.rs:118-135） | 已完成 |
 | D-07 | 配置：`enabled` | 键位于 crates/beam-config/src/model.rs:67、264、321；未找到（已搜索：beam-discovery 内的 enabled / discovery_enabled 消费点） | 偏差 | 配置模型有 `discovery_enabled`，但 beam-discovery 自身没有配置入口，`Advertiser::start` / `Browser::start` 均无开关，上层也无法通过该 crate 关掉发现 | 未开始 |
 | D-08 | 配置：`iface_allowlist` | 键位于 crates/beam-config/src/model.rs:69、266、322；未找到（已搜索：iface_allowlist / allowlist 在 beam-discovery 内消费点） | 偏差 | 配置模型有网卡白名单，但 beam-discovery 的 `Advertiser::start` / `Browser::start` 不接收该参数，也没有按网卡过滤的逻辑 → 白名单当前无效 | 未开始 |
 | D-09 | 错误码 `E4xxx` | crates/beam-discovery/src/error.rs:4-13、31-59 | 已实现 | 4001 守护进程启动失败 / 4002 注册失败 / 4003 浏览失败 / 4004 广播信息非法，均为真实产生点（crates/beam-discovery/src/mdns.rs:35、39、52、59、110、115） | 未开始 |
