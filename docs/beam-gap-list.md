@@ -367,6 +367,17 @@
 | E2E 延迟测量（§3.13）还没用上这个偏移 | 偏移已经能查了，但客户端渲染侧还没记录「上屏时刻（客户端时钟）」，因此「抓屏时刻 + 偏移 → 上屏时刻」的差值（真实 E2E）还没算出来。X13-08 因此记「进行中」 | 下一批 |
 | 时钟口径的已知局限 | 两端都用各自进程的**单调**时钟（零点不同），偏移正是用来换算这个差异；但单调时钟**不与墙钟对齐**，因此偏移量在两台机器上不可直接比较——这不影响 E2E 测量（同一对端会话内偏移是稳定的） | 已记录 |
 
+| B13 | 2026-11-01 | 第十三轮：§3.13 的 E2E 延迟测量接线（时间戳路径） | crates/beam-session / crates/beam-client | 已完成 | cargo fmt --all --check exit 0；cargo check --workspace --all-targets exit 0 / 0 warning；cargo clippy --workspace --all-targets -- -D warnings exit 0 / 0 warning；cargo clippy -p beam-client --features perf-stats --all-targets -- -D warnings exit 0 / 0 warning；cargo test --workspace exit 0（48 套件 / 461 passed / 0 failed / 9 ignored）；cargo test -p beam-client --features perf-stats --test e2e_measure exit 0（偏移 100 ms 时 E2E 测得约 200 ms；无偏移时不记样本）；桌面端 clippy --all-targets -- -D warnings exit 0 |
+
+- **B13 E2E 测量（主会话自办）** — 写入范围：`crates/beam-session/**`、`crates/beam-client/**`；覆盖条目 X13-08, X13-09
+
+**B13 追加项（审计中顺带发现，不在原 551 条内）**
+
+| 项 | 说明 | 归属 |
+|---|---|---|
+| E2E 交叉校验还差「分段路径」 | 采集器是每进程的：主机侧（抓屏/颜色转换/编码）与客户端侧（解码/上屏）的阶段直方图分处两个进程，要把主机侧的阶段耗时传过来才能求和做交叉校验 | 下一批 |
+| E2E 的真实数字仍未测出 | 测量链路已通，但没有真实串流会话，E2E 的实际数值（目标 T0 ≤30 ms / T1 ≤27 ms）未实测 | 需人工验证 |
+
 ### 已裁决事项
 
 | # | 议题 | 裁决 | 裁决日期 | 说明 | 解锁范围 |
@@ -431,6 +442,8 @@
 | 2026-10-31 | D3D11 VideoProcessor 在本机驱动上建不出输入视图（不是参数问题） | `CreateVideoProcessorInputView` 恒返回 E_INVALIDARG(0x80070057)。为排除「参数写错」，做了 96 组变体矩阵（FourCC 三种取值 × Usage 四种 × 源/目标纹理绑定各两种）—— **一组都没建出来** ⇒ 驱动侧的能力缺失。文档 §3.6 允许「D3D11 VideoProcessor **或** compute shader」，因此实现 compute shader 路径 | examples/color_vp_probe.rs 留在仓库里，换机器时可再验一次；生产路径已自动回退到 compute shader |
 | 2026-10-31 | compute shader 的 RGB→NV12 已真机验证（逐字节等于 CPU 参考） | 内嵌 HLSL 用 D3DCompile 运行时编译，compute shader **直写** NV12 纹理的 Y/UV 两个平面（纹理带 VIDEO_ENCODER | UNORDERED_ACCESS ⇒ NVENC 直接吃、shader 直接写，零拷贝）。色彩矩阵 BT.709 + limited range。期间修掉两个真实缺陷：① 着色器把 UV 平面按「宽 × 半高」写（NV12 的 UV 其实是 **宽/2 × 高/2** 个 R8G8 采样）；② NV12 纹理不能靠「先写单平面纹理再拷进去」来填（带 VIDEO_ENCODER 的纹理不能参与拷贝） | Y 平面自 NV12 纹理读回与 CPU 参考逐字节一致（偏差 0）；色度经影子平面偏差 0；单帧 1080p 1.02 ms / 4K 2.10 ms |
 | 2026-11-01 | §5 的 ClockSync 此前是「协议有、实现无」：两端都没发也没算 | 协议里 `ClockSync{t0,t1,t2,t3}` 一直存在，主机侧也有一句应答代码，但**客户端从不发请求、也从不算偏移** ⇒ §5「客户端通过 ClockSync 求偏移」落空，§3.13 的 E2E 延迟也就没有基准。另外发现一个隐患：应答若也走通用控制处理路径，会**再回一条 ClockSync** ⇒ 两端无限乒乓 | 客户端每 5 s 发请求、按 NTP 式算偏移并可查；单测钉住「不回声」与「5 s 节拍」 |
+| 2026-11-01 | 顺带修掉一个我自己引入的时钟口径隐患 | B12 给 `Clock` 加 `now_us()` 时，`SystemClock::now_ms()` 与 `now_us()` 各自用了独立的 `static START` ⇒ 两个零点会差几微秒，破坏「微秒 = 毫秒 × 1000」的一致性，也会让时钟偏移带上一个恒定偏差。改成共用同一个零点 | 两个口径现在严格一致（`now_us()/1000 == now_ms`） |
+| 2026-11-01 | §3.13 的 E2E 阶段此前没有任何地方记录 | `Stage::E2E` 与 `beam_perf::e2e::clock_based_e2e_us` 一直存在，但客户端上屏后从没算过 E2E ⇒ 时间戳路径缺了「客户端上屏时刻」这一半。现在：`FrameConsumer` 新增默认空实现的 `on_clock_sync`（会话层把偏移送给消费者）→ `DecodeRenderConsumer` 在上屏后取客户端时刻并算出 E2E 记进采集器 | E2E 时间戳路径打通；偏移 100 ms 的场景测得 E2E ≈ 200 ms（单测钉住） |
 
 ---
 

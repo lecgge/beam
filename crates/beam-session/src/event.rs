@@ -152,6 +152,15 @@ pub trait VideoSender: Send {
 pub trait FrameConsumer: Send {
     /// 消费一帧画面。
     fn consume(&mut self, f: EncodedFrame) -> Result<(), SessionError>;
+
+    /// 会话侧算出了时钟偏移（§5「客户端通过 ClockSync 求偏移」），告知消费者。
+    ///
+    /// 消费者若要做 **E2E 延迟测量**（§3.13），就需要这个偏移把
+    /// 「主机抓屏时刻」换算到客户端时钟：
+    /// `e2e = 客户端上屏时刻 − (主机抓屏时刻 − 偏移)`。
+    ///
+    /// 默认实现是**空操作**：不关心 E2E 的消费者（绝大多数）什么都不用做。
+    fn on_clock_sync(&mut self, _offset_us: i64) {}
 }
 
 /// 输入注入器（§3.8 `InputSink` 的会话侧镜像）。

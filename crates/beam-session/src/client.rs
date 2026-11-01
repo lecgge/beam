@@ -506,6 +506,11 @@ impl ClientRunner {
             rtt_us,
             measured_at_us: t3,
         });
+        // 把偏移告知帧消费者：要算 E2E（§3.13）就需要它把
+        // 「主机抓屏时刻」换算到客户端时钟。
+        if let Some(consumer) = self.consumer.as_mut() {
+            consumer.on_clock_sync(offset_us);
+        }
     }
 
     /// 定期发 `ClockSync` 请求（§3.13「NTP 式四时间戳时钟同步，**每 5 s** 一次」）。

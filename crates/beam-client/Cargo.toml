@@ -16,6 +16,9 @@ default = []
 # 不开这个 feature 时音频链路**接线仍然完整**，但 `OpusDecoderImpl::new` 返回
 # E7004（后端未启用）⇒ 客户端降级为「只有画面」，错误码写进日志与统计。
 opus = ["beam-audio/opus"]
+# §3.13：端到端（E2E）延迟测量需要把「上屏时刻」记进 perf 采集器。
+# 默认关闭（§7：release 禁止开启）。
+perf-stats = ["dep:beam-perf", "beam-perf/perf-stats"]
 # 客户端真实解码 + 上屏（§3.10）。
 #
 # - `beam-render/d3d11`：D3D11 flip-model 交换链（原生窗口上屏）；
@@ -36,6 +39,8 @@ beam-net = { workspace = true }
 # §4 允许 L3（host/client）引用平台 crate；`beam-audio` 的模块文档也写明
 # 「被依赖：beam-host、beam-client、beam-ffi」。
 beam-audio = { workspace = true }
+# §3.13 的性能采集器。可选依赖 + perf-stats feature（默认关，见上）。
+beam-perf = { workspace = true, optional = true }
 # §4「只允许上层依赖下层」：client(L3) 需要 pair(L1) 的 PeerVerifier 来校验主机证书。
 beam-pair = { workspace = true }
 beam-discovery = { workspace = true }

@@ -33,16 +33,44 @@
 use beam_decode::VideoDecoder;
 use beam_proto::{EncodedFrame, Feedback};
 use beam_render::Renderer;
-use beam_session::{FrameConsumer, RateControl, SessionError, Transport, TransportFactory};
+use beam_session::Clock;
+use std::sync::Arc;
+
+use beam_session::{
+    FrameConsumer, RateControl, SessionError, SystemClock, Transport, TransportFactory,
+};
 
 /// 客户端侧的 QUIC 会话传输（实现住在 `beam-session`，此处原样重导出）。
 pub use beam_session::{FrameChannelStats, FrameStatsHandle, NetTransport};
 
 /// 解码 → 上屏适配器。
-#[derive(Debug)]
 pub struct DecodeRenderConsumer<D, R> {
     decoder: D,
     renderer: R,
+    /// 时钟偏移（主机时钟 − 客户端时钟，§5）。
+    ///
+    /// 会话层每次同步成功后通过 [`FrameConsumer::on_clock_sync`] 送进来；
+    /// 算 E2E 延迟（§3.13）时用它把「主机抓屏时刻」换算到客户端时钟。
+    clock_offset_us: Option<i64>,
+    /// 客户端时钟（微秒）。
+    ///
+    /// 只有 perf-stats 开启时才会用到（E2E 测量）；关闭时保留字段
+    /// 以免两种构建的结构体布局不同。
+    #[cfg_attr(not(feature = "perf-stats"), allow(dead_code))]
+    clock: Arc<dyn Clock>,
+}
+
+impl<D, R> std::fmt::Debug for DecodeRenderConsumer<D, R>
+where
+    D: VideoDecoder,
+    R: Renderer,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // 时钟是 `dyn Clock`（没有 Debug），这里只报关键状态。
+        f.debug_struct("DecodeRenderConsumer")
+            .field("clock_offset_us", &self.clock_offset_us)
+            .finish()
+    }
 }
 
 impl<D, R> DecodeRenderConsumer<D, R>
@@ -52,7 +80,19 @@ where
 {
     /// 组装适配器。
     pub fn new(decoder: D, renderer: R) -> Self {
-        Self { decoder, renderer }
+        Self {
+            decoder,
+            renderer,
+            clock_offset_us: None,
+            clock: Arc::new(SystemClock),
+        }
+    }
+
+    /// 替换客户端时钟（测试用；生产路径用系统单调时钟）。
+    ///
+    /// E2E 测量要拿「客户端上屏时刻」，可注入的时钟让这条链路可测。
+    pub fn set_clock(&mut self, clock: Arc<dyn Clock>) {
+        self.clock = clock;
     }
 
     /// 访问底层解码器。
@@ -63,6 +103,11 @@ where
     /// 访问底层渲染器。
     pub fn renderer(&self) -> &R {
         &self.renderer
+    }
+
+    /// 当前已知的时钟偏移（微秒）。
+    pub fn clock_offset_us(&self) -> Option<i64> {
+        self.clock_offset_us
     }
 }
 
@@ -89,7 +134,30 @@ where
             .present(&decoded)
             .map_err(|e| SessionError::TransportFailed {
                 reason: format!("上屏失败 {}: {e}", e.code_str()),
-            })
+            })?;
+
+        // §3.13 的 E2E 阶段：客户端上屏时刻 −（主机抓屏时刻换算到客户端时钟）。
+        // 没有时钟偏移就不记 —— 宁可不记，也不能记一个错的数。
+        //
+        // 整段都挂在 `perf-stats` feature 后面：E2E 是**性能指标**，
+        // 没有采集器时无处可放（§7：perf-stats 默认关闭、release 禁止开启）。
+        #[cfg(feature = "perf-stats")]
+        if let Some(offset_us) = self.clock_offset_us {
+            let present_us = self.clock.now_us();
+            if let Some(e2e_us) =
+                beam_perf::e2e::clock_based_e2e_us(decoded.capture_ts_us, present_us, offset_us)
+            {
+                beam_perf::collect::record(
+                    beam_perf::Stage::E2E,
+                    std::time::Duration::from_micros(e2e_us),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn on_clock_sync(&mut self, offset_us: i64) {
+        self.clock_offset_us = Some(offset_us);
     }
 }
 

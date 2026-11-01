@@ -66,17 +66,25 @@ pub fn estimate_offset(t0: u64, t1: u64, t2: u64, t3: u64) -> (i64, u64) {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemClock;
 
+impl SystemClock {
+    /// 进程内**唯一**的零点。
+    ///
+    /// `now_ms` 与 `now_us` 必须共用同一个零点 ——
+    /// 否则两个口径会差几微秒，破坏「微秒 = 毫秒 × 1000」的一致性，
+    /// 也会让时钟偏移估计带上一个恒定偏差。
+    fn start() -> Instant {
+        static START: OnceLock<Instant> = OnceLock::new();
+        *START.get_or_init(Instant::now)
+    }
+}
+
 impl Clock for SystemClock {
     fn now_ms(&self) -> u64 {
-        static START: OnceLock<Instant> = OnceLock::new();
-        let start = START.get_or_init(Instant::now);
-        start.elapsed().as_millis() as u64
+        SystemClock::start().elapsed().as_millis() as u64
     }
 
     fn now_us(&self) -> u64 {
-        static START: OnceLock<Instant> = OnceLock::new();
-        let start = START.get_or_init(Instant::now);
-        start.elapsed().as_micros() as u64
+        SystemClock::start().elapsed().as_micros() as u64
     }
 }
 
