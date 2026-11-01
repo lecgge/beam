@@ -301,6 +301,7 @@ impl SwapChain {
         };
 
         let mut cleared = true;
+        let mut mismatch: Option<String> = None;
         let raw = source_handle as *mut core::ffi::c_void;
         if let Some(source) = borrow_texture(&raw) {
             let (desc, same_device) = self.describe_source(source);
@@ -335,6 +336,19 @@ impl SwapChain {
                     same_device,
                     "解码纹理与交换链不匹配,本帧改为清屏"
                 );
+                // **不静默降级**：早先这里只清屏然后照样走完呈现路径，
+                // 不报错 ⇒ 上层以为「在串流」，用户看到的是空白窗口。
+                // 现在如实报错（E10015），让上层能告诉用户「画面上不来」。
+                mismatch = Some(format!(
+                    "解码纹理 {}x{} (格式 0x{:08x}, 同设备={}) 与交换链 {}x{} (格式 0x{:08x}) 不匹配",
+                    desc.Width,
+                    desc.Height,
+                    desc.Format.0,
+                    same_device,
+                    self.width,
+                    self.height,
+                    self.format.0,
+                ));
             }
         }
 
@@ -349,6 +363,10 @@ impl SwapChain {
                     .ClearRenderTargetView(&rtv, &[0.0, 0.0, 0.0, 1.0])
             };
             self.info.cleared_presents += 1;
+        }
+        if let Some(reason) = mismatch {
+            // 画面搬不上去 ⇒ 如实报错，不让上层以为「在串流」。
+            return Err(RenderError::SourceMismatch { reason });
         }
         Ok(())
     }

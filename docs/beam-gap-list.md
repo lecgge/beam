@@ -414,6 +414,18 @@
 | Android 端的 `plat` 只到发现结果，未进信任库 | Android 的 `core-data` 信任库存的是 `Peer.platform`，配对成功后由 `PairingViewModel` 写入；但 Android 侧的配对走扫码（§3.3 载荷不带平台）⇒ 落库的仍是「未知平台」。要补齐需要让 Android 客户端把发现阶段拿到的 `plat` 关联到信任记录 | 需后续批次 |
 | E13xxx/E14xxx/E15xxx 仍未写进设计文档 | B16 把 E16xxx（log）写进了 §3.15，但 perf / ffi / gamestream 三段的编号归属仍只在代码里。它们与 E12xxx 的归属一样存在撞号风险，建议下一批一并写进 §3.13 / §3.12 | 需后续批次 |
 
+| B17 | 2026-11-01 | 第十七批：客户端「解码 + 上屏」首次真机验证，定位并暴露了一个假成功 | crates/beam-render / crates/beam-client（examples）/ apps/desktop（前端文案表）/ docs（设计文档 §3.10） | 已完成 | cargo fmt --all --check exit 0；cargo clippy --workspace --all-targets -- -D warnings exit 0 / 0 warning；cargo clippy -p beam-render --features d3d11 --all-targets -- -D warnings exit 0 / 0 warning；cargo test --workspace exit 0（48 套件 / 466 passed / 0 failed / 9 ignored）；cargo test -p beam-render exit 0；npm --prefix apps/desktop run build exit 0（typecheck + vite build）；**真机实测**（RTX 3070 / 驱动 596.49 / 1920×1080 交互式桌面，FFMPEG_DIR + LIBCLANG_PATH 已设）：`cargo run -p beam-client --example present_smoke --features video --release` —— 如实报 FAIL 并给出完整对照实验表（420Opaque / NV12 三种高度建链全灭；BGRA 三种高度均「真搬 0 次 / 降级 1 次，源格式 0x67」）；`cargo run -p beam-decode --example d3d11va_decode_smoke --features ffmpeg --release` exit 0（硬解本身正常：9 帧 1920×1080）；设计文档 §3.10 已按实测结论改写（CRLF + UTF-8 无 BOM 保持不变） |
+
+- **B17（主会话自办；一个 worker 因 Token Plan 配额耗尽未能开工）** — 写入范围：`crates/beam-render/**`、`crates/beam-client/examples/**`、`crates/beam-client/Cargo.toml`、`apps/desktop/src/i18n/**`、`docs/**`；覆盖条目 ST-07
+
+**B17 追加项（审计中顺带发现，不在原 551 条内）**
+
+| 项 | 说明 | 归属 |
+|---|---|---|
+| 4:2:0 → BGRA 的转换路径未实现（画面仍然上不了屏） | 本批用对照实验证明了**零拷贝不可行**（flip-model 交换链不接受 4:2:0 视频格式；VideoProcessor 在本机建不出输入视图），因此需要 PSV + 像素着色器把 DXGI_FORMAT_420Opaque 双平面纹理转成 BGRA 再写入后备缓冲。两个待查的技术点：① D3D11 的 shader 不能直接采样多平面纹理，必须走 Pixel Shader View，而 PSV 的 plane slice 语义在 420Opaque 下需要实测；② 纹理高 1152 但可见高 1080，多出的 72 行是 padding，采样必须按可见高度截断 | 下一批 |
+| V-13（主机侧丢帧统计接入 host 编排）仍未做 | 已定位：`crates/beam-session/src/host.rs` 的 `SessionCounters::dropped_frames` 恒为 0；而抓屏单槽（`crates/beam-capture/src/slot.rs`）覆盖旧帧时**根本没有计数**，客户端侧渲染单槽的丢帧（`crates/beam-decode/src/slot.rs` 的 `FrameSlot::dropped()`）也没进会话汇总。补齐需要给 `CaptureSource` / `FramePipeline` 加取丢帧的接口 | 下一批 |
+| 整链回环（抓屏→NVENC→QUIC→硬解→上屏）尚未跑通 | `crates/beam-host/examples/host_loopback.rs` 的客户端只数帧、不解码不上屏。整链示例要等上屏转换路径落地才能验证「画面真的出现在窗口里」 | 下一批 |
+
 ### 已裁决事项
 
 | # | 议题 | 裁决 | 裁决日期 | 说明 | 解锁范围 |
@@ -478,6 +490,7 @@
 | 2026-11-01 | 真 bug：mDNS 服务类型少了结尾的点 ⇒ 广播根本注册不上去 | `SERVICE_TYPE = "_beam._udp.local"`，而 `mdns-sd` 的 `register` / `browse` 都要求服务类型以 `._tcp.local.` / `._udp.local.` **结尾**（带点），否则直接返回 `RegisterFailed`。⇒ 主机广播不出去、客户端浏览不到，**局域网发现完全不可用**。改法：保留文档口径的 `SERVICE_TYPE`，另加 `SERVICE_TYPE_FQDN`（带点）供注册与浏览使用 | 真机回环里客户端广播成功、主机浏览到了它（名字 + 指纹前 8 位）；加单测钉住 FQDN 形式 |
 | 2026-11-01 | 真机回环（host_loopback）此前**从未跑通**，卡在三个地方 | ① 先 connect 后 accept：quinn 的握手要靠 accept 被推进，没人推进 ⇒ 客户端超时、主机看不到客户端证书 ⇒ 信任闸门无从记录指纹；② 最小客户端不发 Feedback ⇒ 主机 3 s 停滞判定触发；③ 客户端时限短于主机 ⇒ 客户端先断开，主机按正常断开语义进 Error 态。三个都在**示例**里（产品代码没问题） | 本机真机整链首次跑通：双方到 Streaming，客户端收到 241 帧真实画面 |
 | 2026-11-01 | S1 的 `plat` 字段与 S11 的 PIN 参数此前都是「文档写了、代码没接」 | ① `plat` 只在 §3.4 的文字里，beam-discovery 的 TXT 与信任库写入路径都没接上它 —— 发现到的主机恒显示「未知平台」；Android 的 NsdManager 兜底扫描读的键名（`platform`）与实际广播的键名（`plat`）对不上，永远拿不到平台。② 桌面端 `connect(host_id)` 根本没有 PIN 参数 ⇒ 前端 4 位 PIN 输入框是纯装饰，填对填错都能连上。③ S5 裁决的前提被证伪：`E12xxx` 并非空闲，`beam-log` 已占用 `E12001`（日志初始化失败） | S1：`plat` 从 mDNS TXT 贯通到 beam-discovery → beam-ffi → Android / 桌面端 → 信任库，并修掉 Android 兜底扫描的键名 bug。S5：外壳错误迁到 `E12xxx`、`E11xxx` 归配置层独占、日志层迁到 `E16xxx`，一个码只对应一种含义。S11：`connect(host_id, pin)` 补上 PIN，Rust 侧做格式校验与尝试预算（3 次 / 锁 60 s） |
+| 2026-11-01 | Windows 客户端的「解码 → 上屏」链路此前是**假成功** | B10 把 D3D11VA 硬解与原生窗口上屏的代码路径搭好了，但**从未在真机跑过**。B17 第一次真机跑就发现：解码纹理是 DXGI_FORMAT_420Opaque / 1920×1152（对齐后的 coded height），交换链是 B8G8R8A8_UNORM / 1920×1080 —— 格式与尺寸双双不匹配，于是 `present` 每一帧都走「清屏 + 照样走完整条呈现路径」的静默降级：**不报错、不警告**，会话状态正常，用户看到的是空白窗口。之前的回环验证只统计「收到的帧数」，分不清「画面上屏了」与「画面被丢在地上」 | ① `beam_render::PresentInfo` 把「真的搬纹理」与「降级清屏」分开计数，并报出两边的真实格式与尺寸；② 新增 `present_smoke` 验收门禁（它现在如实报 FAIL）；③ 交换链格式改为可选并给视频格式单开路径；④ 用对照实验**实测排除**了零拷贝（420Opaque/NV12 交换链建不出来，VideoProcessor 建不出输入视图）；⑤ 静默降级改成如实报错 E10015；⑥ 结论写进设计文档 §3.10 |
 
 ---
 

@@ -213,8 +213,10 @@ fn main() {
             let info = r.present_info();
             let verdict = if info.textured_presents > 0 {
                 "零拷贝成功"
-            } else {
+            } else if ok {
                 "没搬上纹理（降级）"
+            } else {
+                "没搬上纹理（已如实报错 E10015）"
             };
             println!(
                 "  {:<28} {}x{}: {verdict}（真搬 {} 次 / 降级 {} 次，源格式 0x{:08x}）",
@@ -234,6 +236,12 @@ fn main() {
     let Some((win_fmt, win_height)) = winner else {
         println!();
         println!("RESULT: FAIL —— 没有任何一个交换链方案能把解码纹理零拷贝搬上屏");
+        println!(
+            "  原因: D3D11VA 视频解码的原生输出是 DXGI_FORMAT_420Opaque (4:2:0 双平面),\n\
+             而 flip-model 交换链不接受 4:2:0 视频格式; BGRA 交换链又与它格式不同。\n\
+             => 零拷贝不可行, 需要先做 4:2:0 -> BGRA 的格式转换 (PSV + 像素着色器)。\n\
+             => 详见 crates/beam-render 的 SwapChainFormat / PresentInfo 文档。"
+        );
         std::process::exit(1);
     };
     println!();

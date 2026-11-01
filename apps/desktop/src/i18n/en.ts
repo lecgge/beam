@@ -280,6 +280,7 @@ export const en: Dictionary = {
     E10012: 'The swap chain could not be created, so frames cannot be presented; try another display or restart Beam',
     E10013: 'A frame missed its presentation deadline and was dropped; expect stutter',
     E10014: 'The rendering backend is not compiled into this build, so the picture cannot be shown',
+    E10015: 'The decoded picture and the swap chain formats do not match, so it cannot be presented (this build has no 4:2:0 to BGRA conversion path)',
     // E11xxx config (beam-config §3.14 owns the segment exclusively)
     E11001: 'The config file could not be parsed; check its format',
     E11002: 'A setting value is invalid; correct it and try again',
