@@ -85,6 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         fingerprint: client_identity.fingerprint().to_hex(),
         port: 0,
         address: Ipv4Addr::LOCALHOST,
+        platform: "windows".to_string(),
     })?;
     println!("      客户端广播名 = {}", advertiser.fullname());
 

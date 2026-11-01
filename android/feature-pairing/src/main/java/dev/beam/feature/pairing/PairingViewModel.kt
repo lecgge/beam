@@ -111,6 +111,8 @@ class PairingViewModel(
             name = parsed.address,
             address = parsed.address,
             fingerprint = parsed.fingerprint,
+            // 二维码载荷（§3.3）不带平台字段 ⇒ 如实记「未知平台」。
+            platform = Peer.PLATFORM_UNKNOWN,
             trusted = false,
         )
         _state.update { it.copy(peer = peer, phase = PairingPhase.PAIRING, error = null) }

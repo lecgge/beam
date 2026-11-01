@@ -37,6 +37,8 @@ object ManualAddress {
             address = address,
             // 手动输入的主机没有指纹；配对成功后由 Rust 侧带回固定指纹。
             fingerprint = "",
+            // 手动输入无从得知平台（没走发现），如实记「未知平台」。
+            platform = Peer.PLATFORM_UNKNOWN,
             trusted = false,
         )
     }

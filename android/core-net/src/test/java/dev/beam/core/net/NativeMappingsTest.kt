@@ -192,6 +192,7 @@ class NativeMappingsTest {
                 port = 4827u,
                 address = "192.168.1.10",
                 fullname = "beam-1._beam._udp.local",
+                platform = Peer.PLATFORM_WINDOWS,
             ),
         )
 
@@ -200,6 +201,45 @@ class NativeMappingsTest {
         assertEquals("客厅主机", host.peer.name)
         assertEquals("ab12cd34", host.peer.fingerprint)
         assertEquals(DiscoverySource.MDNS, host.discoveredBy)
+    }
+
+    /**
+     * S1：发现结果的平台必须来自 mDNS TXT 的 `plat`，
+     * 不能硬编码成 windows —— 对端可能是 Android 主机。
+     */
+    @Test
+    fun `发现结果如实带上对端广播的平台`() {
+        val host = NativeMappings.mapDiscoveredHost(
+            GenHost(
+                id = "host-android",
+                name = "手机",
+                version = "0.1.0",
+                fingerprint = "cd34ef56",
+                port = 4827u,
+                address = "192.168.1.20",
+                fullname = "phone._beam._udp.local",
+                platform = Peer.PLATFORM_ANDROID,
+            ),
+        )
+        assertEquals(Peer.PLATFORM_ANDROID, host.peer.platform)
+    }
+
+    /** S1：对端没广播 `plat` 时如实记「未知平台」，不猜。 */
+    @Test
+    fun `发现结果在缺少平台字段时记为未知平台`() {
+        val host = NativeMappings.mapDiscoveredHost(
+            GenHost(
+                id = "host-old",
+                name = "老版本主机",
+                version = "0.0.9",
+                fingerprint = "",
+                port = 4827u,
+                address = "192.168.1.30",
+                fullname = "",
+                platform = "",
+            ),
+        )
+        assertEquals(Peer.PLATFORM_UNKNOWN, host.peer.platform)
     }
 
     @Test
@@ -213,6 +253,7 @@ class NativeMappingsTest {
                 port = 4827u,
                 address = "192.168.1.11:9000",
                 fullname = "",
+                platform = Peer.PLATFORM_UNKNOWN,
             ),
         )
         assertEquals("192.168.1.11:9000", host.peer.address)

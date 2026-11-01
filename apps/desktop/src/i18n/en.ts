@@ -280,12 +280,15 @@ export const en: Dictionary = {
     E10012: 'The swap chain could not be created, so frames cannot be presented; try another display or restart Beam',
     E10013: 'A frame missed its presentation deadline and was dropped; expect stutter',
     E10014: 'The rendering backend is not compiled into this build, so the picture cannot be shown',
-    // E11xxx config (beam-config §3.14 shares the segment with the host app)
-    E11001: 'A setting value is invalid, or the config file could not be parsed',
-    E11002: 'The config file could not be read or written, or a setting value is invalid',
-    E11003: 'Performance statistics are available in Debug builds only; an unavailable config store is reported here too, so check disk permissions',
-    // E12xxx shared by the log crate and the host app
-    E12001: 'Unknown command; a failed log initialization is reported here too',
+    // E11xxx config (beam-config §3.14 owns the segment exclusively)
+    E11001: 'The config file could not be parsed; check its format',
+    E11002: 'A setting value is invalid; correct it and try again',
+    E11003: 'The config file could not be read or written; check disk permissions and the path',
+    // E12xxx host app (§3.11 host-app)
+    E12001: 'Unknown command',
+    E12002: 'A setting value is invalid (the resolution, frame rate or encoder is out of range)',
+    E12003: 'A local file could not be read or written; check disk permissions and the path',
+    E12004: 'Performance statistics are available in Debug builds only; use a Debug build to collect them',
     // E13xxx perf (beam-perf §3.13)
     E13001: 'The performance-stats module is disabled, so no performance data can be collected',
     E13002: 'Exporting the performance data failed; check that the target path is writable',
@@ -298,6 +301,8 @@ export const en: Dictionary = {
     // E15xxx gamestream (beam-gamestream)
     E15001: 'The GameStream protocol version is incompatible; upgrade the client or use native Beam',
     E15002: 'There is no capability overlap with the GameStream host, so streaming is impossible',
+    // E16xxx log (beam-log §3.15)
+    E16001: 'Log initialization failed; check the disk permissions of the log directory',
     // fallback
     E9999: 'An unknown error occurred; check the logs for details',
   },

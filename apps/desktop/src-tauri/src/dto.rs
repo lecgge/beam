@@ -172,6 +172,8 @@ pub struct DiscoveredHost {
     pub version: String,
     pub gpu: Option<String>,
     pub online: bool,
+    /// 对端平台（§3.4 mDNS TXT 的 `plat`；缺失时为「未知平台」）。
+    pub platform: String,
 }
 
 // ---------------------------------------------------------------------------

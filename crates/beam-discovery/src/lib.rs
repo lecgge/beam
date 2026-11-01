@@ -44,7 +44,9 @@ pub mod records;
 
 pub use error::{message, DiscoveryError};
 pub use mdns::{Advertiser, Browser, DiscoveryEvent};
-pub use records::{host_from_txt, DiscoveredHost, HostInfo, SERVICE_TYPE};
+pub use records::{
+    host_from_txt, DiscoveredHost, HostInfo, SERVICE_TYPE, SERVICE_TYPE_FQDN, UNKNOWN_PLATFORM,
+};
 
 /// TXT 字段名（§3.4）。
 pub use records::txt;

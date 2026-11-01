@@ -160,7 +160,7 @@ pub struct CapturedFrame { pub tex: ID3D11Texture2D, pub ts_us: u64, pub dirty: 
 - 职责:UI、托盘、通知;只通过 commands/events 与 Rust 交互;视频帧不经 IPC。
 - Commands:`get_host_status`、`start_hosting(opts)`、`stop_hosting`、`get_pairing_code`、`approve_pair(id)`、`reject_pair(id)`、`remove_device(id)`、`list_hosts`、`connect(host_id)`、`disconnect`、`get_settings`、`set_settings(patch)`;debug 下另有 `perf_snapshot`、`perf_export(format)`。
 - Events:`host://state-changed`、`pair://request`、`pair://code-rotated`、`discovery://updated`、`session://stats`(500 ms)、`session://reconnecting`、`session://disconnected`、`perf://tick`(debug,250 ms)。
-- 错误:command 返回 `{code:"E2001", message, retryable}`,前端按 code 显示中文文案。里程碑:MVP。
+- 错误:command 返回 `{code:"E2001", message, retryable}`,前端按 code 显示中文文案。**应用外壳自有错误段为 `E12xxx`**(`12001` 未知命令、`12002` 设置项不合法、`12003` 本地文件读写失败、`12004` perf-stats 不可用);`E11xxx` **只**归 `beam-config`(§3.14),`E13xxx`/`E14xxx`/`E15xxx`/`E16xxx` 分别归 perf / ffi / gamestream / log —— 一个码只对应一种含义。里程碑:MVP。
 
 ### 3.12 Android 模块
 | 模块 | 职责 | 对外接口(Kotlin) | 禁止 |
@@ -188,10 +188,10 @@ pub struct CapturedFrame { pub tex: ID3D11Texture2D, pub ts_us: u64, pub dirty: 
 
 ### 3.14 beam-config / storage
 - 职责:配置模型、校验、持久化(Windows `%APPDATA%/Beam/config.toml`,信任库 `trust.json`,私钥 DPAPI 加密);Android 用 DataStore + Keystore。
-- 优先级:命令行/环境变量 > 会话内临时覆盖 > 用户配置文件 > 设备能力推导默认值 > 内置默认。错误码 `E11xxx`。里程碑:MVP。
+- 优先级:命令行/环境变量 > 会话内临时覆盖 > 用户配置文件 > 设备能力推导默认值 > 内置默认。错误码 `E11xxx`(`11001` 解析失败、`11002` 校验失败、`11003` 存储不可用),该段**由本层独占** —— 应用外壳的自有错误改用 `E12xxx`(§3.11)。里程碑:MVP。
 
 ### 3.15 beam-log
-- tracing + tracing-subscriber,JSON 文件轮转(7 天/50 MB);字段规范:`session_id`、`peer`、`stage`、`code`;禁止记录 PIN、私钥、token;热路径只允许 `trace!` 且默认关闭。Android 侧 Logcat + 文件。里程碑:MVP。
+- tracing + tracing-subscriber,JSON 文件轮转(7 天/50 MB);字段规范:`session_id`、`peer`、`stage`、`code`;禁止记录 PIN、私钥、token;热路径只允许 `trace!` 且默认关闭。Android 侧 Logcat + 文件。错误码段 `E16xxx`(`16001` 初始化失败) —— 该段与 `E13xxx` perf / `E14xxx` ffi / `E15xxx` gamestream 并列,**不与 `E12xxx` 应用外壳共用**(同一个码两种含义会让前端按 `code` 查文案时无法定位)。里程碑:MVP。
 
 ## 4. 依赖与分层
 ```mermaid

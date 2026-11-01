@@ -528,7 +528,7 @@ impl BeamService for LocalService {
         if let Some(res) = &patch.resolution {
             if !RESOLUTIONS.contains(&res.as_str()) {
                 return Err(BeamError::invalid(
-                    E_CONFIG_INVALID,
+                    E_SHELL_CONFIG_INVALID,
                     format!("不支持的分辨率 {res}"),
                 ));
             }
@@ -536,7 +536,7 @@ impl BeamService for LocalService {
         if let Some(fps) = patch.fps {
             if !FRAMERATES.contains(&fps) {
                 return Err(BeamError::invalid(
-                    E_CONFIG_INVALID,
+                    E_SHELL_CONFIG_INVALID,
                     format!("不支持的帧率 {fps}"),
                 ));
             }
@@ -544,7 +544,7 @@ impl BeamService for LocalService {
         if let Some(codec) = &patch.codec {
             if !CODECS.contains(&codec.as_str()) {
                 return Err(BeamError::invalid(
-                    E_CONFIG_INVALID,
+                    E_SHELL_CONFIG_INVALID,
                     format!("不支持的编码格式 {codec}"),
                 ));
             }
@@ -552,7 +552,7 @@ impl BeamService for LocalService {
         if let Some(enc) = &patch.encoder {
             if !ENCODERS.contains(&enc.as_str()) {
                 return Err(BeamError::invalid(
-                    E_CONFIG_INVALID,
+                    E_SHELL_CONFIG_INVALID,
                     format!("不支持的编码器 {enc}"),
                 ));
             }
@@ -560,7 +560,7 @@ impl BeamService for LocalService {
         if let Some(ratio) = patch.fec_ratio {
             if !(0.0..=0.5).contains(&ratio) {
                 return Err(BeamError::invalid(
-                    E_CONFIG_INVALID,
+                    E_SHELL_CONFIG_INVALID,
                     format!("FEC 冗余 {ratio} 超出 0.0–0.5"),
                 ));
             }
@@ -569,7 +569,7 @@ impl BeamService for LocalService {
             // u16 上界 65535 由类型保证,这里只需挡掉保留端口以下的值。
             if port < 1024 {
                 return Err(BeamError::invalid(
-                    E_CONFIG_INVALID,
+                    E_SHELL_CONFIG_INVALID,
                     format!("端口 {port} 非法"),
                 ));
             }
@@ -707,14 +707,14 @@ impl BeamService for LocalService {
             "json" => ("json", perf_json(&snap)),
             other => {
                 return Err(BeamError::invalid(
-                    E_CONFIG_INVALID,
+                    E_SHELL_CONFIG_INVALID,
                     format!("不支持的导出格式 {other},仅支持 csv / json"),
                 ))
             }
         };
         let path = dir.join(format!("beam-perf-{stamp}.{ext}"));
         std::fs::write(&path, body.as_bytes())
-            .map_err(|e| BeamError::new(E_CONFIG_IO, format!("写入导出文件失败: {e}"), false))?;
+            .map_err(|e| BeamError::new(E_SHELL_IO, format!("写入导出文件失败: {e}"), false))?;
         Ok(PerfExportResult {
             format: format.to_string(),
             path: path.to_string_lossy().to_string(),
@@ -952,6 +952,7 @@ fn seed_discovered() -> Vec<DiscoveredHost> {
             version: "0.1.0".into(),
             gpu: Some("RTX 4070".into()),
             online: true,
+            platform: "Windows 11".into(),
         },
         DiscoveredHost {
             id: "host-study-laptop".into(),
@@ -962,6 +963,7 @@ fn seed_discovered() -> Vec<DiscoveredHost> {
             version: "0.1.0".into(),
             gpu: None,
             online: false,
+            platform: "Windows 11".into(),
         },
     ]
 }
@@ -982,7 +984,7 @@ fn export_dir() -> Result<std::path::PathBuf, BeamError> {
         .unwrap_or_else(|_| std::env::temp_dir());
     let dir = base.join("Beam").join("exports");
     std::fs::create_dir_all(&dir)
-        .map_err(|e| BeamError::new(E_CONFIG_IO, format!("创建导出目录失败: {e}"), false))?;
+        .map_err(|e| BeamError::new(E_SHELL_IO, format!("创建导出目录失败: {e}"), false))?;
     Ok(dir)
 }
 

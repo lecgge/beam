@@ -86,7 +86,10 @@ class NsdHostScanner(
                     name = attr("name") ?: info.serviceName,
                     address = "${host.hostAddress}:${info.port}",
                     fingerprint = attr("fp") ?: "",
-                    platform = attr("platform") ?: Peer.PLATFORM_WINDOWS,
+                    // 平台字段名是 `plat`（§3.4 mDNS TXT，S1 裁决）。
+                    // 之前这里读的是 `platform`，与实际广播的键对不上 ⇒
+                    // 兜底扫描永远拿不到平台，只能落到默认值。
+                    platform = attr("plat") ?: Peer.PLATFORM_UNKNOWN,
                 )
                 onHost(
                     DiscoveredHost(

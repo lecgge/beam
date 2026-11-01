@@ -365,8 +365,10 @@ impl BeamService for CrateService {
         }
         let resolved = merge(&layers);
         validate(&resolved).map_err(|err| {
+            // 校验失败来自 `beam-config`(§3.14),**透传它自己的码**(E11002),
+            // 而不是外壳的码 —— `E11xxx` 归配置层独占(S5 裁决)。
             BeamError::invalid(
-                E_CONFIG_INVALID,
+                &err.code_str(),
                 format!("配置校验失败 {}: {err}", err.code_str()),
             )
         })?;
@@ -387,6 +389,8 @@ impl BeamService for CrateService {
             .and_then(|s| s.parse().ok())
             .unwrap_or(Ipv4Addr::UNSPECIFIED);
         let info = HostInfo {
+            // 桌面端是 Windows 主机/客户端，广播自己的平台（S1 裁决）。
+            platform: "windows".to_string(),
             id: inner.identity.fingerprint().short_hex(),
             name: inner.host.device_name.clone(),
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -594,6 +598,7 @@ impl BeamService for CrateService {
                 version: h.version.clone(),
                 gpu: None,
                 online: true,
+                platform: h.platform.clone(),
             })
             .collect()
     }
@@ -793,7 +798,7 @@ impl BeamService for CrateService {
         let mut layers = inner.layers.clone();
         if let Some(res) = &patch.resolution {
             let (w, h) = resolution_dims(res).ok_or_else(|| {
-                BeamError::invalid(E_CONFIG_INVALID, format!("不支持的分辨率 {res}"))
+                BeamError::invalid(E_SHELL_CONFIG_INVALID, format!("不支持的分辨率 {res}"))
             })?;
             layers.file.video.width = Some(w);
             layers.file.video.height = Some(h);
@@ -852,8 +857,10 @@ impl BeamService for CrateService {
 
         let resolved = merge(&layers);
         validate(&resolved).map_err(|err| {
+            // 校验失败来自 `beam-config`(§3.14),**透传它自己的码**(E11002),
+            // 而不是外壳的码 —— `E11xxx` 归配置层独占(S5 裁决)。
             BeamError::invalid(
-                E_CONFIG_INVALID,
+                &err.code_str(),
                 format!("配置校验失败 {}: {err}", err.code_str()),
             )
         })?;
@@ -892,8 +899,9 @@ impl BeamService for CrateService {
         if let Some(path) = inner.config_path.clone() {
             let store = TomlFileStore::new(path);
             save_file_layer(&store, &layers).map_err(|err| {
+                // 写配置失败来自 `beam-config` 的存储层 ⇒ 透传它的码(E11003)。
                 BeamError::new(
-                    E_CONFIG_IO,
+                    &err.code_str(),
                     format!("写入配置失败 {}: {err}", err.code_str()),
                     false,
                 )
@@ -901,13 +909,13 @@ impl BeamService for CrateService {
         }
         if let Some(path) = inner.desktop_path.clone() {
             let text = serde_json::to_string_pretty(&ui).map_err(|err| {
-                BeamError::new(E_CONFIG_IO, format!("序列化桌面设置失败: {err}"), false)
+                BeamError::new(E_SHELL_IO, format!("序列化桌面设置失败: {err}"), false)
             })?;
             if let Some(dir) = path.parent() {
                 let _ = std::fs::create_dir_all(dir);
             }
             std::fs::write(&path, text).map_err(|err| {
-                BeamError::new(E_CONFIG_IO, format!("写入桌面设置失败: {err}"), false)
+                BeamError::new(E_SHELL_IO, format!("写入桌面设置失败: {err}"), false)
             })?;
         }
 
@@ -1178,7 +1186,7 @@ impl CrateService {
             .save(&path)
             .map_err(|err| {
                 BeamError::new(
-                    E_CONFIG_IO,
+                    &err.code_str(),
                     format!("写入信任库失败 {}: {err}", err.code_str()),
                     false,
                 )

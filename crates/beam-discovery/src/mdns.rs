@@ -204,6 +204,7 @@ mod tests {
     #[test]
     fn advertiser_rejects_empty_id() {
         let info = HostInfo {
+            platform: "windows".to_string(),
             id: String::new(),
             name: "n".into(),
             version: "v".into(),

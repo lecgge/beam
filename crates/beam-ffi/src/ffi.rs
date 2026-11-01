@@ -292,6 +292,10 @@ pub struct DiscoveredHost {
     pub address: String,
     /// mDNS 全名。
     pub fullname: String,
+    /// 对端平台（§3.4 mDNS TXT 的 `plat` 字段）。
+    ///
+    /// 对端没广播这个字段时为「未知平台」，不是空串。
+    pub platform: String,
 }
 
 impl DiscoveredHost {
@@ -305,6 +309,7 @@ impl DiscoveredHost {
             port: host.port,
             address: host.address.to_string(),
             fullname: host.fullname.clone(),
+            platform: host.platform.clone(),
         }
     }
 }
@@ -842,5 +847,27 @@ mod tests {
             SessionState::from_core(CoreSessionState::Error),
             SessionState::Error
         );
+    }
+
+    /// S1：发现记录的**平台**必须原样带到导出面。
+    ///
+    /// 少了这一步，Android 侧拿到的发现结果就没有平台，
+    /// 信任库里的 `platform` 又会退回「未知平台」。
+    #[test]
+    fn discovered_host_carries_platform() {
+        let core = CoreDiscoveredHost {
+            id: "host-1".into(),
+            name: "客厅主机".into(),
+            version: "0.1.0".into(),
+            fingerprint: "ab12cd34".into(),
+            port: 4827,
+            address: std::net::Ipv4Addr::new(192, 168, 1, 10),
+            fullname: "host-1._beam._udp.local.".into(),
+            platform: "windows".into(),
+        };
+        let host = DiscoveredHost::from_core(&core);
+        assert_eq!(host.platform, "windows");
+        assert_eq!(host.address, "192.168.1.10");
+        assert_eq!(host.port, 4827);
     }
 }

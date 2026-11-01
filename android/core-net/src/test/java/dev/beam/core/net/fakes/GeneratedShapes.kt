@@ -87,6 +87,8 @@ data class DiscoveredHost(
     val port: kotlin.UInt,
     val address: String,
     val fullname: String,
+    /** 平台（§3.4 mDNS TXT 的 `plat`）。 */
+    val platform: String,
 )
 
 /** 主机信息。 */

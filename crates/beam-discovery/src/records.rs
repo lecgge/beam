@@ -7,6 +7,9 @@ use std::net::Ipv4Addr;
 
 use serde::{Deserialize, Serialize};
 
+/// 对端没广播平台时的占位值（S1 裁决）。
+pub const UNKNOWN_PLATFORM: &str = "未知平台";
+
 /// mDNS 服务类型（§3.4）。
 ///
 /// 这是**文档口径**的名字（§3.4 写的就是 `_beam._udp.local`）。
@@ -30,8 +33,14 @@ pub mod txt {
     pub const NAME: &str = "name";
     /// 协议 / 软件版本。
     pub const VERSION: &str = "ver";
-    /// 证书指纹前 8 位。
+    /// 指纹前 8 位。
     pub const FINGERPRINT: &str = "fp";
+    /// 平台标识（追加字段，见 S1 裁决）。
+    ///
+    /// 广播自己的平台（`windows` / `android` …），
+    /// 让信任库的 `TrustedPeer.platform` 不再恒为「未知平台」。
+    /// 对端不带这个字段时按「未知平台」处理，不影响发现。
+    pub const PLATFORM: &str = "plat";
     /// 服务端口。
     pub const PORT: &str = "port";
 }
@@ -51,6 +60,8 @@ pub struct HostInfo {
     pub port: u16,
     /// 广播地址。
     pub address: Ipv4Addr,
+    /// 本机平台标识（§3.4 TXT 的 `plat` 字段）。
+    pub platform: String,
 }
 
 impl HostInfo {
@@ -66,6 +77,7 @@ impl HostInfo {
                 self.fingerprint.chars().take(8).collect(),
             ),
             (txt::PORT.to_string(), self.port.to_string()),
+            (txt::PLATFORM.to_string(), self.platform.clone()),
         ]
     }
 }
@@ -87,6 +99,8 @@ pub struct DiscoveredHost {
     pub address: Ipv4Addr,
     /// mDNS 全名。
     pub fullname: String,
+    /// 对端平台（TXT 的 `plat` 字段；缺失时为「未知平台」）。
+    pub platform: String,
 }
 
 /// 从 TXT 字段还原主机信息。
@@ -111,6 +125,10 @@ pub fn host_from_txt(
         port: txt_port,
         address,
         fullname: fullname.to_string(),
+        platform: match get(txt::PLATFORM) {
+            v if v.is_empty() => UNKNOWN_PLATFORM.to_string(),
+            v => v,
+        },
     }
 }
 
@@ -127,6 +145,7 @@ mod tests {
             fingerprint: "0123456789abcdef".into(),
             port: 4827,
             address: Ipv4Addr::new(192, 168, 1, 10),
+            platform: "windows".to_string(),
         };
         let fields = info.to_txt();
         let get = |k: &str| {
@@ -140,6 +159,7 @@ mod tests {
         assert_eq!(get(txt::NAME), "客厅电脑");
         assert_eq!(get(txt::VERSION), "0.1.0");
         assert_eq!(get(txt::PORT), "4827");
+        assert_eq!(get(txt::PLATFORM), "windows");
     }
 
     #[test]
@@ -151,6 +171,7 @@ mod tests {
             fingerprint: "0123456789abcdef".into(),
             port: 1,
             address: Ipv4Addr::LOCALHOST,
+            platform: "windows".to_string(),
         };
         let fields = info.to_txt();
         let fp = fields
@@ -170,11 +191,13 @@ mod tests {
             fingerprint: "0123456789abcdef".into(),
             port: 4827,
             address: Ipv4Addr::new(10, 0, 0, 5),
+            platform: "windows".to_string(),
         };
         let host = host_from_txt("n._beam._udp.local.", info.address, 4827, &info.to_txt());
         assert_eq!(host.id, "abc");
         assert_eq!(host.port, 4827);
         assert_eq!(host.fingerprint, "01234567");
+        assert_eq!(host.platform, "windows");
     }
 
     /// `mdns-sd` 的 `register` / `browse` 都要求服务类型以
@@ -186,5 +209,28 @@ mod tests {
     fn service_type_fqdn_is_usable_by_mdns_sd() {
         assert!(SERVICE_TYPE_FQDN.ends_with("._udp.local."));
         assert_eq!(SERVICE_TYPE_FQDN, format!("{SERVICE_TYPE}."));
+    }
+
+    /// S1：`plat` 是**追加**字段 —— 对端（老版本）不带它时，
+    /// 平台按「未知平台」处理，**发现本身不能受影响**。
+    #[test]
+    fn missing_platform_falls_back_to_unknown() {
+        let txt = vec![
+            (txt::ID.to_string(), "abc".to_string()),
+            (txt::NAME.to_string(), "n".to_string()),
+            (txt::VERSION.to_string(), "v".to_string()),
+            (txt::FINGERPRINT.to_string(), "01234567".to_string()),
+            (txt::PORT.to_string(), "4827".to_string()),
+        ];
+        let host = host_from_txt(
+            "n._beam._udp.local.",
+            Ipv4Addr::new(10, 0, 0, 5),
+            4827,
+            &txt,
+        );
+        assert_eq!(host.platform, UNKNOWN_PLATFORM);
+        // 其余字段照常解析 —— 少一个字段不能让主机消失。
+        assert_eq!(host.id, "abc");
+        assert_eq!(host.port, 4827);
     }
 }

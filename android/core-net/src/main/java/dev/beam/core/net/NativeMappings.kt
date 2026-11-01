@@ -210,14 +210,22 @@ internal object NativeMappings {
         )
     }
 
-    /** 把 uniffi 的 `Peer` 记录映射成 [Peer]。 */
+    /**
+     * 把 uniffi 的 `Peer` 记录映射成 [Peer]。
+     *
+     * 平台字段：Rust 的 `PeerInfo` 目前没有平台字段（§3.3 的二维码载荷也不带），
+     * 所以这里读到空串时如实记「未知平台」（S1 裁决），不猜成 windows。
+     *
+     * PIN 配对走的是 [mapPairResult] 的「保留请求方 Peer」分支，
+     * 平台来自**发现**阶段拿到的 `plat`，因此 PIN 路径的平台是真实的。
+     */
     fun mapPeer(raw: Any): Peer = Peer(
         id = Reflect.readString(raw, "id") ?: "",
         name = Reflect.readString(raw, "name") ?: "",
         address = Reflect.readString(raw, "address", "addr") ?: "",
         fingerprint = Reflect.readString(raw, "fingerprint", "fp") ?: "",
         platform = Reflect.readString(raw, "platform")?.takeIf { it.isNotEmpty() }
-            ?: Peer.PLATFORM_WINDOWS,
+            ?: Peer.PLATFORM_UNKNOWN,
         trusted = Reflect.readBoolean(raw, "trusted") ?: false,
     )
 
@@ -227,6 +235,9 @@ internal object NativeMappings {
      * Rust 侧把**地址与端口分成两个字段**，而 Kotlin 侧的 [Peer.address] 是
      * `host:port`（Rust 的 `split_address` 也按 `rsplit_once(':')` 解析），
      * 因此这里必须把端口拼回去，否则连不上主机。
+     *
+     * 平台来自 §3.4 mDNS TXT 的 `plat` 字段（S1 裁决）：对端没广播时
+     * 如实记「未知平台」，**不猜**成 windows。
      */
     fun mapDiscoveredHost(
         raw: Any,
@@ -239,7 +250,8 @@ internal object NativeMappings {
             name = Reflect.readString(raw, "name") ?: "",
             address = joinAddress(address, port),
             fingerprint = Reflect.readString(raw, "fingerprint", "fp") ?: "",
-            platform = Peer.PLATFORM_WINDOWS,
+            platform = Reflect.readString(raw, "platform", "plat")?.takeIf { it.isNotEmpty() }
+                ?: Peer.PLATFORM_UNKNOWN,
         )
         val lastSeen = Reflect.readLong(raw, "lastSeenMs", "last_seen_ms") ?: 0L
         return DiscoveredHost(peer, source, lastSeen)

@@ -54,7 +54,7 @@ export function HostRow({
 
   return (
     <div className="device-row">
-      <div className="device-icon">🖥</div>
+      <div className="device-icon">{deviceIcon(host.platform)}</div>
       <div className="device-main">
         <div className="device-title">
           <span className="device-name">{host.name}</span>
@@ -64,7 +64,7 @@ export function HostRow({
         </div>
         <div className="sub device-meta">
           {host.address}:{host.port}
-          {host.gpu ? ` · ${host.gpu}` : ''} · v{host.version}
+          {host.gpu ? ` · ${host.gpu}` : ''} · v{host.version} · {host.platform}
         </div>
       </div>
       {actions ? <div className="device-actions">{actions}</div> : null}

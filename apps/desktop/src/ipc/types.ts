@@ -91,6 +91,8 @@ export interface DiscoveredHost {
   version: string
   gpu: string | null
   online: boolean
+  /** 对端平台（§3.4 mDNS TXT 的 `plat`；缺失时为「未知平台」）。 */
+  platform: string
 }
 
 export interface SessionInfo {

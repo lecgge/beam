@@ -6,7 +6,19 @@
 //! 错误码沿用 §3.1–§3.15 的分段约定:
 //! `E1xxx` proto / `E2xxx` net / `E3xxx` pair / `E4xxx` discovery / `E5xxx` capture /
 //! `E6xxx` encode / `E7xxx` audio / `E8xxx` input / `E9xxx` session /
-//! `E10xxx` decode-render / `E11xxx` config / `E12xxx` 应用外壳。
+//! `E10xxx` decode-render / `E11xxx` config / `E12xxx` 应用外壳 /
+//! `E13xxx` perf / `E14xxx` ffi / `E15xxx` gamestream / `E16xxx` log。
+//!
+//! ## 为什么外壳段是 `E12xxx`(S5 裁决)
+//!
+//! 早先外壳把「设置不合法 / 读写失败 / perf 不可用」也塞在 `E11xxx`,
+//! 而 `E11xxx` 是 **`beam-config` 独占**的段(§3.14)——
+//! `E11003` 一个码两种含义(perf 不可用 vs 配置存储不可用),
+//! 前端按 `code` 只能写合并文案,报错不可定位。
+//!
+//! 因此:`E11xxx` **只**归 `beam-config`;外壳自有错误全部改用 `E12xxx`,
+//! 按语义细分(未知命令 / 设置不合法 / 读写失败 / perf 不可用),
+//! **一个码只对应一种含义**。
 
 use serde::Serialize;
 
@@ -48,14 +60,19 @@ pub const E_HOST_NOT_FOUND: &str = "E9102";
 /// 与 `beam-render` 的 `E10012`（交换链创建失败）对齐。
 pub const E_PRESENT_FAILED: &str = "E10012";
 
-// ---- E11xxx config(§3.14)----
-pub const E_CONFIG_INVALID: &str = "E11001";
-pub const E_CONFIG_IO: &str = "E11002";
-/// perf-stats 仅 Debug 构建可用(§3.13 门控 / §7 release 无 perf 符号)。
-pub const E_PERF_UNAVAILABLE: &str = "E11003";
-
 // ---- E12xxx 应用外壳(§3.11 host-app)----
+//
+// `E11xxx` 归 `beam-config` 独占(§3.14),外壳自有错误全部在这里(S5 裁决)。
+/// 未知命令。
 pub const E_UNKNOWN_COMMAND: &str = "E12001";
+/// 设置项取值不合法（外壳层自己的校验，如分辨率/帧率/编码器白名单）。
+pub const E_SHELL_CONFIG_INVALID: &str = "E12002";
+/// 外壳自己的文件读写失败（桌面设置 JSON、信任库、导出文件）。
+pub const E_SHELL_IO: &str = "E12003";
+/// perf-stats 仅 Debug 构建可用(§3.13 门控 / §7 release 无 perf 符号)。
+pub const E_PERF_UNAVAILABLE: &str = "E12004";
+
+/// 兜底错误码（不属于任何分段）。
 pub const E_INTERNAL: &str = "E9999";
 
 /// §3.11 约定的 command 错误负载。
@@ -101,3 +118,51 @@ impl std::fmt::Display for BeamError {
 }
 
 impl std::error::Error for BeamError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// S5：外壳自有错误必须全在 `E12xxx` 段，且**互不相同**。
+    ///
+    /// 早先它们占着 `E11xxx`（`beam-config` 独占段），
+    /// `E11003` 一个码两种含义（perf 不可用 vs 配置存储不可用），
+    /// 前端按 `code` 查文案时无法定位。
+    #[test]
+    fn shell_codes_live_in_e12xxx_and_are_distinct() {
+        let codes = [
+            E_UNKNOWN_COMMAND,
+            E_SHELL_CONFIG_INVALID,
+            E_SHELL_IO,
+            E_PERF_UNAVAILABLE,
+        ];
+        let mut sorted = codes.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), codes.len(), "外壳错误码必须互不相同");
+        for code in codes {
+            let num: u32 = code.trim_start_matches('E').parse().expect("错误码应为数字");
+            assert!(
+                (12000..13000).contains(&num),
+                "{code} 不在外壳段 E12xxx 内"
+            );
+        }
+    }
+
+    /// `E11xxx` 归 `beam-config` 独占（§3.14），外壳不得占用。
+    #[test]
+    fn shell_does_not_use_the_config_segment() {
+        for code in [
+            E_UNKNOWN_COMMAND,
+            E_SHELL_CONFIG_INVALID,
+            E_SHELL_IO,
+            E_PERF_UNAVAILABLE,
+        ] {
+            let num: u32 = code.trim_start_matches('E').parse().expect("错误码应为数字");
+            assert!(
+                !(11000..12000).contains(&num),
+                "{code} 落在配置层 E11xxx 段里"
+            );
+        }
+    }
+}
