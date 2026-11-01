@@ -60,5 +60,15 @@ bytes = { workspace = true }
 # 回环测试需要主机侧的 QUIC 接受端（已下沉到 beam-host）。
 beam-host = { workspace = true }
 
+# 真机「解码纹理 → 原生窗口上屏」验证入口（§3.10 / 产品方案第 45 行）：
+# 建独立原生窗口 → D3D11 flip-model 交换链 → 用**同一个设备**硬解 → 逐帧上屏
+# → 读回交换链的 GetFrameStatistics 确认真的呈现了。
+#
+# 需要 `video` feature（beam-render/d3d11 + beam-decode/ffmpeg），
+# 因此 FFMPEG_DIR 必须指向 LGPL 构建的 ffmpeg（§7）。
+[[example]]
+name = "present_smoke"
+required-features = ["video"]
+
 [lints]
 workspace = true

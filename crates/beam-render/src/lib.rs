@@ -86,8 +86,8 @@ mod d3d11;
 
 pub use error::{message, RenderError};
 pub use renderer::{
-    D3D11Renderer, FrameHandle, FramePacer, FrameStatistics, RenderConfig, RenderThread, Renderer,
-    WindowHandle,
+    D3D11Renderer, FrameHandle, FramePacer, FrameStatistics, PresentInfo, RenderConfig,
+    RenderThread, Renderer, SwapChainFormat, WindowHandle,
 };
 pub use window::{VideoWindow, WindowError};
 

@@ -45,7 +45,7 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
+    DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIFactory2, IDXGISwapChain3, DXGI_ERROR_DEVICE_REMOVED,
@@ -57,10 +57,38 @@ use windows::Win32::Graphics::Dxgi::{
 };
 
 use crate::error::RenderError;
-use crate::renderer::{FrameStatistics, RenderConfig};
+use crate::renderer::{FrameStatistics, PresentInfo, RenderConfig, SwapChainFormat};
 
 /// 交换链的缓冲区数量（flip-model 的最小可用值：一帧在飞、一帧在显示）。
 const BUFFER_COUNT: u32 = 2;
+
+/// 把配置里的格式枚举翻译成 DXGI 格式。
+///
+/// `DXGI_FORMAT_420Opaque` 在 windows 绑定里没有对应常量（DXGI 1.3
+/// 引入的视频格式），这里按其**文档化的数值** 103 构造。
+fn dxgi_format(fmt: SwapChainFormat) -> DXGI_FORMAT {
+    DXGI_FORMAT(fmt.dxgi_code())
+}
+
+/// 这个格式是不是 4:2:0 视频格式（多平面纹理，建不了渲染目标视图）。
+fn is_video_format(fmt: DXGI_FORMAT) -> bool {
+    fmt == dxgi_format(SwapChainFormat::Nv12) || fmt == dxgi_format(SwapChainFormat::Opaque420)
+}
+
+/// 把「平台指针」借用成 D3D11 纹理引用（**不**接管所有权）。
+///
+/// beam-proto 的 `PlatformHandle` 按约定承载平台指针（§4 分层说明）：
+/// 这里把它解释成 D3D11 纹理指针，并且只**借用**（不做 AddRef/Release）。
+///
+/// 借用必须绑定在一个**活着**的裸指针变量上（`from_raw_borrowed` 的签名
+/// 要求 `&raw`），所以这里用 `'_` 借用调用方作用域里的指针。
+fn borrow_texture(raw: &*mut core::ffi::c_void) -> Option<&ID3D11Texture2D> {
+    if raw.is_null() {
+        return None;
+    }
+    // SAFETY: 借用调用方持有的 COM 指针，不接管所有权、不做 AddRef/Release。
+    unsafe { windows::core::Interface::from_raw_borrowed(raw) }
+}
 
 /// D3D11 flip-model 交换链。
 #[derive(Debug)]
@@ -81,6 +109,8 @@ pub(crate) struct SwapChain {
     format: DXGI_FORMAT,
     /// 是否走可变刷新率路径。
     vrr: bool,
+    /// 呈现诊断信息（§3.10：真的搬纹理 vs 降级清屏）。
+    info: PresentInfo,
 }
 
 impl SwapChain {
@@ -105,7 +135,7 @@ impl SwapChain {
         let desc = DXGI_SWAP_CHAIN_DESC1 {
             Width: cfg.width,
             Height: cfg.height,
-            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            Format: dxgi_format(cfg.format),
             Stereo: FALSE,
             SampleDesc: DXGI_SAMPLE_DESC {
                 Count: 1,
@@ -174,8 +204,12 @@ impl SwapChain {
             rtvs,
             width: cfg.width,
             height: cfg.height,
-            format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            format: dxgi_format(cfg.format),
             vrr: cfg.vrr,
+            info: PresentInfo {
+                swapchain_format: dxgi_format(cfg.format).0,
+                ..PresentInfo::default()
+            },
         })
     }
 
@@ -184,12 +218,78 @@ impl SwapChain {
         &self.device
     }
 
+    /// 呈现诊断信息（§3.10）。
+    pub(crate) fn present_info(&self) -> PresentInfo {
+        self.info
+    }
+
     /// 呈现一帧。
     ///
     /// `source_handle` 是解码纹理的指针（`DecodedFrame::surface` 的整数值）：
-    /// `0` 表示这一拍没有可用的解码数据，此时清屏后照样走完整条呈现路径。
+    /// `0` 表示这一拍没有可用的解码数据。
+    ///
+    /// ## 两条路径
+    ///
+    /// - **视频格式**（`DXGI_FORMAT_NV12` / `DXGI_FORMAT_420Opaque`）：
+    ///   后备缓冲是 4:2:0 多平面纹理，**建不了渲染目标视图** ⇒
+    ///   直接把解码纹理 `CopyResource` 进去（零拷贝，§3.10）。
+    /// - **BGRA**：后备缓冲可建 RTV，解码纹理格式不同时只能清屏
+    ///   （此时画面上不了屏，由 [`PresentInfo`] 如实记录）。
     pub(crate) fn present(&mut self, source_handle: usize) -> Result<(), RenderError> {
         let index = unsafe { self.swapchain.GetCurrentBackBufferIndex() } as usize;
+        if is_video_format(self.format) {
+            self.present_video(index, source_handle)?;
+        } else {
+            self.present_bgra(index, source_handle)?;
+        }
+        self.info.presents += 1;
+        self.present_to_screen()
+    }
+
+    /// 视频格式路径：零拷贝把解码纹理搬进 4:2:0 后备缓冲。
+    ///
+    /// 不建 RTV、不清屏：4:2:0 多平面纹理的渲染目标视图不受支持。
+    fn present_video(&mut self, index: usize, source_handle: usize) -> Result<(), RenderError> {
+        let raw = source_handle as *mut core::ffi::c_void;
+        let Some(source) = borrow_texture(&raw) else {
+            // 这一拍没有解码数据：保留上一帧（视频交换链不清屏）。
+            self.info.cleared_presents += 1;
+            return Ok(());
+        };
+        let (desc, same_device) = self.describe_source(source);
+        if desc.Width == self.width
+            && desc.Height == self.height
+            && desc.Format == self.format
+            && same_device
+        {
+            let buffer: ID3D11Texture2D = unsafe { self.swapchain.GetBuffer(index as u32) }
+                .map_err(|err| {
+                    tracing::error!(error = %err, "获取后备缓冲失败");
+                    RenderError::SwapChainFailed {
+                        reason: "获取后备缓冲失败".to_string(),
+                    }
+                })?;
+            // SAFETY: 源与目标同设备、同尺寸、同格式，满足 `CopyResource` 的前置条件。
+            unsafe { self.context.CopyResource(&buffer, source) };
+            self.info.textured_presents += 1;
+        } else {
+            tracing::warn!(
+                src_width = desc.Width,
+                src_height = desc.Height,
+                src_format = desc.Format.0,
+                dst_width = self.width,
+                dst_height = self.height,
+                dst_format = self.format.0,
+                same_device,
+                "解码纹理与视频交换链不匹配,本帧保留上一帧"
+            );
+            self.info.cleared_presents += 1;
+        }
+        Ok(())
+    }
+
+    /// BGRA 路径：渲染目标视图 + 清屏兜底。
+    fn present_bgra(&mut self, index: usize, source_handle: usize) -> Result<(), RenderError> {
         let rtv = self.back_buffer_view(index)?;
 
         // 拷贝目标不能同时是当前渲染目标，先解绑。
@@ -200,31 +300,13 @@ impl SwapChain {
             )
         };
 
-        // beam-proto 的 `PlatformHandle` 按约定承载平台指针（§4 分层说明）：
-        // 这里把它解释成 D3D11 纹理指针，并且只**借用**（不做 AddRef/Release）。
-        let raw = source_handle as *mut core::ffi::c_void;
-        let source: Option<&ID3D11Texture2D> = if raw.is_null() {
-            None
-        } else {
-            // SAFETY: 借用调用方持有的 COM 指针，不接管所有权。
-            unsafe { windows::core::Interface::from_raw_borrowed(&raw) }
-        };
-
         let mut cleared = true;
-        if let Some(source) = source {
-            let mut desc = D3D11_TEXTURE2D_DESC::default();
-            // SAFETY: `desc` 是合法的输出参数。
-            unsafe { source.GetDesc(&mut desc) };
+        let raw = source_handle as *mut core::ffi::c_void;
+        if let Some(source) = borrow_texture(&raw) {
+            let (desc, same_device) = self.describe_source(source);
             // D3D11 **不允许跨设备拷贝**：解码纹理必须与交换链在同一个设备上
             // （解码侧请复用 `D3D11Renderer::device`）。这里做一次运行期校验，
             // 免得设备不匹配时静默拷出错误内容。
-            let same_device = match unsafe { source.GetDevice() } {
-                Ok(device) => device == self.device,
-                Err(err) => {
-                    tracing::warn!(error = %err, "读不到解码纹理的设备,本帧改为清屏");
-                    false
-                }
-            };
             if desc.Width == self.width
                 && desc.Height == self.height
                 && desc.Format == self.format
@@ -241,12 +323,15 @@ impl SwapChain {
                 // 且目标当前未被绑定为渲染目标，满足 `CopyResource` 的前置条件。
                 unsafe { self.context.CopyResource(&buffer, source) };
                 cleared = false;
+                self.info.textured_presents += 1;
             } else {
                 tracing::warn!(
                     src_width = desc.Width,
                     src_height = desc.Height,
+                    src_format = desc.Format.0,
                     dst_width = self.width,
                     dst_height = self.height,
+                    dst_format = self.format.0,
                     same_device,
                     "解码纹理与交换链不匹配,本帧改为清屏"
                 );
@@ -263,8 +348,33 @@ impl SwapChain {
                 self.context
                     .ClearRenderTargetView(&rtv, &[0.0, 0.0, 0.0, 1.0])
             };
+            self.info.cleared_presents += 1;
         }
+        Ok(())
+    }
 
+    /// 读出解码纹理的描述与设备一致性，并更新诊断计数。
+    fn describe_source(&mut self, source: &ID3D11Texture2D) -> (D3D11_TEXTURE2D_DESC, bool) {
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        // SAFETY: `desc` 是合法的输出参数。
+        unsafe { source.GetDesc(&mut desc) };
+        // 记下解码纹理的真实格式与尺寸 —— 「画面有没有真的上屏」
+        // 取决于它与交换链是否对得上（§3.10）。
+        self.info.source_format = desc.Format.0;
+        self.info.source_width = desc.Width;
+        self.info.source_height = desc.Height;
+        let same_device = match unsafe { source.GetDevice() } {
+            Ok(device) => device == self.device,
+            Err(err) => {
+                tracing::warn!(error = %err, "读不到解码纹理的设备,本帧改为清屏");
+                false
+            }
+        };
+        (desc, same_device)
+    }
+
+    /// 把当前后备缓冲呈现到屏幕。
+    fn present_to_screen(&mut self) -> Result<(), RenderError> {
         let (sync_interval, flags) = if self.vrr {
             // 不等垂直刷新：帧可以落在刷新周期中间（VRR 的呈现方式）。
             (0, DXGI_PRESENT_ALLOW_TEARING)
@@ -390,7 +500,7 @@ mod tests {
         let desc = DXGI_SWAP_CHAIN_DESC1 {
             Width: 640,
             Height: 360,
-            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            Format: dxgi_format(SwapChainFormat::Bgra8),
             Stereo: FALSE,
             SampleDesc: DXGI_SAMPLE_DESC {
                 Count: 1,
@@ -502,6 +612,7 @@ mod tests {
                     refresh_rate: 60,
                     vrr: true,
                     flip_model: true,
+                    format: SwapChainFormat::Bgra8,
                 },
             )
             .expect("flip-model 交换链应当能创建");

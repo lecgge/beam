@@ -31,10 +31,93 @@ use crate::slot::FrameSlot;
 #[cfg(feature = "d3d11")]
 use crate::d3d11;
 
+/// 一次呈现的诊断信息（§3.10：区分「画面真的上屏」与「降级清屏」）。
+///
+/// ## 为什么需要它
+///
+/// [`Renderer::present`] 成功返回**不代表画面上屏了**：
+/// 解码纹理的格式 / 尺寸 / 设备与交换链对不上时，渲染层会退化成
+/// 「清屏 + 照样走完整条呈现路径」（见 `d3d11.rs` 的 `present`）——
+/// 不报错，但用户看到的是空白。
+///
+/// 只有一个码位、两种含义 ⇒ 无法定位。因此这里把「真的把解码纹理
+/// 搬进了交换链」与「降级清屏」分开计数，并带上两边的真实格式，
+/// 让上层（以及真机验证入口）能**证实**画面确实上屏。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PresentInfo {
+    /// 总呈现次数。
+    pub presents: u64,
+    /// 真的把解码纹理搬进交换链的次数。
+    pub textured_presents: u64,
+    /// 因格式 / 尺寸 / 设备不匹配而降级成清屏的次数。
+    pub cleared_presents: u64,
+    /// 解码纹理的 DXGI 格式（DXGI 四字符码的整数值；`0` = 没有解码纹理）。
+    pub source_format: i32,
+    /// 交换链后备缓冲的 DXGI 格式。
+    pub swapchain_format: i32,
+    /// 解码纹理的宽（`0` = 没有解码纹理）。
+    pub source_width: u32,
+    /// 解码纹理的高。
+    pub source_height: u32,
+}
+
+impl PresentInfo {
+    /// 交换链格式与解码纹理格式是否一致。
+    ///
+    /// 不一致 ⇒ 每一帧都会走「降级清屏」分支（画面上不了屏）。
+    pub fn formats_match(&self) -> bool {
+        self.source_format != 0 && self.source_format == self.swapchain_format
+    }
+}
+
 /// 渲染器（§3.10 `Renderer::present(&DecodedFrame)`）。
 pub trait Renderer {
     /// 上屏一帧。
     fn present(&mut self, f: &DecodedFrame) -> Result<(), RenderError>;
+}
+
+/// 交换链后备缓冲的格式（§3.10）。
+///
+/// ## 为什么可选
+///
+/// D3D11VA **视频解码**路径的原生输出是 `DXGI_FORMAT_420Opaque`
+/// （D3D11 视频解码器只支持这两种格式，改不了）。而解码纹理要
+/// **零拷贝**进交换链，交换链的格式就必须与它一致。
+///
+/// BGRA 是「常规桌面窗口」的格式，好处是任何窗口都能用；代价是
+/// 解码纹理（4:2:0 双平面）与它格式不同 ⇒ 只能转换，不能直接拷贝。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SwapChainFormat {
+    /// `DXGI_FORMAT_B8G8R8A8_UNORM`：普通桌面窗口的格式。
+    #[default]
+    Bgra8,
+    /// `DXGI_FORMAT_NV12`：4:2:0 双平面视频格式。
+    Nv12,
+    /// `DXGI_FORMAT_420Opaque`：4:2:0 不透明视频格式（视频解码器的原生格式）。
+    Opaque420,
+}
+
+impl SwapChainFormat {
+    /// 对应的 DXGI 格式码（`DXGI_FORMAT` 的整数值）。
+    ///
+    /// 数值取自 DXGI 的格式枚举；`DXGI_FORMAT_420Opaque` 的 windows
+    /// 绑定里不一定有这个常量，所以这里直接写常量值（103）。
+    pub fn dxgi_code(self) -> i32 {
+        match self {
+            SwapChainFormat::Bgra8 => 87,      // DXGI_FORMAT_B8G8R8A8_UNORM
+            SwapChainFormat::Nv12 => 70,       // DXGI_FORMAT_NV12
+            SwapChainFormat::Opaque420 => 103, // DXGI_FORMAT_420Opaque
+        }
+    }
+
+    /// 可读的格式名（用于日志与验证输出）。
+    pub fn name(self) -> &'static str {
+        match self {
+            SwapChainFormat::Bgra8 => "DXGI_FORMAT_B8G8R8A8_UNORM",
+            SwapChainFormat::Nv12 => "DXGI_FORMAT_NV12",
+            SwapChainFormat::Opaque420 => "DXGI_FORMAT_420Opaque",
+        }
+    }
 }
 
 /// 渲染配置（§3.10：可变刷新率）。
@@ -53,6 +136,12 @@ pub struct RenderConfig {
     pub vrr: bool,
     /// 是否启用 flip-model。
     pub flip_model: bool,
+    /// 交换链后备缓冲的格式（§3.10）。
+    ///
+    /// 默认 BGRA（普通桌面窗口）。要零拷贝承接 D3D11VA 的
+    /// `DXGI_FORMAT_420Opaque` 解码纹理，就要改成
+    /// [`SwapChainFormat::Opaque420`]（并让交换链高度与解码纹理对齐）。
+    pub format: SwapChainFormat,
 }
 
 impl Default for RenderConfig {
@@ -63,6 +152,7 @@ impl Default for RenderConfig {
             refresh_rate: 60,
             vrr: true,
             flip_model: true,
+            format: SwapChainFormat::default(),
         }
     }
 }
@@ -230,6 +320,16 @@ impl D3D11Renderer {
     }
 
     /// 读取交换链呈现统计（丢帧统计）。
+    /// 读取交换链呈现统计（丢帧统计）。
+    ///
+    /// ## 已知限制
+    ///
+    /// DXGI 的 `GetFrameStatistics` **在 flip-model 交换链上不受支持**
+    /// （微软明确说明该方法不支持 flip model）⇒ 本方法在默认配置下
+    /// 恒返回 `None`。
+    ///
+    /// 要判断「画面有没有真的上屏」，请用 [`D3D11Renderer::present_info`]：
+    /// 它统计的是**真的把解码纹理搬进了交换链**的次数，不依赖 DXGI 的呈现统计。
     pub fn frame_statistics(&self) -> Option<FrameStatistics> {
         #[cfg(feature = "d3d11")]
         {
@@ -240,6 +340,23 @@ impl D3D11Renderer {
         #[cfg(not(feature = "d3d11"))]
         {
             None
+        }
+    }
+
+    /// 呈现诊断信息（§3.10）：真的搬纹理 vs 降级清屏 + 两边的真实格式。
+    ///
+    /// 没有 `d3d11` feature 时恒为默认值（没有交换链，也就没有呈现）。
+    pub fn present_info(&self) -> PresentInfo {
+        #[cfg(feature = "d3d11")]
+        {
+            self.backend
+                .as_ref()
+                .map(|b| b.present_info())
+                .unwrap_or_default()
+        }
+        #[cfg(not(feature = "d3d11"))]
+        {
+            PresentInfo::default()
         }
     }
 }
