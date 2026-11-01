@@ -150,6 +150,11 @@ impl WgcBackend {
             })
     }
 
+    /// 被单槽覆盖而丢弃的帧数（§3.5 丢帧统计）。
+    pub(crate) fn dropped_frames(&self) -> u64 {
+        self.channel.dropped()
+    }
+
     /// 停止抓屏（终止捕获线程）。
     pub(crate) fn stop(&mut self) {
         if let Some(control) = self.control.take() {

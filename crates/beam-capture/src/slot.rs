@@ -8,7 +8,7 @@
 //! 生产者与消费者各自最多拿到一份所有权，不存在双份释放。
 
 use std::ptr;
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
 /// 无锁单槽：发布 / 取走「最新一帧」。
 ///
@@ -18,6 +18,11 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 pub(crate) struct FrameSlot<T: Send> {
     /// 当前帧的堆指针；为空表示没有待取帧。
     current: AtomicPtr<T>,
+    /// 被覆盖（过时）的帧数——§3.5 的丢帧统计。
+    ///
+    /// 抓屏跟不上消费时（消费方被编码阻塞），旧帧在这里被丢掉，
+    /// **不能静默丢弃**：必须可计量（§3.5 / §3.2 E2004 同一口径）。
+    dropped: AtomicU64,
 }
 
 impl<T: Send> FrameSlot<T> {
@@ -26,6 +31,7 @@ impl<T: Send> FrameSlot<T> {
     pub(crate) const fn new() -> Self {
         Self {
             current: AtomicPtr::new(ptr::null_mut()),
+            dropped: AtomicU64::new(0),
         }
     }
 
@@ -33,6 +39,8 @@ impl<T: Send> FrameSlot<T> {
     ///
     /// 旧帧如果还没被取走，就在这里释放——这正是「单槽」语义：
     /// 慢消费者只会拿到最新的一帧，不会积压延迟。
+    ///
+    /// 覆盖**计入丢帧统计**（§3.5）：这一帧真的被丢掉了。
     ///
     /// 这里需要 unsafe：无锁单槽用裸堆指针在生产/消费之间转移所有权。
     #[allow(unsafe_code)]
@@ -44,7 +52,15 @@ impl<T: Send> FrameSlot<T> {
         if !stale.is_null() {
             // SAFETY: `stale` 是本槽刚刚独占取出的堆指针（swap 保证只有一方拿到非空值）。
             drop(unsafe { Box::from_raw(stale) });
+            // 旧帧被覆盖 ⇒ 记一次丢帧（不静默丢弃，§3.5）。
+            self.dropped.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    /// 被覆盖（过时）的帧数（§3.5 的丢帧统计）。
+    #[cfg_attr(not(feature = "wgc"), allow(dead_code))]
+    pub(crate) fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
     }
 
     /// 取走当前帧；没有待取帧时返回 `None`。
@@ -114,5 +130,22 @@ mod tests {
             }
         }
         handle.join().expect("生产线程不应 panic");
+    }
+
+    /// §3.5：被单槽覆盖的帧是**真的丢了**，必须可计量。
+    #[test]
+    fn overwritten_frames_are_counted_as_dropped() {
+        let slot = FrameSlot::new();
+        assert_eq!(slot.dropped(), 0);
+        slot.publish(1u32);
+        // 还没被取走就又被覆盖 ⇒ 丢 1 帧。
+        slot.publish(2u32);
+        assert_eq!(slot.dropped(), 1);
+        // 取走当前帧不算丢帧。
+        assert_eq!(slot.take(), Some(2));
+        assert_eq!(slot.dropped(), 1);
+        // 空槽发布不算丢帧。
+        slot.publish(3u32);
+        assert_eq!(slot.dropped(), 1);
     }
 }

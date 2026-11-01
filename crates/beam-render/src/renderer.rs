@@ -74,6 +74,17 @@ impl PresentInfo {
 pub trait Renderer {
     /// 上屏一帧。
     fn present(&mut self, f: &DecodedFrame) -> Result<(), RenderError>;
+
+    /// 累计「画面没能上屏」的帧数（§3.10 丢帧统计）。
+    ///
+    /// 两种来源：
+    /// - 单槽覆盖：解码快于上屏，旧帧被覆盖（`submit` / `present_pending` 那条路）；
+    /// - 降级清屏：解码纹理与交换链对不上，本帧只清了屏（见 `PresentInfo`）。
+    ///
+    /// 默认返回 `0`：没有丢帧概念的渲染器。
+    fn dropped_frames(&self) -> u64 {
+        0
+    }
 }
 
 /// 交换链后备缓冲的格式（§3.10）。
@@ -319,6 +330,22 @@ impl D3D11Renderer {
         self.dropped
     }
 
+    /// 累计「画面没能上屏」的帧数（§3.10 丢帧统计）。
+    ///
+    /// = 单槽覆盖的帧数 + 降级清屏的帧数（后者见 [`PresentInfo::cleared_presents`]）。
+    pub fn dropped_frames(&self) -> u64 {
+        let slot_dropped = self.slot.dropped();
+        #[cfg(feature = "d3d11")]
+        let cleared = self
+            .backend
+            .as_ref()
+            .map(|b| b.present_info().cleared_presents)
+            .unwrap_or(0);
+        #[cfg(not(feature = "d3d11"))]
+        let cleared = 0;
+        slot_dropped + cleared
+    }
+
     /// 读取交换链呈现统计（丢帧统计）。
     /// 读取交换链呈现统计（丢帧统计）。
     ///
@@ -386,6 +413,10 @@ impl Renderer for D3D11Renderer {
             // E10014 不是 §3.10 定义的码位：它只表示「后端未编译进来」。
             Err(RenderError::BackendDisabled)
         }
+    }
+
+    fn dropped_frames(&self) -> u64 {
+        D3D11Renderer::dropped_frames(self)
     }
 }
 

@@ -58,6 +58,8 @@ pub struct DecodeRenderConsumer<D, R> {
     /// 以免两种构建的结构体布局不同。
     #[cfg_attr(not(feature = "perf-stats"), allow(dead_code))]
     clock: Arc<dyn Clock>,
+    /// 已经上报过的渲染侧丢帧数（用于只上报**增量**）。
+    reported_dropped: u64,
 }
 
 impl<D, R> std::fmt::Debug for DecodeRenderConsumer<D, R>
@@ -85,6 +87,7 @@ where
             renderer,
             clock_offset_us: None,
             clock: Arc::new(SystemClock),
+            reported_dropped: 0,
         }
     }
 
@@ -158,6 +161,16 @@ where
 
     fn on_clock_sync(&mut self, offset_us: i64) {
         self.clock_offset_us = Some(offset_us);
+    }
+
+    /// 渲染侧「画面没能上屏」的帧数（§3.10）。
+    ///
+    /// 只报**增量**（会话层每拍都会取一次），避免重复计数。
+    fn take_dropped_frames(&mut self) -> u32 {
+        let total = self.renderer.dropped_frames();
+        let delta = total.saturating_sub(self.reported_dropped);
+        self.reported_dropped = total;
+        u32::try_from(delta).unwrap_or(u32::MAX)
     }
 }
 

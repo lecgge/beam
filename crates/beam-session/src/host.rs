@@ -131,6 +131,8 @@ pub(crate) struct HostRunner {
     started_ms: u64,
     /// 已发送的画面帧数（累计）。
     frames_total: u64,
+    /// 累计丢帧数（§3.5：抓屏快于编码时旧帧被单槽覆盖）。
+    dropped_total: u64,
 }
 
 impl HostRunner {
@@ -425,6 +427,18 @@ impl HostRunner {
             self.frames_sent += 1;
             self.frames_total += 1;
         }
+        // §3.5 丢帧统计：抓屏快于编码时旧帧被单槽覆盖 —— 那是真的丢了，
+        // 必须进会话汇总（此前 `dropped_frames` 恒为 0）。
+        let dropped = self.deps.pipeline.take_dropped_frames();
+        if dropped > 0 {
+            self.dropped_total += u64::from(dropped);
+            tracing::warn!(
+                code = "E2004",
+                dropped,
+                total = self.dropped_total,
+                "抓屏帧被单槽覆盖(编码跟不上抓屏),这些帧没有送出"
+            );
+        }
     }
 
     /// 统计节拍（§3.11 `session://stats` 500 ms）。
@@ -552,7 +566,7 @@ impl SessionRunner for HostRunner {
             started_ms: self.started_ms,
             session_id: self.session_id,
             frames: self.frames_total,
-            dropped_frames: 0,
+            dropped_frames: self.dropped_total,
             reconnects: self.reconnects,
             rtt_us: self.stats.rtt_us,
             loss_ppm: self.stats.loss_ppm,
@@ -619,6 +633,7 @@ impl HostSession {
             reconnects: 0,
             started_ms: now,
             frames_total: 0,
+            dropped_total: 0,
         };
         handle.set_runner(Box::new(runner));
         handle
@@ -995,5 +1010,62 @@ mod tests {
             self.idr.fetch_add(1, Ordering::SeqCst);
         }
         fn stop(&mut self) {}
+    }
+
+    /// 会报丢帧的流水线（模拟抓屏快于编码，旧帧被单槽覆盖）。
+    struct DroppingPipeline {
+        /// 已经报过几次（只报第一次，模拟「只报增量」）。
+        reported: bool,
+    }
+
+    impl FramePipeline for DroppingPipeline {
+        fn start(&mut self) -> Result<(), SessionError> {
+            Ok(())
+        }
+        fn poll(&mut self) -> Option<EncodedFrame> {
+            None
+        }
+        fn request_idr(&mut self) {}
+        fn stop(&mut self) {}
+        fn take_dropped_frames(&mut self) -> u32 {
+            if self.reported {
+                0
+            } else {
+                self.reported = true;
+                3
+            }
+        }
+    }
+
+    /// §3.5 / V-13：主机侧管线丢的帧必须进会话汇总
+    /// （此前 `SessionCounters::dropped_frames` 恒为 0）。
+    #[test]
+    fn pipeline_dropped_frames_reach_the_session_summary() {
+        let handle = HostSession::start_with_control(
+            HostSessionConfig::default(),
+            HostDeps {
+                pipeline: Box::new(DroppingPipeline { reported: false }),
+                sender: Box::new(FakeSender {
+                    sent: AtomicUsize::new(0),
+                }),
+            },
+            Some(HostControlDeps {
+                control: Box::new(NullControlChannel),
+                pairing: PairingConfig::default(),
+                rate: None,
+            }),
+        );
+
+        // 会话要进入 Streaming 才会跑 `pump_frames`（那里才取丢帧数）。
+        let _ = handle.apply(SessionInput::Connecting);
+        let _ = handle.apply(SessionInput::Connected);
+        let _ = handle.apply(SessionInput::Negotiated(beam_proto::StreamConfig::default()));
+        handle.pump().expect("应当能推进会话");
+
+        let summary = handle.summary();
+        assert_eq!(
+            summary.dropped_frames, 3,
+            "管线丢的 3 帧必须出现在会话汇总里"
+        );
     }
 }

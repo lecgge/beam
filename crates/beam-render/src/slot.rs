@@ -7,12 +7,17 @@
 //! 交换本身是原子的，生产者与消费者各自最多拿到一份所有权。
 
 use std::ptr;
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
 /// 无锁单槽：发布 / 取走「最新一帧」。
 pub(crate) struct FrameSlot<T: Send> {
     /// 当前帧的堆指针；为空表示没有待取帧。
     current: AtomicPtr<T>,
+    /// 被覆盖（过时）的帧数——§3.10 的丢帧统计。
+    ///
+    /// 解码快于上屏时，旧帧在这里被丢掉 ⇒ 那是**真的没上屏**，
+    /// 必须可计量（§3.10 / §3.2 E2004 同一口径）。
+    dropped: AtomicU64,
 }
 
 impl<T: Send> Default for FrameSlot<T> {
@@ -26,6 +31,7 @@ impl<T: Send> FrameSlot<T> {
     pub(crate) const fn new() -> Self {
         Self {
             current: AtomicPtr::new(ptr::null_mut()),
+            dropped: AtomicU64::new(0),
         }
     }
 
@@ -42,7 +48,14 @@ impl<T: Send> FrameSlot<T> {
         if !stale.is_null() {
             // SAFETY: `stale` 是本槽刚刚独占取出的堆指针（swap 保证只有一方拿到非空值）。
             drop(unsafe { Box::from_raw(stale) });
+            // 旧帧被覆盖 ⇒ 记一次丢帧（不静默丢弃，§3.10）。
+            self.dropped.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    /// 被覆盖（过时）的帧数（§3.10 的丢帧统计）。
+    pub(crate) fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
     }
 
     /// 取走当前帧；没有待取帧时返回 `None`。

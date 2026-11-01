@@ -138,6 +138,17 @@ pub trait FramePipeline: Send {
     fn request_idr(&mut self);
     /// 停止流水线。
     fn stop(&mut self);
+
+    /// 取走自上次调用以来被流水线丢掉的帧数（§3.5 丢帧统计）。
+    ///
+    /// 典型来源：抓屏快于编码时，抓屏单槽里的旧帧被覆盖（§3.5）。
+    /// 那是**真的丢了**，必须可计量 —— 主机侧的 [`crate::summary::SessionSummary`]
+    /// 里的 `dropped_frames` 就来自这里（此前恒为 0）。
+    ///
+    /// 默认实现返回 `0`：没有丢帧概念的流水线（例如测试替身）。
+    fn take_dropped_frames(&mut self) -> u32 {
+        0
+    }
 }
 
 /// 视频发送器（§3.9 `VideoSender` 的会话侧镜像）。
@@ -161,6 +172,17 @@ pub trait FrameConsumer: Send {
     ///
     /// 默认实现是**空操作**：不关心 E2E 的消费者（绝大多数）什么都不用做。
     fn on_clock_sync(&mut self, _offset_us: i64) {}
+
+    /// 取走自上次调用以来被消费者丢掉的帧数（§3.10 丢帧统计）。
+    ///
+    /// 典型来源：解码快于上屏时，渲染单槽里的旧帧被覆盖（§3.10）。
+    /// 客户端侧的会话汇总 `dropped_frames` 原本只统计**网络过期帧**
+    /// （§3.2 E2004），渲染侧丢帧没算进去 —— 这一条补上。
+    ///
+    /// 默认实现返回 `0`：不产生丢帧的消费者。
+    fn take_dropped_frames(&mut self) -> u32 {
+        0
+    }
 }
 
 /// 输入注入器（§3.8 `InputSink` 的会话侧镜像）。

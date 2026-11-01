@@ -711,6 +711,25 @@ impl ClientRunner {
         });
     }
 
+    /// 把**渲染侧**的丢帧（§3.10：解码快于上屏，旧帧被单槽覆盖）计入会话汇总。
+    ///
+    /// 客户端的 `dropped_frames` 原本只统计**网络过期帧**（§3.2 E2004），
+    /// 渲染侧丢帧没算进去 —— 那一半也是真的丢了，必须一并计量。
+    fn report_consumer_dropped_frames(&mut self) {
+        let count = match self.consumer.as_mut() {
+            Some(c) => c.take_dropped_frames(),
+            None => 0,
+        };
+        if count == 0 {
+            return;
+        }
+        self.dropped_total += u64::from(count);
+        self.emit(SessionEvent::FramesDropped {
+            count,
+            code: crate::event::FRAME_EXPIRED_CODE,
+        });
+    }
+
     /// 定期回报 `Feedback`（§4.1「输入 stream / Feedback」）。
     fn maybe_send_feedback(&mut self) {
         if self.machine.state() != SessionState::Streaming {
@@ -789,6 +808,7 @@ impl SessionRunner for ClientRunner {
         self.drain_control();
         self.pump_frames();
         self.report_dropped_frames();
+        self.report_consumer_dropped_frames();
         self.maybe_send_feedback();
         self.maybe_send_clock_sync();
         self.flush_control();
@@ -1346,6 +1366,49 @@ mod tests {
             SessionState::Streaming,
             "丢帧不是致命错误,会话状态不得改变"
         );
+    }
+
+    /// 报渲染侧丢帧的消费者（§3.10：解码快于上屏，旧帧被单槽覆盖）。
+    struct DroppingConsumer {
+        reported: bool,
+    }
+
+    impl FrameConsumer for DroppingConsumer {
+        fn consume(&mut self, _f: EncodedFrame) -> Result<(), SessionError> {
+            Ok(())
+        }
+        fn take_dropped_frames(&mut self) -> u32 {
+            if self.reported {
+                0
+            } else {
+                self.reported = true;
+                5
+            }
+        }
+    }
+
+    /// §3.10：客户端的 `dropped_frames` 原本只统计**网络过期帧**，
+    /// 渲染侧丢帧没算进去 —— 这一条补上。
+    #[test]
+    fn consumer_dropped_frames_reach_the_session_summary() {
+        let mut transport = FakeTransport::new();
+        transport.inbound.push_back(Ok(hello_ack()));
+        let handle =
+            session_with_consumer(transport, Box::new(DroppingConsumer { reported: false }));
+        let mut events = handle.events();
+
+        handle.pump().expect("应当能收控制消息");
+
+        let mut saw = false;
+        while let Some(ev) = futures::executor::block_on(events.next()) {
+            if let SessionEvent::FramesDropped { count, .. } = ev {
+                assert_eq!(count, 5, "渲染侧丢帧数必须原样上报");
+                saw = true;
+                break;
+            }
+        }
+        assert!(saw, "必须上报渲染侧丢帧事件");
+        assert_eq!(handle.summary().dropped_frames, 5, "汇总里必须含渲染侧丢帧");
     }
 
     /// 统计发出的控制消息里有多少条 `ClockSync`（请求或应答）。

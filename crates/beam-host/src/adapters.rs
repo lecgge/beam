@@ -188,6 +188,8 @@ where
     frame_size: (u32, u32),
     /// 真实错误的去处（`E6005` 之类的「暂无输出」不进这里）。
     errors: PipelineErrors,
+    /// 已经上报过的抓屏丢帧数（用于只上报**增量**，避免重复计数）。
+    reported_dropped: u64,
 }
 
 impl<C, E> CaptureEncodePipeline<C, E>
@@ -216,6 +218,7 @@ where
             capture_cfg,
             frame_size,
             errors: PipelineErrors::default(),
+            reported_dropped: 0,
         }
     }
 
@@ -288,6 +291,19 @@ where
 
     fn stop(&mut self) {
         self.capture.stop();
+    }
+
+    /// 抓屏被单槽覆盖而丢弃的帧数（§3.5 丢帧统计）。
+    ///
+    /// 抓屏快于编码时，抓屏单槽里的旧帧会被覆盖 —— 那些帧**真的没了**，
+    /// 主机侧的会话汇总要能报出来（§3.2 E2004 同一口径）。
+    fn take_dropped_frames(&mut self) -> u32 {
+        let dropped = self.capture.dropped_frames();
+        // 只上报**新增**的部分：会话层每次 `poll` 周期都会取一次，
+        // 这里必须避免重复计数。
+        let delta = dropped.saturating_sub(self.reported_dropped);
+        self.reported_dropped = dropped;
+        u32::try_from(delta).unwrap_or(u32::MAX)
     }
 }
 

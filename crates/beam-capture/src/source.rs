@@ -143,6 +143,16 @@ pub trait CaptureSource: Send {
     fn latest(&mut self) -> Option<CapturedFrame>;
     /// 停止抓屏。
     fn stop(&mut self);
+
+    /// 累计被单槽覆盖而丢弃的帧数（§3.5 丢帧统计）。
+    ///
+    /// 抓屏快于消费（编码被阻塞）时，旧帧会被单槽覆盖 —— 那是**真的丢了**，
+    /// 不能静默丢弃（§3.5 / §3.2 E2004 同一口径）。
+    ///
+    /// 默认返回 `0`：没有单槽语义的后端（例如手动喂帧的假实现）不丢帧。
+    fn dropped_frames(&self) -> u64 {
+        0
+    }
 }
 
 /// 已发布到单槽里的一帧。
@@ -367,6 +377,25 @@ impl CaptureSource for WgcCaptureSource {
         }
         self.stopped = true;
         self.cfg = None;
+    }
+
+    /// 累计被单槽覆盖而丢弃的帧数（§3.5 丢帧统计）。
+    fn dropped_frames(&self) -> u64 {
+        #[cfg(feature = "wgc")]
+        {
+            match &self.backend {
+                // WGC 后端走「最新帧」单槽：抓屏快于消费时旧帧会被覆盖。
+                Some(Backend::Wgc(backend)) => backend.dropped_frames(),
+                // DXGI 后端不走单槽（每次 `AcquireNextFrame` 直接取帧），
+                // 超时只是「这一拍没有新帧」，不是丢帧。
+                Some(Backend::Dxgi(_)) => 0,
+                None => 0,
+            }
+        }
+        #[cfg(not(feature = "wgc"))]
+        {
+            0
+        }
     }
 }
 
