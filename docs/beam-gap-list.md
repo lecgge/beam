@@ -49,13 +49,13 @@
 |---|---|---|---|---|---|
 | 已实现 | 364 | 10 | 0 | 0 | 354 |
 | 占位 | 43 | 34 | 1 | 0 | 8 |
-| 缺失 | 111 | 54 | 3 | 0 | 41 |
+| 缺失 | 111 | 54 | 4 | 0 | 40 |
 | 偏差 | 76 | 54 | 0 | 0 | 22 |
 | 超出 | 3 | 0 | 0 | 0 | 3 |
-| **合计** | **597** | **152** | **4** | **0** | **428** |
+| **合计** | **597** | **152** | **5** | **0** | **427** |
 
 - 审计判定为**未达成**（占位+缺失+偏差）：**230** 条
-- 其中**已落地**：**159** 条；**仍未排期**：**71** 条
+- 其中**已落地**：**160** 条；**仍未排期**：**70** 条
 
 > 「未开始」不代表这一条没人管，而是**还没排进任何一批**。排期后的条目会出现在「落地进度台账」一节，带批次号与验收方式。
 
@@ -156,7 +156,7 @@
 | 状态 | 条目数 |
 |---|---|
 | 未开始 | 0 |
-| 进行中 | 4 |
+| 进行中 | 5 |
 | 已完成 | 153 |
 | 已阻塞 | 12 |
 | 暂不做 | 1 |
@@ -356,6 +356,17 @@
 | 本机驱动的两个 D3D11 限制（已绕开，但要记住） | ① 带 D3D11_BIND_VIDEO_ENCODER 的纹理**不能参与拷贝**（拷进去/拷出来都是全 0）⇒ 颜色转换必须由 shader **直写** NV12 的平面；② NV12 staging 的平面 1（UV）映射返回 E_INVALIDARG ⇒ 色度的校验改用「影子平面」（同一 shader 写出的普通 R8G8 纹理） | 已记录 |
 | VideoProcessor 这条路在本机不可用（96 组变体全灭） | 代码保留 VideoProcessor 优先（其它驱动上它更省事：硬件缩放+色彩转换一步到位），建不出来才回退 compute shader。探针 examples/color_vp_probe.rs 留着，方便换机器时再验一次 | 已记录 |
 
+| B12 | 2026-11-01 | 第十二批：客户端时钟偏移（§5 ClockSync 求偏移） | crates/beam-session | 已完成 | cargo fmt --all --check exit 0；cargo check --workspace --all-targets exit 0 / 0 warning；cargo clippy --workspace --all-targets -- -D warnings exit 0 / 0 warning；cargo test --workspace exit 0（47 套件 / 461 passed / 0 failed / 9 ignored，其中 beam-session 新增 6 个：偏移估计 4 个 + 5 s 节拍 + 应答不回声）；桌面端 clippy --all-targets -- -D warnings exit 0 |
+
+- **B12 时钟同步（主会话自办）** — 写入范围：`crates/beam-session/**`；覆盖条目 P6-03, X13-08
+
+**B12 追加项（审计中顺带发现，不在原 551 条内）**
+
+| 项 | 说明 | 归属 |
+|---|---|---|
+| E2E 延迟测量（§3.13）还没用上这个偏移 | 偏移已经能查了，但客户端渲染侧还没记录「上屏时刻（客户端时钟）」，因此「抓屏时刻 + 偏移 → 上屏时刻」的差值（真实 E2E）还没算出来。X13-08 因此记「进行中」 | 下一批 |
+| 时钟口径的已知局限 | 两端都用各自进程的**单调**时钟（零点不同），偏移正是用来换算这个差异；但单调时钟**不与墙钟对齐**，因此偏移量在两台机器上不可直接比较——这不影响 E2E 测量（同一对端会话内偏移是稳定的） | 已记录 |
+
 ### 已裁决事项
 
 | # | 议题 | 裁决 | 裁决日期 | 说明 | 解锁范围 |
@@ -419,6 +430,7 @@
 | 2026-10-31 | 桌面端客户端此前**根本没有上屏路径** | 此前 `ClientRuntime::connect_default` 用的 `D3D11Renderer` **没有绑定任何窗口**，且 `beam-render/d3d11` / `beam-decode/ffmpeg` 两个 feature 默认关闭 ⇒ 客户端即便收到帧也只会得到 `E10014`（后端未启用）。本批补上 `client-video` feature 与 `connect_to_window` 入口（建窗口 → 建交换链 → 用同一设备开硬解），桌面端只调 L3 入口 | cargo check/clippy 两种 feature 状态全绿；本机自检三步（窗口/交换链/硬解）全过 |
 | 2026-10-31 | D3D11 VideoProcessor 在本机驱动上建不出输入视图（不是参数问题） | `CreateVideoProcessorInputView` 恒返回 E_INVALIDARG(0x80070057)。为排除「参数写错」，做了 96 组变体矩阵（FourCC 三种取值 × Usage 四种 × 源/目标纹理绑定各两种）—— **一组都没建出来** ⇒ 驱动侧的能力缺失。文档 §3.6 允许「D3D11 VideoProcessor **或** compute shader」，因此实现 compute shader 路径 | examples/color_vp_probe.rs 留在仓库里，换机器时可再验一次；生产路径已自动回退到 compute shader |
 | 2026-10-31 | compute shader 的 RGB→NV12 已真机验证（逐字节等于 CPU 参考） | 内嵌 HLSL 用 D3DCompile 运行时编译，compute shader **直写** NV12 纹理的 Y/UV 两个平面（纹理带 VIDEO_ENCODER | UNORDERED_ACCESS ⇒ NVENC 直接吃、shader 直接写，零拷贝）。色彩矩阵 BT.709 + limited range。期间修掉两个真实缺陷：① 着色器把 UV 平面按「宽 × 半高」写（NV12 的 UV 其实是 **宽/2 × 高/2** 个 R8G8 采样）；② NV12 纹理不能靠「先写单平面纹理再拷进去」来填（带 VIDEO_ENCODER 的纹理不能参与拷贝） | Y 平面自 NV12 纹理读回与 CPU 参考逐字节一致（偏差 0）；色度经影子平面偏差 0；单帧 1080p 1.02 ms / 4K 2.10 ms |
+| 2026-11-01 | §5 的 ClockSync 此前是「协议有、实现无」：两端都没发也没算 | 协议里 `ClockSync{t0,t1,t2,t3}` 一直存在，主机侧也有一句应答代码，但**客户端从不发请求、也从不算偏移** ⇒ §5「客户端通过 ClockSync 求偏移」落空，§3.13 的 E2E 延迟也就没有基准。另外发现一个隐患：应答若也走通用控制处理路径，会**再回一条 ClockSync** ⇒ 两端无限乒乓 | 客户端每 5 s 发请求、按 NTP 式算偏移并可查；单测钉住「不回声」与「5 s 节拍」 |
 
 ---
 
@@ -526,7 +538,7 @@
 |---|---|---|---|---|---|
 | P6-01 | 时间:所有时间戳为单调时钟微秒 `u64` | `crates/beam-proto/src/lib.rs:84-86`、`crates/beam-proto/src/lib.rs:112-116`、`crates/beam-proto/src/frame.rs:135`、`crates/beam-proto/src/message.rs:114-120` | 已实现 | `EncodedFrame.pts_us/capture_ts_us: u64`、`ClockSync.t0..t3: u64`、`VideoPktHeader.capture_ts: u64` 均符合。注意文档自身冲突：§5 要求帧头 `capture_ts` 为 48 位，代码按 §5 截断（frame.rs:152、165-166），48 位微秒约 8.9 年不回绕；`StatsReport` 的 `rtt_us/e2e_us` 等是时长而非时间戳（stats.rs:19-25，u32）。 | 未开始 |
 | P6-02 | 主机抓屏时刻为帧的 capture_ts | `crates/beam-proto/src/lib.rs:85-86`、`crates/beam-proto/src/lib.rs:114-116`、`crates/beam-proto/src/lib.rs:152-153`、`crates/beam-proto/src/frame.rs:135` | 已实现 | `EncodedFrame.capture_ts_us`、`AssembledFrame.capture_ts_us`、`DecodedFrame.capture_ts_us` 与帧头 `capture_ts` 贯通。 | 未开始 |
-| P6-03 | 客户端通过 ClockSync 求偏移 | 未找到（已搜索：`clock_offset`、`offset_us`、`sync_offset`、`fn .*offset`、`estimate`、`ClockSync` 的消费方；全仓库仅 `crates/beam-proto/src/message.rs:112-121` 定义该消息，无任何求偏移算法） | 缺失 | 只有消息定义，没有 NTP 式四时间戳偏移计算（也缺 §3.13 要求的每 5 s 一次调度）。 | 未开始 |
+| P6-03 | 客户端通过 ClockSync 求偏移 | 未找到（已搜索：`clock_offset`、`offset_us`、`sync_offset`、`fn .*offset`、`estimate`、`ClockSync` 的消费方；全仓库仅 `crates/beam-proto/src/message.rs:112-121` 定义该消息，无任何求偏移算法） | 缺失 | 只有消息定义，没有 NTP 式四时间戳偏移计算（也缺 §3.13 要求的每 5 s 一次调度）。 | 已完成 |
 | P6-04 | 内存所有权:EncodedFrame 用 `Bytes` 共享切片 | `crates/beam-proto/src/lib.rs:80-91`、`crates/beam-proto/src/lib.rs:95-105` | 已实现 | `slices: Vec<bytes::Bytes>`，`to_payload()` 拼接零拷贝（lib.rs:95-105）。位置偏差：文档 §3.2 把 `EncodedFrame` 归在 beam-net，实现放在 beam-proto（理由见 lib.rs:75-78：§4 禁止 encode→net 的 L1 横向依赖），字段名与 §3.2 逐字一致。 | 未开始 |
 | P6-05 | 内存所有权:D3D11 纹理用引用计数 COM 指针,capture→encode 同一设备上零拷贝 | `crates/beam-capture/src/source.rs:7-9`、`crates/beam-encode/src/encoder.rs:16` | 缺失 | 只在两个平台 crate 各有一个 `Texture = ID3D11Texture2D` 类型别名与一句注释；未找到任何设备创建/共享代码（已搜索：`ID3D11Texture2D`、`Clone for Texture`、`same_device`、`CreateDevice`、`零拷贝` → 仅命中类型别名与文档注释）。跨设备零拷贝未实现。 | 未开始 |
 | P6-06 | 内存所有权:JNI 热路径 DirectByteBuffer 由 Rust 侧池化,回调返回后归还 | `crates/beam-ffi/src/lib.rs:33-47`、`crates/beam-ffi/src/client.rs:68-73` | 缺失 | 只有设计说明：「本轮先落地接口契约与回调桥接,DirectByteBuffer 池在 M1（MVP）随 Android `core-net` 一起实现」（lib.rs:46-47）；`FrameSink::on_frame(&mut self, data: &[u8], ...)` 收切片而非 ByteBuffer 句柄（client.rs:68-73）。已搜索 `DirectByteBuffer`/`JNIEnv`/`ByteBuffer`/`pool`/`recycle` → 无池实现。 | 未开始 |

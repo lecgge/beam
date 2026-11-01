@@ -61,6 +61,13 @@ pub(crate) trait SessionRunner: Send {
     fn counters(&self) -> SessionCounters {
         SessionCounters::default()
     }
+
+    /// 当前的时钟同步结果（§5「客户端通过 ClockSync 求偏移」）。
+    ///
+    /// 只有客户端会算（主机不需要），因此默认是 `None`。
+    fn clock_sync_info(&self) -> Option<crate::clock::ClockSyncState> {
+        None
+    }
 }
 
 /// 会话内部状态（句柄与驱动方共享）。
@@ -96,6 +103,11 @@ impl SessionInner {
     /// 当前时钟毫秒数。
     pub(crate) fn now_ms(&self) -> u64 {
         self.clock.lock().map(|g| g.now_ms()).unwrap_or_default()
+    }
+
+    /// 当前单调时间戳（**微秒**，§5）。
+    pub(crate) fn now_us(&self) -> u64 {
+        self.clock.lock().map(|g| g.now_us()).unwrap_or_default()
     }
 
     /// 当前超时参数。
@@ -349,6 +361,20 @@ impl SessionHandle {
         let guard = self.inner.runner.lock().ok()?;
         let runner = guard.as_ref()?;
         runner.reconnecting_info()
+    }
+
+    /// 当前的时钟同步结果（§5「客户端通过 ClockSync 求偏移」）。
+    ///
+    /// 客户端每 5 s 发一次 `ClockSync` 请求，主机回四时间戳，
+    /// 客户端据此算出「主机时钟 − 客户端时钟」的偏移与往返时延。
+    ///
+    /// 有了它，客户端才能把主机的 `capture_ts`（主机时钟）换算到自己的时钟，
+    /// 从而算出真实的端到端延迟（§3.13 的 E2E 阶段）。
+    /// 还没同步成功时是 `None`。
+    pub fn clock_sync(&self) -> Option<crate::clock::ClockSyncState> {
+        let guard = self.inner.runner.lock().ok()?;
+        let runner = guard.as_ref()?;
+        runner.clock_sync_info()
     }
 
     /// 当前是否只剩**这一份**句柄（其他持有者都已经放开）。

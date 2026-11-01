@@ -30,6 +30,9 @@ pub const STATS_INTERVAL: Duration = Duration::from_millis(500);
 /// 统计上报节拍（毫秒）。
 pub const STATS_INTERVAL_MS: u64 = 500;
 
+/// ClockSync 请求节拍（微秒）——§3.13「NTP 式四时间戳时钟同步，每 5 s 一次」。
+pub const CLOCK_SYNC_INTERVAL_US: u64 = 5_000_000;
+
 /// 生成会话号（§5 `Resume{session_id}` 复用）。
 pub fn next_session_id() -> u64 {
     static COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -223,7 +226,10 @@ impl ControlContext {
                 }
             }
             ControlMsg::ClockSync { t0, .. } => {
-                let now = self.clock.now_ms();
+                // §5：四个时间戳都是**微秒**（「所有时间戳为单调时钟微秒」）。
+                // `t1` = 主机接收时刻，`t2` = 主机回复时刻。
+                // 这里收到消息与生成回复是同一瞬间，因此两者相等。
+                let now = self.clock.now_us();
                 out.replies.push(ControlMsg::ClockSync {
                     t0,
                     t1: now,

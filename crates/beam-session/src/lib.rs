@@ -123,7 +123,7 @@ pub use client::{
     ClientControlDeps, ClientDeps, ClientSession, ClientSessionConfig, PeerAddr,
     RECONNECT_RETRY_INTERVAL_MS,
 };
-pub use clock::{Clock, ManualClock, SystemClock};
+pub use clock::{estimate_offset, Clock, ClockSyncState, ManualClock, SystemClock};
 pub use control::{
     caps_from_config, config_from_agreed, next_session_id, ControlContext, ControlOutcome,
     ControlRole, PairingConfig, STATS_INTERVAL, STATS_INTERVAL_MS,

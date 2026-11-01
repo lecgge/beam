@@ -46,7 +46,7 @@ use beam_proto::{ControlMsg, EncodedFrame, Feedback, ProtocolVersion, StatsRepor
 use crate::clock::duration_ms;
 use crate::control::{
     caps_from_config, config_from_agreed, next_session_id, ControlContext, ControlOutcome,
-    ControlRole, PairingConfig, STATS_INTERVAL_MS,
+    ControlRole, PairingConfig, CLOCK_SYNC_INTERVAL_US, STATS_INTERVAL_MS,
 };
 use crate::error::SessionError;
 use crate::event::{
@@ -181,6 +181,10 @@ pub(crate) struct ClientRunner {
     idr_requested: bool,
     /// 上一次统计上报时间戳。
     last_stats_ms: u64,
+    /// 上次发 ClockSync 请求的时刻（客户端时钟，微秒；§5「每 5 s 一次」）。
+    last_clock_sync_us: u64,
+    /// 最近一次时钟同步的结果（§5「客户端通过 ClockSync 求偏移」）。
+    clock_sync: Option<crate::clock::ClockSyncState>,
     /// 本端统计。
     stats: StatsReport,
     /// 是否仍需（重新）建立传输：进入 `Reconnecting` 置位，恢复串流才清掉。
@@ -269,6 +273,11 @@ impl ClientRunner {
 
     fn now_ms(&self) -> u64 {
         self.inner.upgrade().map(|i| i.now_ms()).unwrap_or(0)
+    }
+
+    /// 当前单调时间戳（**微秒**，§5「所有时间戳为单调时钟微秒」）。
+    fn now_us(&self) -> u64 {
+        self.inner.upgrade().map(|i| i.now_us()).unwrap_or(0)
     }
 
     fn timeouts(&self) -> SessionTimeouts {
@@ -475,8 +484,46 @@ impl ClientRunner {
 
     /// 处理一条控制消息（§4.1）。
     fn handle_control(&mut self, msg: ControlMsg) {
+        // §5 的 `ClockSync` 走**专用**通道：客户端发出的是请求（t1=t2=t3=0），
+        // 主机回的是应答（t1/t2 非 0）。这里必须先截住应答，
+        // 否则它会被当成新的请求再回一条 ⇒ 两端无限乒乓。
+        if let ControlMsg::ClockSync { t0, t1, t2, t3 } = msg {
+            if t1 != 0 || t2 != 0 || t3 != 0 {
+                self.on_clock_sync_reply(t0, t1, t2);
+                return;
+            }
+        }
         let outcome: ControlOutcome = self.ctrl.handle(msg);
         self.apply_outcome(outcome);
+    }
+
+    /// 收到主机的 `ClockSync` 应答 ⇒ 估算时钟偏移（§5「客户端通过 ClockSync 求偏移」）。
+    fn on_clock_sync_reply(&mut self, t0: u64, t1: u64, t2: u64) {
+        let t3 = self.now_us();
+        let (offset_us, rtt_us) = crate::clock::estimate_offset(t0, t1, t2, t3);
+        self.clock_sync = Some(crate::clock::ClockSyncState {
+            offset_us,
+            rtt_us,
+            measured_at_us: t3,
+        });
+    }
+
+    /// 定期发 `ClockSync` 请求（§3.13「NTP 式四时间戳时钟同步，**每 5 s** 一次」）。
+    fn maybe_send_clock_sync(&mut self) {
+        if self.machine.state() != SessionState::Streaming {
+            return;
+        }
+        let now = self.now_us();
+        if now.saturating_sub(self.last_clock_sync_us) < CLOCK_SYNC_INTERVAL_US {
+            return;
+        }
+        self.last_clock_sync_us = now;
+        self.send_control(ControlMsg::ClockSync {
+            t0: now,
+            t1: 0,
+            t2: 0,
+            t3: 0,
+        });
     }
 
     /// 把处理结果落到状态机上。
@@ -738,6 +785,7 @@ impl SessionRunner for ClientRunner {
         self.pump_frames();
         self.report_dropped_frames();
         self.maybe_send_feedback();
+        self.maybe_send_clock_sync();
         self.flush_control();
     }
 
@@ -761,6 +809,13 @@ impl SessionRunner for ClientRunner {
         self.reconnect_since_ms = None;
         self.next_retry_ms = now_ms;
         self.last_rebuild_ms = now_ms;
+        // 换了时间基准 ⇒ 之前算出的时钟偏移作废（下次同步会重算）。
+        self.last_clock_sync_us = 0;
+        self.clock_sync = None;
+    }
+
+    fn clock_sync_info(&self) -> Option<crate::clock::ClockSyncState> {
+        self.clock_sync
     }
 
     fn reconnecting_info(&self) -> Option<ReconnectingInfo> {
@@ -876,6 +931,8 @@ impl ClientSession {
             first_frame_seen: false,
             idr_requested: false,
             last_stats_ms: now,
+            last_clock_sync_us: 0,
+            clock_sync: None,
             stats: StatsReport::default(),
             reconnect_pending: false,
             reconnect_attempts: 0,
@@ -1283,6 +1340,98 @@ mod tests {
             handle.state(),
             SessionState::Streaming,
             "丢帧不是致命错误,会话状态不得改变"
+        );
+    }
+
+    /// 统计发出的控制消息里有多少条 `ClockSync`（请求或应答）。
+    fn clock_sync_count(sent: &[ControlMsg]) -> usize {
+        sent.iter()
+            .filter(|m| matches!(m, ControlMsg::ClockSync { .. }))
+            .count()
+    }
+
+    /// §5「客户端通过 ClockSync 求偏移」：每 5 s 发一次请求。
+    #[test]
+    fn client_sends_clock_sync_every_five_seconds() {
+        let mut transport = FakeTransport::new();
+        transport.inbound.push_back(Ok(hello_ack()));
+        // 喂若干帧：否则 3 s 的**停滞判定**会先把会话打进重连
+        // （真实链路里每 ~16 ms 就有一帧，停滞计时会被不断重置）。
+        for _ in 0..8 {
+            transport.frames.push(frame(true));
+        }
+        let (handle, sent) = session_with(transport);
+        let clock = std::sync::Arc::new(ManualClock::new());
+        handle.set_clock(std::sync::Arc::clone(&clock) as std::sync::Arc<dyn crate::clock::Clock>);
+        // 把停滞阈值放宽：本测试**不喂帧**（帧在第一次 pump 里就被一次性抽干），
+        // 否则 3 s 的停滞判定会先把会话打进重连（真实链路里每 ~16 ms 一帧，
+        // 停滞计时会被不断重置）。
+        handle.set_timeouts(crate::SessionTimeouts {
+            stall_threshold: Duration::from_secs(60),
+            ..crate::SessionTimeouts::default()
+        });
+        handle.pump().expect("应当能收控制消息");
+        assert_eq!(handle.state(), SessionState::Streaming);
+
+        // 逐秒推进（每步都有一帧 ⇒ 不触发停滞判定）。
+        for _ in 0..4 {
+            clock.advance(Duration::from_secs(1));
+            handle.pump().expect("应当能推进");
+        }
+        assert_eq!(
+            clock_sync_count(&sent.lock().expect("锁")),
+            0,
+            "未到 5 s 不该发 ClockSync"
+        );
+
+        // 第 5 秒 ⇒ 发一条请求（t0 = 客户端时钟的微秒）。
+        clock.advance(Duration::from_secs(1));
+        handle.pump().expect("应当能推进");
+        let log = sent.lock().expect("锁").clone();
+        assert_eq!(clock_sync_count(&log), 1, "每 5 s 发一次 ClockSync");
+        let request = log
+            .iter()
+            .find_map(|m| match m {
+                ControlMsg::ClockSync { t0, t1, t2, t3 } => Some((*t0, *t1, *t2, *t3)),
+                _ => None,
+            })
+            .expect("应当发出 ClockSync 请求");
+        assert_eq!(request.0, 5_000_000, "t0 必须是客户端时钟的微秒");
+        assert_eq!(
+            (request.1, request.2, request.3),
+            (0, 0, 0),
+            "请求里 t1/t2/t3 为 0"
+        );
+    }
+
+    /// 收到主机的应答 ⇒ 算出时钟偏移；且**不回**新的 ClockSync（否则两端乒乓）。
+    #[test]
+    fn client_computes_clock_offset_and_does_not_echo() {
+        let mut transport = FakeTransport::new();
+        transport.inbound.push_back(Ok(hello_ack()));
+        // 主机快 1 s：t1/t2 = 客户端 2.000 s + 1 s = 3.000 s。
+        transport.inbound.push_back(Ok(ControlMsg::ClockSync {
+            t0: 2_000_000,
+            t1: 3_000_000,
+            t2: 3_000_000,
+            t3: 0,
+        }));
+        let (handle, sent) = session_with(transport);
+        let clock = std::sync::Arc::new(ManualClock::starting_at(2_000));
+        handle.set_clock(std::sync::Arc::clone(&clock) as std::sync::Arc<dyn crate::clock::Clock>);
+
+        handle.pump().expect("应当能收 HelloAck");
+        assert_eq!(handle.state(), SessionState::Streaming);
+        handle.pump().expect("应当能收 ClockSync 应答");
+
+        let sync = handle.clock_sync().expect("应当算出时钟偏移");
+        assert_eq!(sync.offset_us, 1_000_000, "偏移应是主机快的那 1 s");
+        assert_eq!(sync.rtt_us, 0);
+        assert_eq!(sync.measured_at_us, 2_000_000);
+        assert_eq!(
+            clock_sync_count(&sent.lock().expect("锁")),
+            0,
+            "客户端不得回新的 ClockSync（否则两端无限乒乓）"
         );
     }
 }
