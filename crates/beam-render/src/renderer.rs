@@ -49,6 +49,10 @@ pub struct PresentInfo {
     pub presents: u64,
     /// 真的把解码纹理搬进交换链的次数。
     pub textured_presents: u64,
+    /// 其中**经 VideoProcessor 转换**后搬上屏的次数（4:2:0 → BGRA，§3.10）。
+    ///
+    /// 与 `textured_presents` 的差额是「直接搬」（格式本来就一致）。
+    pub converted_presents: u64,
     /// 因格式 / 尺寸 / 设备不匹配而降级成清屏的次数。
     pub cleared_presents: u64,
     /// 解码纹理的 DXGI 格式（DXGI 四字符码的整数值；`0` = 没有解码纹理）。

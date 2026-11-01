@@ -79,6 +79,8 @@ mod perf;
 pub mod error;
 pub mod renderer;
 mod slot;
+#[cfg(feature = "d3d11")]
+pub mod vp;
 pub mod window;
 
 #[cfg(feature = "d3d11")]

@@ -70,5 +70,11 @@ beam-host = { workspace = true }
 name = "present_smoke"
 required-features = ["video"]
 
+# 真机诊断：D3D11 VideoProcessor 能不能把 4:2:0 解码纹理当输入（§3.10）。
+# 这是「零拷贝不可行」之后的备选转换路径（硬件做格式转换）。
+[[example]]
+name = "vp_probe"
+required-features = ["video"]
+
 [lints]
 workspace = true

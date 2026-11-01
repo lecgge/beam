@@ -111,6 +111,10 @@ pub(crate) struct SwapChain {
     vrr: bool,
     /// 呈现诊断信息（§3.10：真的搬纹理 vs 降级清屏）。
     info: PresentInfo,
+    /// VideoProcessor 转换器（4:2:0 → BGRA，§3.10）。
+    ///
+    /// 首次需要时按当前解码纹理建立；源格式或高度变了要重建。
+    converter: Option<crate::vp::VpConverter>,
 }
 
 impl SwapChain {
@@ -210,6 +214,7 @@ impl SwapChain {
                 swapchain_format: dxgi_format(cfg.format).0,
                 ..PresentInfo::default()
             },
+            converter: None,
         })
     }
 
@@ -326,6 +331,26 @@ impl SwapChain {
                 cleared = false;
                 self.info.textured_presents += 1;
             } else {
+                // §3.10：格式 / 尺寸对不上时，先试 **VideoProcessor 转换**
+                // （4:2:0 → BGRA，硬件做色彩空间转换）。
+                //
+                // 转换成功后拿 BGRA 纹理再走一次 CopyResource —— 那就是真的上屏。
+                if let Some(converted) = self.convert_420_to_bgra(source, desc) {
+                    // 转换结果要先脱离借用（`self` 还要用），再拷进后备缓冲。
+                    let converted = converted.clone();
+                    let buffer: ID3D11Texture2D = unsafe { self.swapchain.GetBuffer(index as u32) }
+                        .map_err(|err| {
+                            tracing::error!(error = %err, "获取后备缓冲失败");
+                            RenderError::SwapChainFailed {
+                                reason: "获取后备缓冲失败".to_string(),
+                            }
+                        })?;
+                    // SAFETY: 转换结果是 BGRA、与交换链后备缓冲同格式同尺寸同设备。
+                    unsafe { self.context.CopyResource(&buffer, &converted) };
+                    self.info.textured_presents += 1;
+                    self.info.converted_presents += 1;
+                    return Ok(());
+                }
                 tracing::warn!(
                     src_width = desc.Width,
                     src_height = desc.Height,
@@ -369,6 +394,55 @@ impl SwapChain {
             return Err(RenderError::SourceMismatch { reason });
         }
         Ok(())
+    }
+
+    /// 用 **VideoProcessor** 把 4:2:0 解码纹理转换成 BGRA（§3.10）。
+    ///
+    /// D3D11VA 的原生输出是 `DXGI_FORMAT_420Opaque`，与 BGRA 交换链格式不同
+    /// ⇒ 零拷贝不可行（B17 实测）。VideoProcessor 是硬件做的格式转换。
+    ///
+    /// 返回转换后的 BGRA 纹理（`None` = 转换不可用）。
+    #[allow(
+        unsafe_code,
+        reason = "VideoProcessor 的创建与 blt 都是 unsafe 的 D3D11 COM 调用"
+    )]
+    fn convert_420_to_bgra(
+        &mut self,
+        source: &ID3D11Texture2D,
+        desc: D3D11_TEXTURE2D_DESC,
+    ) -> Option<ID3D11Texture2D> {
+        if !crate::vp::is_420_format(desc.Format) {
+            return None;
+        }
+        // 可见高度 = 交换链的高度（纹理自身的高是对齐后的 coded height）。
+        // 4:2:0 的 Y 平面行距 = 宽度，解码器把画面写在前面、后面是 padding
+        // ⇒ 转换必须按可见高度取，否则底部会多出未初始化的行。
+        let visible_height = desc.Height.min(self.height);
+        let needs_rebuild = match &self.converter {
+            Some(c) => {
+                let (w, h) = c.dimensions();
+                w != desc.Width || h != visible_height
+            }
+            None => true,
+        };
+        if needs_rebuild {
+            match crate::vp::VpConverter::new(source, visible_height) {
+                Ok(c) => self.converter = Some(c),
+                Err(e) => {
+                    tracing::warn!(error = %e, "VideoProcessor 转换器建立失败,本帧无法上屏");
+                    return None;
+                }
+            }
+        }
+        let converter = self.converter.as_mut()?;
+        match converter.convert(source) {
+            Ok(target) => Some(target.clone()),
+            Err(e) => {
+                tracing::warn!(error = %e, "VideoProcessor 转换失败,本帧无法上屏");
+                self.converter = None;
+                None
+            }
+        }
     }
 
     /// 读出解码纹理的描述与设备一致性，并更新诊断计数。

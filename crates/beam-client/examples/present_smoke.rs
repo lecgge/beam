@@ -212,18 +212,23 @@ fn main() {
             let ok = r.present(&decoded_first).is_ok();
             let info = r.present_info();
             let verdict = if info.textured_presents > 0 {
-                "零拷贝成功"
+                if info.converted_presents > 0 {
+                    "经 VideoProcessor 转换后搬纹理成功"
+                } else {
+                    "直接搬纹理成功（零拷贝）"
+                }
             } else if ok {
                 "没搬上纹理（降级）"
             } else {
                 "没搬上纹理（已如实报错 E10015）"
             };
             println!(
-                "  {:<28} {}x{}: {verdict}（真搬 {} 次 / 降级 {} 次，源格式 0x{:08x}）",
+                "  {:<28} {}x{}: {verdict}（真搬 {} 次 / 转换 {} 次 / 降级 {} 次，源格式 0x{:08x}）",
                 fmt.name(),
                 decoded_first.width,
                 h,
                 info.textured_presents,
+                info.converted_presents,
                 info.cleared_presents,
                 info.source_format,
             );
@@ -235,24 +240,35 @@ fn main() {
 
     let Some((win_fmt, win_height)) = winner else {
         println!();
-        println!("RESULT: FAIL —— 没有任何一个交换链方案能把解码纹理零拷贝搬上屏");
+        println!("RESULT: FAIL —— 没有任何一个交换链方案能把解码纹理搬上屏");
         println!(
             "  原因: D3D11VA 视频解码的原生输出是 DXGI_FORMAT_420Opaque (4:2:0 双平面),\n\
              而 flip-model 交换链不接受 4:2:0 视频格式; BGRA 交换链又与它格式不同。\n\
-             => 零拷贝不可行, 需要先做 4:2:0 -> BGRA 的格式转换 (PSV + 像素着色器)。\n\
-             => 详见 crates/beam-render 的 SwapChainFormat / PresentInfo 文档。"
+             => 需要先做 4:2:0 -> BGRA 的格式转换。\n\
+             => 详见 crates/beam-render 的 SwapChainFormat / PresentInfo / vp 模块文档。"
         );
         std::process::exit(1);
     };
     println!();
     println!(
-        "选定方案: {} @ {}x{}（零拷贝搬纹理）",
+        "选定方案: {} @ {}x{}",
         win_fmt.name(),
         decoded_first.width,
         win_height
     );
 
     // ---- [6] 用选定方案把整段码流真的上屏 ----
+    //
+    // **必须用新窗口**：DXGI 规定一个 HWND 只能挂一个交换链，
+    // 在同一个窗口上重建交换链必然失败。
+    let final_window = match VideoWindow::create("Beam 串流画面", decoded_first.width, win_height)
+    {
+        Ok(w) => w,
+        Err(e) => {
+            println!("FAIL: 创建原生窗口失败：{e}");
+            std::process::exit(2);
+        }
+    };
     let cfg = RenderConfig {
         width: decoded_first.width,
         height: win_height,
@@ -260,7 +276,7 @@ fn main() {
         ..RenderConfig::default()
     };
     let mut renderer = D3D11Renderer::new();
-    if let Err(e) = renderer.attach(WindowHandle(window.hwnd()), cfg) {
+    if let Err(e) = renderer.attach(WindowHandle(final_window.hwnd()), cfg) {
         println!("FAIL: 交换链创建失败 {e}");
         std::process::exit(1);
     }
@@ -303,8 +319,11 @@ fn main() {
         renderer.presented()
     );
     println!(
-        "呈现诊断: 总呈现 {} 次，其中真的搬纹理 {} 次，降级清屏 {} 次",
-        info.presents, info.textured_presents, info.cleared_presents
+        "呈现诊断: 总呈现 {} 次，其中真的搬纹理 {} 次（其中经 VideoProcessor 转换 {} 次），降级清屏 {} 次",
+        info.presents,
+        info.textured_presents,
+        info.converted_presents,
+        info.cleared_presents
     );
     println!(
         "格式: 解码纹理 = 0x{:08x} ({}x{})，交换链 = 0x{:08x}，一致? {}",
@@ -312,7 +331,11 @@ fn main() {
         info.source_width,
         info.source_height,
         info.swapchain_format,
-        if info.formats_match() { "是" } else { "否" }
+        if info.formats_match() {
+            "是"
+        } else {
+            "否（经 VideoProcessor 转换后上屏）"
+        }
     );
 
     // 停留一会儿，让用户真的看见窗口（也是给交换链一次 vsync 的机会）。
