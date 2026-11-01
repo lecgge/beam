@@ -49,10 +49,10 @@
 |---|---|---|---|---|---|
 | 已实现 | 364 | 12 | 0 | 0 | 352 |
 | 占位 | 43 | 34 | 1 | 0 | 8 |
-| 缺失 | 111 | 54 | 4 | 0 | 40 |
+| 缺失 | 111 | 56 | 2 | 0 | 40 |
 | 偏差 | 76 | 54 | 0 | 0 | 22 |
 | 超出 | 3 | 0 | 0 | 0 | 3 |
-| **合计** | **597** | **154** | **5** | **0** | **425** |
+| **合计** | **597** | **156** | **3** | **0** | **425** |
 
 - 审计判定为**未达成**（占位+缺失+偏差）：**230** 条
 - 其中**已落地**：**160** 条；**仍未排期**：**70** 条
@@ -156,8 +156,8 @@
 | 状态 | 条目数 |
 |---|---|
 | 未开始 | 0 |
-| 进行中 | 5 |
-| 已完成 | 155 |
+| 进行中 | 3 |
+| 已完成 | 157 |
 | 已阻塞 | 12 |
 | 暂不做 | 1 |
 
@@ -390,6 +390,18 @@
 | 回环示例的三个顺序/时限问题（都在示例里，不是产品代码） | ① 先 connect 后 accept ⇒ quinn 没人推进握手，客户端只能超时，主机也看不到客户端证书；② 最小客户端不发 Feedback ⇒ 主机 3 s 停滞判定触发；③ 客户端时限短于主机 ⇒ 客户端先断开，主机会话按正常断开语义进 Error 态，示例的判据却要求主机仍是 Streaming | 已修 |
 | mDNS 在真实局域网里的可达性未验证 | 本机回环只能证明「广播能被同一台机器浏览到」；跨机器的组播可达性、路由器是否放行 `_beam._udp` 的组播，仍需两台机器实测 | 需人工验证 |
 
+| B15 | 2026-11-01 | 第十五批：裁决 14 条待决策（S1–S14）并落地 | crates/beam-net / crates/beam-discovery / docs（两份设计文档） | 已完成 | cargo fmt --all --check exit 0；cargo check --workspace --all-targets exit 0 / 0 warning；cargo clippy --workspace --all-targets -- -D warnings exit 0 / 0 warning；cargo test --workspace exit 0；cargo bench -p beam-net --features fec --bench packetize exit 0：**§3.2 的 FEC 预算全部达标**（T1 0.670 / T2 0.376 / T3 0.152 ms）；两份设计文档按裁决改写（CRLF + UTF-8 无 BOM 保持不变） |
+
+- **B15 决策落地（主会话自办）** — 写入范围：`crates/beam-net/**`、`docs/**`；覆盖条目 N-24, N-29
+
+**B15 追加项（审计中顺带发现，不在原 551 条内）**
+
+| 项 | 说明 | 归属 |
+|---|---|---|
+| S5（错误码段重划）与 S11（PIN 校验）已裁但未实施 | S5 要同步改桌面 Rust 端 + 前端文案表 + §3.11/§3.14 清单；S11 要改 connect 的 command 签名 + 前端。都排在下一批 | 下一批 |
+| S4（DirectByteBuffer 零拷贝）按当前预算判定为「不必做」 | 拷贝量级是**估算**（1080p@20 Mbps ≈ 2.5 MB/帧 ≈ 0.2 ms/帧），未实测；若将来要把 §6 的零拷贝写成已达成，需要先实测这个量级 | 需人工验证 |
+| S1 的 `plat` 字段实现 | §3.4 已写明字段语义，但 beam-discovery 的 TXT 与信任库写入路径还没接上该字段（发现到的主机仍显示「未知平台」） | 下一批 |
+
 ### 已裁决事项
 
 | # | 议题 | 裁决 | 裁决日期 | 说明 | 解锁范围 |
@@ -400,25 +412,20 @@
 | D4 | windows crate 版本分叉（0.61 / 0.62） | **保留现状：beam-capture 内以别名引入 windows 0.61.3 做 COM 指针桥接，对外 Texture 仍用 windows 0.62** | 2026-10-29 | 文档 §2 只写「依赖 windows-capture、windows crate」，§7 未规定版本 → 属实现细节而非文档语义，故按「只改实现方式不改语义」裁决为保留现状。理由：①windows-capture 2.x 需 rustc >= 1.88，与仓库 MSRV 1.86 冲突，升不动；②D3D11 的 IID/vtable 由操作系统定义，两版 ABI 相同，桥接安全；③对外的 Texture 必须与 beam-encode 的 D3D11 纹理同型才能零拷贝。副作用：依赖树里同时存在 windows 0.61/0.62 两套 windows_result。**未改文档语义。** |  |
 | D5 | 跨 crate 的 D3D11 设备契约由谁保证 | **设备由串流编排层 beam-host（L3）统一创建，并注入 capture / encode / decode / render；平台 crate 之间不横向依赖** | 2026-10-29 | 文档 §4 规定 L1 之间不可横向依赖（唯一例外 net→pair），§6 规定「D3D11 纹理用引用计数 COM 指针，capture→encode 同一设备上零拷贝」。用平台类型 ID3D11Device 作契约参数、由 L3 注入，是唯一同时满足这两条的形状。B3-D 已落地 D3D11VaDecoder::open_with_device(cfg, &ID3D11Device)；B3-A 的 D3D11Renderer::device() 已做运行期设备校验（不匹配则该帧清屏并告警，不静默拷错）。**未改文档语义。** |  |
 | D6 | NVENC 一帧流水线延迟在 host 侧如何处理 | **host 侧显式容忍 E6005（视作「本轮暂无输出」），且不在 host 侧再缓存一帧** | 2026-10-29 | 文档 §3.6 未规定 NVENC 延迟；§4.1 时序允许首帧晚一点到（客户端会等到 IDR）。在 host 侧缓存一帧会让主机比真实画面多持有一帧，把延迟做大，与 §4.1「上屏等待含 vsync 整帧量化、目标须留 1 帧余量」相悖。E6005 是段内扩展码，不进错误槽；真错误继续冒泡，不静默吞掉。**未改文档语义。** 仍缺：桌面端主机侧尚未消费该错误通道（start_hosting 未起 QUIC 监听）。 |  |
-
-### 待决策（阻塞后续批次）
-
-| # | 议题 | 影响 | 阻塞范围 |
-|---|---|---|---|
-| S1 | 设备平台字段（platform）缺失 | §3.4 的 mDNS TXT 不带平台字段、§5 协议也无设备信息消息 → 信任库里的设备平台恒为「未知平台」。补齐必须**改协议语义**：要么 beam-discovery 的 TXT 加 plat 字段，要么 §5 增加一条 DeviceInfo 控制消息。 | §3.4, §5 |
-| S2 | 帧头缺少独立的 pts 字段 | §5 的 16 字节帧头只有 capture_ts(48 位)，接收端 pts_us = capture_ts_us。若要求 pts 与 capture_ts 分开，须**改帧头布局**（16 字节已占满），属协议语义变更。 | §5 |
-| S3 | §5 自身矛盾：k ≤ 200 与「单帧超过 255 片拆多组」 | 两条互斥规则。实现按 200 拆组、255 只限 k+m。文档需统一口径 —— 这是**改文档**而非改实现。 | §5 |
-| S4 | JNI DirectByteBuffer 零拷贝 | §3.12 要求热路径走 JNI 直接 ByteBuffer 避免 uniffi 拷贝，当前是 Vec<u8> 拷贝路径。补齐需**新增外部依赖 jni**，属依赖引入决策，需拍板。 | §3.12, §6 |
-| S5 | 错误码段撞车：外壳与 crates 同码不同义 | E11xxx 同时被 beam-config（解析/校验/存储不可用）和桌面端外壳（设置不合法/读写失败/perf 仅 Debug）当配置类用，E11003 尤其荒谬（perf vs 配置存储）；E12001、E9002 也有同码不同义。前端按 code 字符串唯一，只能写合并文案 |  |
-| S6 | Android 侧键码无法编码成 USB HID | 协议侧 InputEvent::Key.code 是 u16 HID 扫描码，但 Android 的 DOM 风格键名（BrowserBack / BrowserHome / ContextMenu）在 HID Keyboard page 没有对应 usage，采不上来 |  |
-| S7 | 滚轮的物理单位未定义 | proto 只说 Scroll 的 dx/dy 是 Q16.16，§3.8 没说物理单位。实现口径取「Q16.16 的整数部分 = 滚轮刻度，Win32 一格 = 120」，属实现选择；若文档另有约定需改实现 |  |
-| S8 | E8004 是 E8xxx 段内扩展码，文档未列 | beam-input 新增 UnsupportedKeyCode（HID 键码无法映射为 VK）。与既有 8003 同口径的段内扩展，没有新增错误段、没有改 §3.8 的 8001/8002 语义，但 §3.8 的错误码清单里没有它 |  |
-| S9 | §16 内部张力：「间距 4 的倍数」与「卡片内边距 14」 | 14 不是 4 的倍数。实现按 §16 的逐字表（卡片内边距 = 14px），设计规范门禁也只校验逐字表，没有额外强制「所有间距都是 4 的倍数」—— 否则会和同一行规范打架。建议产品方案 §16 加一句说明 |  |
-| S10 | §16 的「手机外框 30」在桌面端没有使用点 | 手机外框是 Android 端手机模型的圆角，桌面端没有这个形状。令牌保留（两端共用同一刻度）但不引用，门禁脚本因此把它排除在「必须被用到」清单外 |  |
-| S11 | 桌面端 PIN 没有端到端校验 | 前端做格式校验 + 尝试预算 + 完整 UI，但后端 connect(host_id) 命令没有 PIN 参数 —— 填对填错都能连上。要闭环需 Rust 侧给 connect 加 PIN 参数 |  |
-| S12 | 通用 UI 组件放在 :core-data 的 ui 包 | §3.12 固定 12 个模块且没有 :core-ui；BeamDialog/BeamToast 放在 :core-data/ui（BeamTokens 已在此）。若要单列 UI 模块，需先改 §3.12 的模块表 |  |
-| S13 | 音频帧的 FEC 冗余片无法与视频区分 | 帧头 type=2 是「FEC 冗余」通用类型，接收端分不清「音频帧的冗余片」与「视频帧的冗余片」。补齐音频分包需要 §5 级别的决定：帧号空间分开，或帧头再腾出一个类型位 |  |
-| S14 | §3.2 的 FEC 预算：T1/T2 仍超标 1.8~1.9 倍，要不要动拆组阈值或换编码 | 「每帧重建 RS 矩阵」这个根因已消除（见 N-24），T3 档位已达标；剩下的 1.5 ms 是标量 GF 乘加本身（代价正比于每组片数 k）。三条路都不是「消除重复计算」能解决的：(a) 调小 k —— 但 k 的取值正是 §5 自相矛盾之处（待决 S3），属于改文档口径；(b) 开 `reed-solomon-erasure` 的 `simd-accel` —— 上游 build.rs 在 `target_env="msvc"` 下不编译 SIMD 代码，Windows 上等于白开，还要多一个 `cc` 构建依赖；(c) 换编码（LDPC / 折叠码）—— 要换依赖。本轮未擅自实施 | §3.2, §5 |
+| S1 | 设备平台字段（platform）缺失 | **mDNS TXT 追加 `plat` 字段（§3.4），不改 §5 协议** | 2026-11-01 | 信任库的平台字段只需要知道「对端是 Windows 还是 Android」，这个信息在**发现**阶段就有，不必等控制面握手，也不必新增 §5 控制消息。TXT 是**追加**语义：对端不带该字段时按「未知平台」处理，不影响发现与配对。§3.4 已写明 `plat` 的语义与向后兼容性 | §3.4, §5 |
+| S2 | 帧头缺少独立的 pts 字段 | **不改帧头；把「`pts_us = capture_ts_us`」写成显式约定** | 2026-11-01 | 低延迟串流刻意不做重排序缓冲，pts 与抓屏时刻同源才是想要的语义（多一个独立 pts 只会诱使人去做排序缓冲）。16 字节帧头已占满，加字段要重排位宽 ⇒ 协议不兼容变更，收益为负。§3.2 / §5 已写明该约定 | §5 |
+| S3 | §5 自相矛盾：k ≤ 200 与「单帧超过 255 片拆多组」 | **统一为：单组总分片 `k+m ≤ 255`；`k` 是实现侧的分组粒度（实现取 64）** | 2026-11-01 | 两条原规则互斥。统一口径：「255」是**单组总分片数**上限（帧头 `data_shards`/`fec_shards` 各 8 位，但组内总分片受限）；「k」只是分组粒度，由实现按 §3.2 的性能预算来选。这样既不改帧头布局，也消除了矛盾。§5 已改写；「k = 64」由 S14 的实测支撑 | §5, §3.2 |
+| S4 | JNI DirectByteBuffer 零拷贝 | **暂不引入 `jni` 依赖；保留 uniffi 的 `Vec<u8>` 拷贝路径** | 2026-11-01 | 已核实：uniffi 0.29 的 Kotlin 后端没有 ByteBuffer 直传；0.32 只对「Kotlin → Rust」方向的借用 `Bytes` 生效，**回调方向（Rust → Kotlin）仍然映射成 ByteArray**。要零拷贝只能手写 JNI ⇒ 新增 `jni` 依赖 + 放开 beam-ffi 的 `forbid(unsafe_code)`，成本与风险都不小。而拷贝量级（1080p@20 Mbps ≈ 2.5 MB/帧 ≈ 0.2 ms/帧，**这是估算不是实测**）远小于 §3.6 的 7 ms 预算，不是瓶颈；真要优化应先降码率/帧大小。§6 的「零拷贝」要求记为**已知未达成**，不冒充已实现 | §3.12, §6 |
+| S5 | 错误码段撞车：外壳与 crates 同码不同义 | **E11xxx 留给配置层（§3.14）；桌面端外壳的错误改用 E12xxx（外壳段）** | 2026-11-01 | E11xxx 同时被 beam-config（解析/校验/存储不可用）与桌面端外壳（设置不合法/读写失败/perf 仅 Debug）当配置类用，E11003 一个码两种含义（perf 不可用 vs 配置存储不可用），前端按 code 唯一只能写合并文案 ⇒ 报错不可定位。E12xxx 已是外壳段（E12001 未知命令），把外壳的错误挪进去语义一致，且**不新增错误段**。实现排在下一批（要同步改桌面 Rust 端 + 前端文案表 + §3.11/§3.14 清单） | §3.11, §3.14 |
+| S6 | Android 侧键码无法编码成 USB HID | **不扩协议；能映射的映射，映射不上的丢弃并计入 E8004** | 2026-11-01 | BrowserBack / BrowserHome / ContextMenu 这类键在 HID Keyboard page 根本没有 usage —— 它们是**浏览器/系统键**而不是游戏输入，串流协议不需要它们（Android 端的返回键由 App 自己处理，不作为游戏键上行）。扩展协议键空间要改 §5 消息语义，收益为负。既有 E8004（同段内扩展）已能如实报告「这个键采不上来」 | §3.8 |
+| S7 | 滚轮的物理单位未定义 | **Q16.16 定点数，**整数部分 = 滚轮刻度**；Windows 注入侧再乘 `WHEEL_DELTA=120`** | 2026-11-01 | 与主流实时串流实现一致（一格 = 120 是 Win32 的 `WHEEL_DELTA`）。Q16.16 保留小数部分给高精度滚轮/触控板。§3.8 已写明 | §3.8 |
+| S8 | E8004 是 E8xxx 段内扩展码，文档未列 | **补进 §3.8 的错误码清单，标注为 E8xxx 段内扩展** | 2026-11-01 | 与既有 8001/8002 同段，没有新增错误段、没有改既有语义，只是把清单补全。§3.8 已写明 | §3.8 |
+| S9 | §16 内部张力：「间距 4 的倍数」与「卡片内边距 14」 | **「4 的倍数」只约束**布局间距**；组件内边距按逐字表取值** | 2026-11-01 | 逐字表里卡片内边距 14 与「间距 4 的倍数」本来就不可能同时成立，而设计规范门禁也只校验逐字表。限定措辞即可让两者自洽，实现不动。产品方案 §16 已改写 | §16 |
+| S10 | §16 的「手机外框 30」在桌面端没有使用点 | **令牌保留（两端共用同一刻度），桌面端不引用** | 2026-11-01 | 手机外框是 Android 端手机模型的圆角，桌面端没有这个形状，强行引用才是错。门禁把它排除在「必须被用到」清单外。产品方案 §16 已标注「仅 Android 端手机模型使用」 | §16 |
+| S11 | 桌面端 PIN 没有端到端校验 | **connect 补 PIN 参数 + Rust 侧格式校验与尝试预算；SPAKE2 PIN 挑战留待 §3.3** | 2026-11-01 | 现状是后端 `connect(host_id)` 根本没有 PIN 参数 ⇒ 填对填错都能连上，前端的 PIN 输入框是装饰。诚实做法要么补校验、要么明说它现在不参与安全。**先做前者**（格式校验 + 尝试预算 + 失败计数），并把「主机侧的 PIN 挑战仍未实现」写进文档，不让 UI 假装在做密码学。实现排在下一批（要改 command 签名 + 前端） | §3.3, §3.11 |
+| S12 | 通用 UI 组件放在 :core-data 的 ui 包 | **通用 UI 组件与设计令牌同置于 :core-data/ui，不改 §3.12 的模块表** | 2026-11-01 | §3.12 固定了 12 个模块且没有 :core-ui；重划模块要改文档 + 搬一堆代码，而依赖方向（:feature-* → :core-data）本来就不变。§3.12 已补一句说明 | §3.12 |
+| S13 | 音频帧的 FEC 冗余片无法与视频区分 | **音频帧占用**独立帧号号段**且**不参与 FEC 分包**（`fec_shards=0`）** | 2026-11-01 | B9-A 已按这个口径实现（`frame_id` 最高位作号段标志）。音频是低码率单片，FEC 对它收益极低而复杂度高；这样 `type=2` 仍只表示「视频帧的 FEC 冗余片」，接收端不会混淆。§5 已写明 | §5, §3.7 |
+| S14 | §3.2 的 FEC 预算：T1/T2 仍超标 1.8~1.9 倍 | **把分组粒度 `k` 从 200 降到 64（依赖 S3 的口径统一）** | 2026-11-01 | RS 编码代价 ∝ k，降到 64 后实测：**T1 0.670 ms（预算 0.8）、T2 0.376 ms（预算 0.4）、T3 0.152 ms（预算 0.3）——全部达标**；恢复路径同样全部达标。代价是每帧组数变多（T1 从 2 组到 5 组），组号 5 位上限 32 仍够用。不改帧头布局、不改协议语义。simd-accel 与换编码两条路**不采纳**（msvc 下上游不编译 SIMD 代码；换编码要换依赖） | §3.2, §5 |
 
 ### 本轮修复与提交记录
 
@@ -627,12 +634,12 @@
 | N-21 | 配置：`max_datagram=1200` | crates/beam-net/src/config.rs:22、82；净负载 crates/beam-net/src/config.rs:98-101 | 已实现 | 默认 1200，扣 16 字节帧头后 1184（§5 负载上限） | 未开始 |
 | N-22 | 配置：`jitter_frames`（有线 0,Wi-Fi 自适应 0–1） | 字段 crates/beam-net/src/config.rs:58、83；未找到（已搜索：jitter、JitterBuffer、抖动缓冲、dejitter、jitter_frames 消费点） | 缺失 | 只有配置字段与默认值 0；仓库内无任何抖动缓冲实现（`jitter` 仅命中 crates/beam-perf/src/stage.rs:24 的统计阶段枚举与 crates/beam-config/src/model.rs:61 的配置字段），Wi-Fi 自适应逻辑不存在 | 已完成 |
 | N-23 | 配置：`bitrate_min/max` | crates/beam-net/src/config.rs:60-62、84-85 | 已实现 | 默认 2 Mbps / 150 Mbps。注意：`RateController` 需调用方手动传入这两个值（crates/beam-net/src/rate.rs:68），未与 `NetConfig` 自动接线 | 未开始 |
-| N-24 | 性能：分包+FEC 编码 T1 ≤0.8 ms、T2 ≤0.4 ms、T3 ≤0.3 ms;重组+FEC 恢复同量级 | 未找到（已搜索：benches 目录、criterion、bench、#[bench]、Instant::now 计时断言） | 缺失 | 全仓没有任何 `benches/` 目录或基准测试依赖；crates/beam-net/Cargo.toml:23-24 只有 tokio dev-dep，无 criterion。T1/T2/T3 预算无任何实测支撑 | 进行中 |
+| N-24 | 性能：分包+FEC 编码 T1 ≤0.8 ms、T2 ≤0.4 ms、T3 ≤0.3 ms;重组+FEC 恢复同量级 | 未找到（已搜索：benches 目录、criterion、bench、#[bench]、Instant::now 计时断言） | 缺失 | 全仓没有任何 `benches/` 目录或基准测试依赖；crates/beam-net/Cargo.toml:23-24 只有 tokio dev-dep，无 criterion。T1/T2/T3 预算无任何实测支撑 | 已完成 |
 | N-25 | 测试：丢包/乱序/抖动注入(自写 UDP 代理) | 进程内替代用例 crates/beam-net/src/datagram.rs:384-402、426-450；未找到（已搜索：udp proxy、UdpProxy、proxy、注入、抖动 jitter 注入用例） | 缺失 | 丢包/乱序仅以「进程内少投一片/倒序投递」模拟（不经过真实 UDP）；无自写 UDP 代理，无抖动（时延）注入 | 已完成 |
 | N-26 | 测试：FEC 恢复率 | crates/beam-net/src/datagram.rs:426-450；crates/beam-net/src/fec.rs:248-264 | 偏差 | 只有「丢 2 片仍能恢复」的点状用例；无按丢包率扫描的恢复率统计/断言，无法量化恢复率 | 已完成 |
 | N-27 | 测试：码率控制仿真 | crates/beam-net/src/rate.rs:169-206 | 已实现 | 用合成 `Feedback` 序列驱动控制器，断言降/升/保持与上下限 clamp；仿真真实存在（但 `RateController` 未接入真实网络反馈路径，全仓仅 crates/beam-net/src/rate.rs 出现） | 未开始 |
 | N-28 | 里程碑:MVP(无 FEC)/v1(FEC+码率控制+抖动缓冲) | crates/beam-net/Cargo.toml:1-27（无 `[features]`）；FEC 默认开启 crates/beam-net/src/config.rs:81、crates/beam-net/src/endpoint.rs:255 | 偏差 | 无任何 feature 门控：FEC 默认 0.2 恒开（MVP 阶段文档要求「无 FEC」）；码率控制虽已实现但未接线（N-27 注）；抖动缓冲完全缺失（N-22） | 已完成 |
-| N-29 | 职责：视频/音频 datagram 分包与重组 | 视频 crates/beam-net/src/datagram.rs:60-142；音频 未找到（已搜索：FrameKind::Audio、audio packetize、音频分包） | 缺失 | `packetize` 只产出 `FrameKind::Video` / `FrameKind::Fec`（crates/beam-net/src/datagram.rs:120-133）；proto 已有 `FrameKind::Audio`（crates/beam-proto/src/frame.rs:35），beam-net 无音频路径（音频本身属 §3.7 的 v1 范围） | 进行中 |
+| N-29 | 职责：视频/音频 datagram 分包与重组 | 视频 crates/beam-net/src/datagram.rs:60-142；音频 未找到（已搜索：FrameKind::Audio、audio packetize、音频分包） | 缺失 | `packetize` 只产出 `FrameKind::Video` / `FrameKind::Fec`（crates/beam-net/src/datagram.rs:120-133）；proto 已有 `FrameKind::Audio`（crates/beam-proto/src/frame.rs:35），beam-net 无音频路径（音频本身属 §3.7 的 v1 范围） | 已完成 |
 | N-30 | 职责：连接统计 | crates/beam-net/src/endpoint.rs:243-245 | 已实现 | `Conn::stats()` 透出 `quinn::ConnectionStats` | 未开始 |
 
 ##### §3.3 beam-pair

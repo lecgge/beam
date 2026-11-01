@@ -89,7 +89,7 @@ pub trait VideoSender { fn send_frame(&self, f: EncodedFrame) -> Result<(), NetE
 pub trait VideoReceiver { async fn next_frame(&mut self) -> Result<AssembledFrame, NetError>; }
 pub struct RateController { pub fn on_feedback(&mut self, fb: &Feedback) -> BitrateDecision; }
 ```
-- 数据:`EncodedFrame{frame_id,pts_us,capture_ts_us,is_key,slices:Vec<Bytes>}`、`AssembledFrame`、`Feedback{loss,rtt,recv_rate}`。
+- 数据:`EncodedFrame{frame_id,pts_us,capture_ts_us,is_key,slices:Vec<Bytes>}`、`AssembledFrame`、`Feedback{loss,rtt,recv_rate}`。**帧头不带独立的 pts 字段**:接收端 `pts_us = capture_ts_us` —— 低延迟串流刻意不做重排序缓冲,pts 与抓屏时刻同源才是想要的语义。
 - 线程:tokio 多线程运行时;发送路径专用任务,UDP GSO 批量发包;接收重组单任务;FEC 解码在 rayon 或 blocking 线程。
 - 错误码:`E2xxx`(2001 连接超时,2002 证书拒绝,2003 datagram 不支持,2004 帧过期丢弃)。
 - 配置:`fec_ratio`(默认 0.2,码率>150 Mbps 时下调到 0.1)、`max_datagram=1200`、`jitter_frames`(有线 0,Wi-Fi 自适应 0–1)、`bitrate_min/max`。
@@ -105,7 +105,7 @@ pub struct RateController { pub fn on_feedback(&mut self, fb: &Feedback) -> Bitr
 - 配置:`pin_len=4`、`pin_ttl=120s`、`max_attempts=3`。 性能:不在热路径。 测试:中间人模拟、错误 PIN、过期 token。 里程碑:MVP。
 
 ### 3.4 beam-discovery
-- 职责:mDNS 广播 `_beam._udp.local`(TXT:id、name、ver、fp 前 8 位、port)与浏览。
+- 职责:mDNS 广播 `_beam._udp.local`(TXT:id、name、ver、fp 前 8 位、port、**plat 平台标识**)与浏览。`plat` 是**追加字段**:对端不带它时按「未知平台」处理,不影响发现;带上它才能让信任库的 `TrustedPeer.platform` 不是恒定的未知值。
 - 边界:只发现不连接;依赖 mdns-sd;被 host/client/ffi 依赖。Android 可选用 NsdManager 兜底(在 Kotlin 层)。
 - 接口:`Advertiser::start(info)`;`Browser::start() -> impl Stream<Item=DiscoveryEvent>`。 错误码 `E4xxx`。 配置:`enabled`、`iface_allowlist`。 测试:多网卡、组播被阻断回退手动 IP。 里程碑:MVP。
 
@@ -142,7 +142,7 @@ pub struct CapturedFrame { pub tex: ID3D11Texture2D, pub ts_us: u64, pub dirty: 
 - 职责:输入事件模型(在 proto 定义);主机侧 SendInput 注入键鼠、vigem-client 虚拟 Xbox 手柄、震动回传;权限控制(按设备)。
 - 边界:不采集客户端输入(Windows 客户端由 beam-client 采集,Android 由 core-input)。禁止依赖 capture/encode。
 - 接口:`trait InputSink { fn apply(&mut self, ev: InputEvent) -> Result<(), InputError>; }`;`GamepadHub::attach(slot) -> GamepadHandle`。
-- 线程:输入 stream 接收任务 → 有界通道 → 注入线程(高优先级)。错误码 `E8xxx`(8001 ViGEmBus 未安装,8002 权限拒绝)。性能:接收→注入 ≤1 ms。测试:回放脚本、手柄热插拔。里程碑:MVP(键鼠)/v1(手柄)。
+- 线程:输入 stream 接收任务 → 有界通道 → 注入线程(高优先级)。错误码 `E8xxx`(8001 ViGEmBus 未安装,8002 权限拒绝,**8004 键码无法映射为 HID/VK**——与 8001/8002 同段的**段内扩展**)。滚轮 `Scroll{dx,dy}` 为 **Q16.16 定点数**,**整数部分表示滚轮刻度**(1 刻度 = 鼠标滚轮一格;Windows 注入侧再乘 `WHEEL_DELTA=120`),小数部分留给高精度滚轮。性能:接收→注入 ≤1 ms。测试:回放脚本、手柄热插拔。里程碑:MVP(键鼠)/v1(手柄)。
 
 ### 3.9 beam-session
 - 职责:主/客会话状态机;串联 capture→encode→net、net→decode→render;能力协商、IDR 请求、重连、统计汇总。
@@ -176,7 +176,7 @@ pub struct CapturedFrame { pub tex: ID3D11Texture2D, pub ts_us: u64, pub dirty: 
 | :core-renderer | Surface 管理、`Surface.setFrameRate`、帧节奏 | `FramePacer` | — |
 | :core-input | 触控/手柄/遥控映射为 InputEvent | `InputMapper` | — |
 | :core-audio | Opus 解码 + AAudio | `AudioPlayer` | — |
-| :core-data | DataStore 设置、信任主机 | `SettingsRepo`、`HostRepo` | — |
+| :core-data | DataStore 设置、信任主机(**通用 UI 组件与设计令牌同置于 :core-data/ui**,不单列 :core-ui 模块) | `SettingsRepo`、`HostRepo` | — |
 - uniffi 导出(beam-ffi):`BeamClient::new(config)`、`browse(listener)`、`pair_qr(payload)`、`pair_pin(peer,pin)`、`connect(peer,cfg,sink: FrameSink)`;`callback interface FrameSink { on_frame(data: Vec<u8>/ByteBuffer, pts_us, capture_ts_us, key) ; on_event(SessionEvent) }`。热路径用 JNI 直接 ByteBuffer(DirectByteBuffer)避免 uniffi 拷贝;控制面走 uniffi。
 - 线程:Rust tokio 运行时在 so 内;帧回调在专用线程 → `queue()`;UI 在 Main。性能:解码 T1 ≤8、T2 ≤5 ms(T3 Android 不作为验收目标)。里程碑:MVP(列表/配对/解码)/v1(TV、手柄、音频)。
 
@@ -249,6 +249,7 @@ sequenceDiagram
 |---|---|---|
 | ver | 4 | 当前 1 |
 | type | 4 | 0 视频 1 音频 2 FEC 冗余 |
+- 音频帧(§3.7)占用**独立的帧号号段**(`frame_id` 最高位作号段标志),且**不参与 FEC 分包**(`fec_shards=0`,单片单帧)⇒ `type=2` 只表示「视频帧的 FEC 冗余片」,接收端不会把音频冗余片与视频冗余片混淆。
 | flags | 8 | bit0 关键帧,bit1 帧末片,bit2 切片边界,bit3..bit7 FEC 组号 |
 | frame_id | 32 | 递增 |
 | shard_idx | 16 | 组内分片号 |
@@ -256,7 +257,7 @@ sequenceDiagram
 | fec_shards | 8 | m |
 | capture_ts | 48 | 主机微秒时钟 |
 | payload | ≤1184 B | — |
-- FEC:按帧 Reed-Solomon GF(2^8),k ≤ 200,m = ceil(k×ratio);默认 ratio 0.2,码率 >150 Mbps 降到 0.1,丢包 >2% 升至 0.3;单帧超过 255 片时拆成多个组。
+- FEC:按帧 Reed-Solomon GF(2^8),m = ceil(k×ratio);默认 ratio 0.2,码率 >150 Mbps 降到 0.1,丢包 >2% 升至 0.3。**单组总分片数 k+m ≤ 255**(帧头 `data_shards`/`fec_shards` 各 8 位,组内总分片受限);**k 是分组粒度,实现取 64** —— RS 编码代价 ∝ k,取 64 才能让 §3.2 的「分包+FEC 编码」预算达标(T1 4K60:1.553 ms → 约 0.8 ms)。单帧片数超过单组容量时拆成多个组,各组共享同一 k/m;组号在帧头 `flags` 的 bit3..bit7(5 位,上限 32 组)。
 - 版本协商:Hello 带 `proto_ver` 和 `features` 位图;取双方最大公共主版本;主版本不同直接拒绝(E1001),次版本向后兼容(未知字段忽略,postcard 末尾追加)。
 - 兼容策略:v1 GameStream 兼容层作为独立 crate `beam-gamestream`,只按公开协议行为实现,不参考 GPL 代码。
 
