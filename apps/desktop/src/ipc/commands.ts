@@ -63,8 +63,8 @@ export const commands = {
   /** §3.11 `list_hosts` */
   listHosts: () => call<DiscoveredHost[]>('list_hosts'),
 
-  /** §3.11 `connect(host_id)` */
-  connect: (hostId: string) => call<SessionInfo>('connect', { hostId }),
+  /** §3.11 `connect(host_id, pin)`(pin 为 §3.3 的 4 位 PIN;已配对主机可省略) */
+  connect: (hostId: string, pin?: string) => call<SessionInfo>('connect', { hostId, pin: pin ?? '' }),
 
   /** §3.11 `disconnect` */
   disconnect: () => call<void>('disconnect'),

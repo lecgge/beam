@@ -17,6 +17,8 @@ mod commands;
 mod dto;
 mod error;
 mod events;
+// §3.3 的 PIN 格式校验与尝试预算(S11):`connect` 的 PIN 参数在这里被真正校验。
+mod pin;
 mod service;
 // crates/ 适配器(§4:apps/desktop → beam-host / beam-client)。
 // 关闭 `beam-crates` feature 时退回 service.rs 的本地桩实现。

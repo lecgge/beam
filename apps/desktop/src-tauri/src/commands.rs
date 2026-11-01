@@ -104,10 +104,21 @@ pub fn list_hosts(service: Svc<'_>) -> Vec<DiscoveredHost> {
     service.list_hosts()
 }
 
-/// §3.11 `connect(host_id)`:连接指定主机,建立客户端会话。
+/// §3.11 `connect(host_id, pin)`:连接指定主机,建立客户端会话。
+///
+/// `pin` 是客户端输入的 4 位 PIN(§3.3 `pin_len=4`)。
+/// **已配对的主机可以传空串** —— 信任库里已有它的证书指纹(§3.3),
+/// 不需要再输 PIN。
+///
+/// Rust 侧会做格式校验与尝试预算(§3.3 `max_attempts=3`,超限报 `E3002`),
+/// 见 `src/pin.rs`。SPAKE2 的密码学校验在主机侧(§3.3),尚未接线。
 #[tauri::command]
-pub fn connect(service: Svc<'_>, host_id: String) -> Result<SessionInfo, BeamError> {
-    service.connect(&host_id)
+pub fn connect(
+    service: Svc<'_>,
+    host_id: String,
+    pin: Option<String>,
+) -> Result<SessionInfo, BeamError> {
+    service.connect(&host_id, pin.as_deref().unwrap_or(""))
 }
 
 /// §3.11 `disconnect`:断开当前客户端会话。

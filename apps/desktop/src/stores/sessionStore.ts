@@ -19,7 +19,7 @@ interface SessionStoreState {
   connecting: boolean
   error: BeamError | null
 
-  connect: (hostId: string) => Promise<boolean>
+  connect: (hostId: string, pin?: string) => Promise<boolean>
   disconnect: () => Promise<boolean>
   applyStats: (stats: SessionStats) => void
   applyReconnecting: (info: ReconnectingInfo) => void
@@ -34,10 +34,10 @@ export const useSessionStore = create<SessionStoreState>((set) => ({
   connecting: false,
   error: null,
 
-  connect: async (hostId) => {
+  connect: async (hostId, pin) => {
     set({ connecting: true })
     try {
-      const session = await commands.connect(hostId)
+      const session = await commands.connect(hostId, pin)
       set({ session, error: null })
       return true
     } catch (raw) {

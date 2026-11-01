@@ -104,7 +104,13 @@ pub trait BeamService: Send + Sync + 'static {
     /// 局域网发现到的主机(§3.11 `list_hosts`)。
     fn list_hosts(&self) -> Vec<DiscoveredHost>;
     /// 连接某台主机(§3.11 `connect`)。
-    fn connect(&self, host_id: &str) -> Result<SessionInfo, BeamError>;
+    ///
+    /// `pin` 是客户端输入的 4 位 PIN(§3.3 `pin_len=4`);已配对的主机可以传空串
+    /// (信任库里已有指纹,不需要再输 PIN)。
+    ///
+    /// Rust 侧会做**格式校验**与**尝试预算**(§3.3 `max_attempts=3`),
+    /// 见 [`crate::pin`]。SPAKE2 的密码学校验在主机侧(§3.3),尚未接线。
+    fn connect(&self, host_id: &str, pin: &str) -> Result<SessionInfo, BeamError>;
     /// 断开当前会话(§3.11 `disconnect`)。
     fn disconnect(&self) -> Result<SessionInfo, BeamError>;
     /// 当前客户端会话。
@@ -168,6 +174,8 @@ struct Inner {
     /// 待上报的一次重连通知。
     reconnect_notice: Option<ReconnectingInfo>,
     revision: u64,
+    /// PIN 尝试预算(§3.3 `max_attempts=3`):按主机 id 记账。
+    pin_budget: crate::pin::AttemptBudget,
 }
 
 impl Inner {
@@ -230,6 +238,7 @@ impl LocalService {
             reconnect_emitted: false,
             reconnect_notice: None,
             revision: 0,
+            pin_budget: crate::pin::AttemptBudget::new(),
         };
 
         Self {
@@ -384,7 +393,7 @@ impl BeamService for LocalService {
         self.lock().discovered.clone()
     }
 
-    fn connect(&self, host_id: &str) -> Result<SessionInfo, BeamError> {
+    fn connect(&self, host_id: &str, pin: &str) -> Result<SessionInfo, BeamError> {
         let mut inner = self.lock();
         if inner.session.is_some() {
             return Err(BeamError::invalid(
@@ -409,6 +418,23 @@ impl BeamService for LocalService {
                 format!("主机 {} 当前离线", host.name),
             ));
         }
+        // §3.3:PIN 准入(格式校验 + 尝试预算)。未信任的主机必须给 PIN。
+        let now = Instant::now();
+        if let Err(err) = crate::pin::check_connect_pin(
+            &inner.pin_budget,
+            host_id,
+            host.trusted,
+            pin,
+            now,
+        ) {
+            // 格式错误算一次尝试(§3.3 `max_attempts=3`),锁定则如实报 E3002。
+            if err.code == E_PIN_INVALID {
+                if let Err(locked) = inner.pin_budget.record_failure(host_id, now) {
+                    return Err(BeamError::invalid(E_PIN_LOCKED, locked));
+                }
+            }
+            return Err(err);
+        }
         let now = now_ms();
         let session = SessionInfo {
             session_id: format!("s-{:x}", now),
@@ -424,6 +450,8 @@ impl BeamService for LocalService {
         inner.session_started = Some(Instant::now());
         inner.reconnect_emitted = false;
         inner.reconnect_notice = None;
+        // 连接成功 ⇒ 该主机的 PIN 预算复位。
+        inner.pin_budget.reset(host_id);
         inner.bump();
         Ok(session)
     }

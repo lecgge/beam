@@ -24,7 +24,7 @@
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use beam_client::{
     ClientConfig, ClientRuntime, FrameStatsHandle, NetTransport, ReadyTransportFactory,
@@ -174,6 +174,8 @@ struct CrateInner {
     ///
     /// 「取走即清空」的语义靠它实现：重连期间不重复报，离开重连态后重新武装。
     reconnect_notice_sent: bool,
+    /// PIN 尝试预算(§3.3 `max_attempts=3`):按主机 id 记账。
+    pin_budget: crate::pin::AttemptBudget,
 }
 
 /// crates/ 适配器。
@@ -295,6 +297,7 @@ impl CrateService {
                 host_gate: None,
                 host_session: None,
                 reconnect_notice_sent: false,
+                pin_budget: crate::pin::AttemptBudget::new(),
             })),
             discovery,
             transport_outcome: Arc::new(Mutex::new(None)),
@@ -603,7 +606,7 @@ impl BeamService for CrateService {
             .collect()
     }
 
-    fn connect(&self, host_id: &str) -> Result<SessionInfo, BeamError> {
+    fn connect(&self, host_id: &str, pin: &str) -> Result<SessionInfo, BeamError> {
         let mut inner = self.lock();
         if inner.session.is_some() {
             return Err(BeamError::invalid(
@@ -636,6 +639,28 @@ impl BeamService for CrateService {
             .iter()
             .find(|p| p.fp.short_hex().to_lowercase() == discovered_prefix)
             .map(|p| p.fp.to_hex());
+
+        // §3.3:SPAKE2 的密码学校验在主机侧(§3.3),尚未接线;
+        // 这一层先保证 PIN **参与**连接流程:格式合法 + 受尝试预算约束。
+        //
+        // 已在信任库里的主机(有完整指纹)不需要再输 PIN。
+        let trusted = trusted_fingerprint.is_some();
+        let now = Instant::now();
+        if let Err(err) = crate::pin::check_connect_pin(
+            &inner.pin_budget,
+            host_id,
+            trusted,
+            pin,
+            now,
+        ) {
+            // 格式错误算一次尝试(§3.3 `max_attempts=3`),锁定则如实报 E3002。
+            if err.code == E_PIN_INVALID {
+                if let Err(locked) = inner.pin_budget.record_failure(host_id, now) {
+                    return Err(BeamError::invalid(E_PIN_LOCKED, locked));
+                }
+            }
+            return Err(err);
+        }
         let peer = PeerAddr {
             host: host.address.to_string(),
             port: host.port,
@@ -667,6 +692,8 @@ impl BeamService for CrateService {
             codec: codec_name(client_cfg.stream.codec),
             started_at_ms: now,
         };
+        // PIN 准入通过 ⇒ 该主机的尝试预算复位(§3.3)。
+        inner.pin_budget.reset(host_id);
         inner.session = Some(session.clone());
 
         // §3.9:真实客户端会话(控制面 + 帧面)。建链在后台进行,

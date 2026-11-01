@@ -158,7 +158,8 @@ pub struct CapturedFrame { pub tex: ID3D11Texture2D, pub ts_us: u64, pub dirty: 
 
 ### 3.11 host-app / client(Tauri,apps/desktop)
 - 职责:UI、托盘、通知;只通过 commands/events 与 Rust 交互;视频帧不经 IPC。
-- Commands:`get_host_status`、`start_hosting(opts)`、`stop_hosting`、`get_pairing_code`、`approve_pair(id)`、`reject_pair(id)`、`remove_device(id)`、`list_hosts`、`connect(host_id)`、`disconnect`、`get_settings`、`set_settings(patch)`;debug 下另有 `perf_snapshot`、`perf_export(format)`。
+- Commands:`get_host_status`、`start_hosting(opts)`、`stop_hosting`、`get_pairing_code`、`approve_pair(id)`、`reject_pair(id)`、`remove_device(id)`、`list_hosts`、`connect(host_id, pin)`、`disconnect`、`get_settings`、`set_settings(patch)`;debug 下另有 `perf_snapshot`、`perf_export(format)`。
+  `pin` 是客户端输入的 4 位 PIN(§3.3 `pin_len=4`);**已配对的主机可传空串**(信任库里已有它的证书指纹,§3.3「证书指纹固定」)。外壳侧对 PIN 做**格式校验**与**尝试预算**(§3.3 `max_attempts=3`,超限锁定 60 s 并报 `E3002`);**SPAKE2 的密码学校验在主机侧**(§3.3),当前尚未接线 —— 外壳只保证「PIN 参与连接流程且被计量」,不让 UI 假装已完成密码学认证。
 - Events:`host://state-changed`、`pair://request`、`pair://code-rotated`、`discovery://updated`、`session://stats`(500 ms)、`session://reconnecting`、`session://disconnected`、`perf://tick`(debug,250 ms)。
 - 错误:command 返回 `{code:"E2001", message, retryable}`,前端按 code 显示中文文案。**应用外壳自有错误段为 `E12xxx`**(`12001` 未知命令、`12002` 设置项不合法、`12003` 本地文件读写失败、`12004` perf-stats 不可用);`E11xxx` **只**归 `beam-config`(§3.14),`E13xxx`/`E14xxx`/`E15xxx`/`E16xxx` 分别归 perf / ffi / gamestream / log —— 一个码只对应一种含义。里程碑:MVP。
 

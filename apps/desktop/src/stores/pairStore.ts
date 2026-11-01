@@ -6,9 +6,9 @@
  * (与 crates/beam-pair 的 `PairingPolicy` 一致),这里在前端维护剩余次数,
  * 让错误态能显示「剩余 N 次」(§16 状态行:错误 = 描红 + 剩余次数)。
  *
- * 说明:后端的 `connect` command 目前**没有 PIN 参数**(Rust 侧不在本目录
- * 范围内),所以 PIN 的最终校验仍在后端;前端负责格式校验与尝试预算,
- * 后端一旦返回 E3001 / E3002,同样消耗这里的预算。
+ * **权威在后端**:`connect(host_id, pin)` 的 Rust 侧(`src/pin.rs`)也做
+ * 同样的校验与预算,并按主机 id 记账 —— 绕过前端直接调 command 一样会被拦。
+ * 前端这份只负责**即时反馈**(不用等一次往返就知道格式错了)。
  */
 
 import { create } from 'zustand'

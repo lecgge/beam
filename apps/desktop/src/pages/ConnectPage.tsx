@@ -101,12 +101,12 @@ export function ConnectPage() {
   /**
    * 提交 PIN。
    *
-   * 格式校验在前端做(§3.3 `pin_len=4`);失败算一次尝试,
-   * 剩余次数按 §3.3 `max_attempts=3` 递减,归零即锁定。
+   * 格式校验在前端做(§3.3 `pin_len=4`),失败算一次尝试;
+   * **后端也会校验**(`connect(host_id, pin)`,Rust 侧 `src/pin.rs`):
+   * 格式不合法返回 `E3001`,连续失败超上限锁定 60 秒返回 `E3002`。
    *
-   * 注意:后端的 `connect` command 目前没有 PIN 参数(Rust 侧不在本目录范围),
-   * 所以 PIN 的**最终校验**仍在后端——后端返回 E3001 / E3002 时,
-   * 同样消耗这里的前端预算并展示「剩余 N 次」。
+   * 后端的尝试预算是**权威**的(按主机 id 记账),前端这份只是即时反馈;
+   * 后端返回 E3001 / E3002 时,同样消耗这里的预算并展示「剩余 N 次」。
    */
   const handleSubmitPin = async () => {
     const target = pairTarget
@@ -118,7 +118,8 @@ export function ConnectPage() {
       return
     }
 
-    const ok = await connect(target.id)
+    // PIN 真的送到后端(§3.11 `connect(host_id, pin)`),不再只是装饰。
+    const ok = await connect(target.id, pin)
     if (ok) {
       resetAttempts()
       setPairTarget(null)
