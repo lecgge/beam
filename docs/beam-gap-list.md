@@ -463,6 +463,19 @@
 | 上屏『等 vblank 的等待时长』仍测不了 | flip-model 交换链的 GetFrameStatistics 不可用（B18 已记）⇒ V-11 保持已阻塞；本批只测到了上屏**成本** | 需后续批次 |
 | 音画同步偏差（§3.15 <30 ms）仍无测量 | 需要跨设备时钟同步（四时间戳），本机同机回环量不出真实偏差（X8-16） | 需后续批次 |
 
+| B21 | 2026-11-04 | 第二十一批：PIN 配对密码学校验真正接线（§3.3）+ 修掉「错 PIN 也写信任库」的安全缺陷 | crates/beam-session（控制层配对闸门）/ crates/beam-host（信任闸门配对模式 + HostPairing + 写信任库）/ crates/beam-client（ClientConfig.pin）/ apps/desktop（两端接线）/ crates/beam-client/examples（配对回环验证入口）/ docs（设计文档 §3.3 / §3.10） | 已完成 | cargo fmt --all --check exit 0；cargo clippy --workspace --all-targets -- -D warnings exit 0 / 0 warning；cargo test --workspace exit 0（48 套件 / 482 passed / 0 failed / 9 ignored）；cargo clippy -p beam-host --features platform,client-video --all-targets -- -D warnings exit 0；cargo clippy -p beam-host --features platform,client-video,perf-stats --all-targets -- -D warnings exit 0；cargo clippy -p beam-client --features video --all-targets -- -D warnings exit 0；cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings exit 0；npm --prefix apps/desktop run build exit 0；设计令牌检查 54 项全过；**真机实测**：`cargo run -p beam-client --example pairing_loopback --release` exit 0 —— **三阶段全过**:① 错 PIN ⇒ 客户端 Error(E9005)、**主机信任库条目数 = 0**; ② 对 PIN ⇒ 客户端 Streaming、**主机信任库条目数 = 1**（含客户端指纹）; ③ 不传 PIN ⇒ 主机判定「要求配对 = false」⇒ 客户端 Streaming（免配对） |
+
+- **B21（主会话自办）** — 写入范围：`crates/beam-session/src/control.rs`、`crates/beam-host/src/{pairing,runtime,platform,lib}.rs`、`crates/beam-host/examples/*.rs`、`crates/beam-client/src/runtime.rs`、`crates/beam-client/examples/pairing_loopback.rs`、`apps/desktop/src-tauri/src/service_crates.rs`、`docs/**`；覆盖条目 T-15, T-14, CM-09, CM-06
+
+**B21 追加项（审计中顺带发现，不在原 551 条内）**
+
+| 项 | 说明 | 归属 |
+|---|---|---|
+| 桌面端的「用户点同意」那条路改成了「控制面被拒 → 重连」 | 闸门进配对模式后，未信任对端的握手不再被拒（否则 PIN 送不到主机）。人工确认的路仍然保留（指纹照样进 observed、照样弹窗），但要用户点完同意后客户端**重连**一次才生效 | 需后续批次（可用信任检查器让当前会话即时放行） |
+| Android 端的 `plat` 只到发现结果，未进信任库 | Android 配对走扫码，§3.3 的二维码载荷不带平台标识 ⇒ TrustedPeer.platform 仍是未知平台 | 需后续批次 |
+| 音画同步偏差（§3.15 <30 ms）仍无测量 | 需要跨设备时钟同步（四时间戳），本机同机回环量不出真实偏差（X8-16） | 需后续批次 |
+| 画面整链在本轮无法复验：会话处于锁屏 | WGC 内容驱动 ⇒ 锁屏画面几乎不变 ⇒ 抓屏只有 3 帧（音频照常 800 帧）。已用 B20 的已提交版本做对照实验确认**不是代码回归**；解锁后可复验 | 环境 |
+
 ### 已裁决事项
 
 | # | 议题 | 裁决 | 裁决日期 | 说明 | 解锁范围 |
@@ -531,6 +544,7 @@
 | 2026-11-01 | Windows 客户端的画面**从来没真正上过屏**（B17 定位，B18 修好） | B10 把 D3D11VA 硬解与原生窗口上屏的代码路径搭好了，但从未在真机跑过。B17 第一次真机跑就发现：解码纹理是 DXGI_FORMAT_420Opaque / 1920×1152（对齐后的 coded height），交换链是 B8G8R8A8_UNORM / 1920×1080 —— 格式与尺寸双双不匹配，于是每一帧都走「清屏 + 照样走完整条呈现路径」的静默降级：不报错、不警告，会话状态正常，用户看到的是空白窗口。B18 补上了 VideoProcessor 转换路径（4:2:0 → BGRA），画面这才真的上屏 | ① `beam_render::vp` 用 D3D11 VideoProcessor 做 4:2:0 → BGRA 转换；关键在于输入视图的 FourCC 必须用 `'420O'`（`beam-encode` 那次 96 组变体全灭，是因为源纹理是自造的 NV12/BGRA，从没试过解码器真实输出的 420Opaque）；② `PresentInfo` 增加 `converted_presents`，区分「直接搬」与「转换后搬」；③ 真机实测 9 帧全部上屏（转换 9 / 降级 0）；④ 转换也不可用时如实报 E10015，不再假装在串流；⑤ 顺带把 V-13 的丢帧统计贯通：抓屏单槽覆盖开始计数，进主机会话汇总；客户端补上渲染侧丢帧，`dropped_frames` 覆盖从抓到屏到上屏的全程 |
 | 2026-11-04 | Windows 串流的**画面链路**第一次端到端真机跑通 | B17 定位到「画面从来没上过屏」，B18 用 VideoProcessor 转换修好了上屏，但那只是「解码 → 上屏」这一段。B19 把整链接通：主机侧真抓屏 + 真硬编 → QUIC → 客户端侧真硬解 + 真上屏到独立原生窗口。过程中还发现两个「验证入口本身会骗人」的坑：① WGC 是内容驱动的，屏幕静止时主机一帧都发不出来（同一台机器上帧数在 0 与 1 之间跳）；② 客户端先断开时主机会话必然进 Error 态（正常断开语义），两个时限弄反就会被误判成「主机出错」 | 新增验证入口 `crates/beam-host/examples/client_loopback.rs`：本机实测 345 帧全部经 VideoProcessor 转换后搬进交换链（降级 0）⇒ 产品方案第 45 行的「画面真的出现在窗口里」达成。顺带把三个 crate 的 `perf_span!` 占位符统一成零尺寸结构体（B18 只改了 beam-render，其余三个在 `--features wgc/ffmpeg` 组合下会被 clippy 拦下） |
 | 2026-11-04 | Windows 串流的**音频链路**第一次端到端真机跑通，并修掉了一个「跑通了但速率只有 1/3」的缺陷 | B20 接上音频后立刻暴露两个问题：① 客户端用裸 `video_stream()` 收帧，而画面重组器**不看帧头 `type`** ⇒ 音频数据报会被当成画面分片组装（负载是裸 Opus 字节）；② 主机只送出 **65 帧/秒**，而 §3.7 的音频是 5 ms 一帧（实时 200 帧/秒），采集队列一路积压到丢帧。对照实验（采集 / +Opus 编码 / +建数据报 三段各测速率）证明**处理能力有 199.7 帧/秒**，瓶颈在消费循环「一轮只取一帧」—— 速率被循环的唤醒间隔限死。改成「一轮把攒下的帧全发走」后实测 800 帧 / 4 秒 = 200 帧/秒、队列零积压。分流读点也从 `beam-client` 下沉到 `beam-net::DemuxStream`（L1）：§4 规定 L3 之间不得横向依赖，而主机侧的整链验证入口也需要同一个读点 | 真机实测：音频 **800 帧走完整链**（WASAPI loopback 采集 → Opus 编码 → QUIC datagram → 按帧头 type 分流 → Opus 解码 → WASAPI 输出），错误 0 次，解码 PCM 的 RMS = 0.084（非静音）；画面同一次运行 285 帧全部经 VideoProcessor 转换后搬进交换链、降级 0。顺带把 §3.10 的渲染预算**第一次对照实测**：解码均值 0.348 ms（预算 8 ms）、上屏均值 0.106 ms（半帧预算 8.33 ms）⇒ 均达标 |
+| 2026-11-04 | Windows 串流的**配对密码学校验**第一次真的发生（PIN → SPAKE2 → 信任库 → 串流） | B16 遗留的缺口：PIN 只到「格式校验 + 尝试预算」，**密码学验证从未真正发生** —— 主机侧没把 PIN 配进 `PairingConfig`，信任闸门又在 TLS 层就把未信任对端拒了，客户端连控制通道都到不了。B21 补了三段接线:客户端 `ClientConfig.pin` → 会话层 `PairingConfig`（配对成功才发 `Hello`）；主机信任闸门增加**配对模式**（握手放行，**控制面**把关 —— 未配对不许进串流）；配对成功后主机把对端指纹写进信任库。接线过程中还挖出一个**安全缺陷**:主机原先在「收到 SPAKE2 首条挑战」时就坐实配对并写信任库，但密码学证明在**客户端**那一步才成立 —— 输错 PIN 的客户端也会被写进信任库（实测复现：错 PIN 那一轮信任库从 0 变成了 1） | 真机实测三阶段全过:错 PIN ⇒ 被拒且**信任库保持为空**；对 PIN ⇒ 配对成功、**写进信任库**、进串流；已配对 ⇒ 不传 PIN 也**免配对**直接放行。安全缺陷已修:主机改为「记住对端指纹 → 等客户端回 `PairOk`（= 它真的过了 PIN 校验）→ 才坐实」，并补了对应的回归单测 |
 
 ---
 
