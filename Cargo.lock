@@ -261,6 +261,7 @@ dependencies = [
  "beam-log",
  "beam-net",
  "beam-pair",
+ "beam-perf",
  "beam-proto",
  "beam-render",
  "beam-session",

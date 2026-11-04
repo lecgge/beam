@@ -53,6 +53,18 @@ platform-wgc = ["beam-capture/wgc"]
 # 默认关闭，且示例用 `required-features` 声明 ⇒ CI 的默认构建不会碰它。
 client-video = ["dep:beam-decode", "dep:beam-render", "beam-decode/ffmpeg", "beam-render/d3d11"]
 
+# 性能采集（§3.13）：把整链验证入口的各阶段耗时真的采下来，
+# 对照 §3.10 的渲染预算（解码 T1 ≤8 ms、上屏等待平均半帧）。
+#
+# §7：release 禁止开启 perf-stats —— 所以这是**独立**的 feature，
+# 默认关，验证时手动打开。
+perf-stats = [
+    "dep:beam-perf",
+    "beam-perf/perf-stats",
+    "beam-decode/perf-stats",
+    "beam-render/perf-stats",
+]
+
 [dependencies]
 beam-proto = { workspace = true }
 beam-session = { workspace = true }
@@ -71,6 +83,8 @@ beam-log = { workspace = true }
 # 默认关闭；`client-video` feature 才打开（见上）。
 beam-decode = { workspace = true, optional = true }
 beam-render = { workspace = true, optional = true }
+# §3.13 的性能采集器（可选依赖，`perf-stats` feature 才打开）。
+beam-perf = { workspace = true, optional = true }
 # §5 控制流 / 输入流的读写原语（quinn 直接实现了 tokio 的 AsyncRead / AsyncWrite）。
 tokio = { workspace = true }
 # `beam_proto::encode` 的输出缓冲类型（§5 线上格式）。

@@ -8,21 +8,21 @@
 //! 会话层下沉的 [`beam_session::NetTransport`] 用
 //! [`beam_net::VideoStream`] 收画面，而 `VideoStream::try_next_frame` 会把
 //! 连接上**到达的所有数据报**都读走并塞进**画面重组器** —— 音频数据报因此
-//! 会被当成画面分片处理（帧号相撞时更糟：两边的分片会被拼进同一帧）。
+//! 会被当成画面分片处理（`beam-net` 的重组器**不看帧头 `type`**）。
 //!
 //! 所以「按 `type` 分流」必须发生在**唯一的数据报读点**上。
-//! 本模块提供的就是这个读点：它自己读数据报，音频的交给
-//! [`AudioDatagramSink`]，画面的交给画面重组器。
 //!
-//! ## 为什么不改 `beam-session`
+//! ## 分流读点现在住在 `beam-net`（L1）
 //!
-//! 分流逻辑本该住在会话层那份传输里（`crates/beam-session/src/net_transport.rs`），
-//! 但那个文件不在本次改动的写入范围内。因此这里在 `beam-client` 侧提供
-//! **一个可选的**传输实现：控制流 / 输入流 / 发帧**原样转发**给会话层那份
-//! `NetTransport`（不重写分帧、不重写控制面），只有 **datagram 读点**换成
-//! 自己的。重组与抖动缓冲用的仍是 `beam-net` 的同一套原语
-//! （[`beam_net::Reassembler`] / [`beam_net::JitterBuffer`]），
-//! 因此「帧重组语义」没有第二份实现。
+//! 这个读点是 [`beam_net::DemuxStream`]：它读走数据报，**按帧头 `type`** 把
+//! 画面（`type = 0`）与 FEC 冗余（`type = 2`）送进画面重组器，
+//! 把音频（`type = 1`）与保留类型交给调用方的回调。
+//!
+//! 为什么不是本 crate 自己实现一份：§4 规定 **L3 之间不得横向依赖**
+//! （`beam-host` 与 `beam-client` 同层），而**主机侧的整链验证入口**
+//! （`beam-host` 的 `client_loopback` 示例）也需要同一个分流读点 ——
+//! 两边各写一份，迟早会漂移。`beam-net` 是 §5 线上帧格式的唯一真值来源，
+//! 分流逻辑天然属于那里。
 //!
 //! ## 用法
 //!
@@ -36,8 +36,8 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use beam_audio::{AudioConfig, AudioError, OpusDecoderImpl, WasapiAudioOutput};
-use beam_net::{JitterBuffer, Reassembler};
+use beam_audio::{AudioConfig, AudioError, AudioMode};
+use beam_net::DemuxStream;
 use beam_proto::EncodedFrame;
 use beam_session::{ControlChannel, NetTransport, SessionError, Transport, TransportFactory};
 
@@ -46,17 +46,13 @@ use crate::audio::{AudioDatagramSink, AudioReceiveStatsHandle, AudioReceiver};
 /// 带音频分流的会话传输。
 ///
 /// - 控制流 / 输入流 / 发帧：**转发**给会话层的 [`NetTransport`]（不重写）；
-/// - datagram：**自己读**，按帧头 `type` 分流 —— 音频 → 音频接收端，
-///   其它 → 画面重组器。
+/// - datagram：**自己读**（[`beam_net::DemuxStream`]），按帧头 `type` 分流 ——
+///   音频 → 音频接收端，其它 → 画面重组器。
 pub struct DemuxTransport {
     /// 会话层那份传输（控制面 / 输入面 / 发帧）。
     inner: NetTransport,
-    /// datagram 源（与 `inner` 是同一条连接）。
-    conn: beam_net::Conn,
-    /// 画面重组器（视频数据片 + FEC 冗余片）。
-    reassembler: Reassembler,
-    /// 画面抖动缓冲（§3.2 `jitter_frames`）。
-    jitter: JitterBuffer,
+    /// datagram 分流读点（与 `inner` 是同一条连接）。
+    demux: DemuxStream,
     /// 音频接收端（`None` = 本次会话不接音频）。
     audio: Option<Box<dyn AudioDatagramSink>>,
     /// 音频统计句柄（`None` = 本次会话不接音频）。
@@ -89,12 +85,9 @@ impl DemuxTransport {
         audio: Option<Box<dyn AudioDatagramSink>>,
         audio_stats: Option<AudioReceiveStatsHandle>,
     ) -> Self {
-        let jitter = JitterBuffer::new(conn.config().jitter_depth());
         Self {
             inner,
-            conn,
-            reassembler: Reassembler::new(),
-            jitter,
+            demux: DemuxStream::new(&conn),
             audio,
             audio_stats,
             dropped: 0,
@@ -104,22 +97,6 @@ impl DemuxTransport {
     /// 音频统计句柄（`None` = 本次会话不接音频）。
     pub fn audio_stats(&self) -> Option<&AudioReceiveStatsHandle> {
         self.audio_stats.as_ref()
-    }
-
-    /// 处理一条音频数据报。
-    ///
-    /// 音频失败**只记录、不上抛**：画面必须照旧（§3.7 的降级语义）。
-    fn handle_audio(&mut self, datagram: &[u8]) {
-        if self.audio.is_none() {
-            // 本次会话不接音频（`audio_mode=off` 或音频后端不可用）：
-            // 数据报照收、照丢，但**不进画面重组器**，因此画面不受影响。
-            tracing::trace!(
-                bytes = datagram.len(),
-                "客户端未启用音频,丢弃这条音频数据报"
-            );
-            return;
-        }
-        dispatch_audio(&mut self.audio, self.audio_stats.as_ref(), datagram);
     }
 }
 
@@ -178,43 +155,45 @@ impl Transport for DemuxTransport {
     /// - 其余数据报进画面重组器，完整帧先过抖动缓冲再交出去；
     /// - 重组超时的画面帧按 §3.2 记为 **E2004**（写日志 + 计数，不静默丢弃）。
     fn recv_frame(&mut self) -> Option<Result<EncodedFrame, SessionError>> {
-        // 1) 清理超时的画面帧（E2004）。
-        for frame_id in self.reassembler.expire_stale() {
-            self.dropped += 1;
-            tracing::warn!(frame_id, code = "E2004", "画面帧重组超时并被丢弃(E2004)");
+        // 把字段拆开借：闭包要可变借用音频支路，同时又要可变借用分流读点。
+        let DemuxTransport {
+            demux,
+            audio,
+            audio_stats,
+            dropped,
+            ..
+        } = self;
+
+        // 1) 上一轮重组超时的画面帧（E2004）。
+        for err in demux.take_expired() {
+            *dropped += 1;
+            if let beam_net::NetError::FrameExpired { frame_id } = err {
+                tracing::warn!(frame_id, code = "E2004", "画面帧重组超时并被丢弃(E2004)");
+            }
         }
 
         // 2) 读走已经到达的数据报：音频分流，画面进重组器。
-        loop {
-            let datagram = match self.conn.try_read_datagram() {
-                Ok(Some(dg)) => dg,
-                Ok(None) => break,
-                Err(e) => {
-                    return Some(Err(SessionError::TransportFailed {
-                        reason: format!("接收画面失败 {}: {e}", e.code_str()),
-                    }))
-                }
-            };
-            if beam_audio::wire::is_audio_datagram(&datagram) {
-                self.handle_audio(&datagram);
-                continue;
+        let frame = demux.drain(|kind, datagram| {
+            if matches!(kind, beam_proto::FrameKind::Audio) {
+                dispatch_audio(audio, audio_stats.as_ref(), datagram);
+            } else {
+                tracing::trace!(kind = ?kind, "收到保留类型的数据报,已忽略");
             }
-            match self.reassembler.push_datagram(&datagram) {
-                Ok(Some(frame)) => self.jitter.push(frame, beam_net::now_us()),
-                Ok(None) => {}
-                Err(e) => {
-                    return Some(Err(SessionError::TransportFailed {
-                        reason: format!("接收画面失败 {}: {e}", e.code_str()),
-                    }))
-                }
+        });
+        let frame = match frame {
+            Ok(frame) => frame,
+            Err(e) => {
+                return Some(Err(SessionError::TransportFailed {
+                    reason: format!("接收画面失败 {}: {e}", e.code_str()),
+                }))
             }
-        }
+        };
 
         // 3) 经抖动缓冲放行一帧。
         //
         // §5 的 16 字节帧头只有 `capture_ts` 一个时间戳字段，没有独立的 `pts`，
         // 因此接收端把 `pts_us` 取成 `capture_ts`（与 `NetTransport` 同口径）。
-        match self.jitter.pop(beam_net::now_us()) {
+        match frame {
             Some(frame) => Some(Ok(EncodedFrame {
                 frame_id: frame.frame_id,
                 pts_us: frame.pts_us,
@@ -297,7 +276,7 @@ impl TransportFactory for DemuxTransportFactory {
         // 音频（可选）：设备或 Opus 后端不可用时**只关音频**，画面照旧。
         let (audio, stats) = match self.audio.clone() {
             // §3.7 `audio_mode=off`：客户端明确不要音频。
-            Some(cfg) if cfg.mode != beam_audio::AudioMode::Off => match build_audio_sink(cfg) {
+            Some(cfg) if cfg.mode != AudioMode::Off => match build_audio_sink(cfg) {
                 Ok((sink, handle)) => (Some(sink), Some(handle)),
                 Err(e) => {
                     tracing::warn!(
@@ -323,8 +302,8 @@ impl TransportFactory for DemuxTransportFactory {
 fn build_audio_sink(
     cfg: AudioConfig,
 ) -> Result<(Box<dyn AudioDatagramSink>, AudioReceiveStatsHandle), AudioError> {
-    let decoder = OpusDecoderImpl::new(cfg.clone())?;
-    let output = WasapiAudioOutput::new(cfg)?;
+    let decoder = beam_audio::OpusDecoderImpl::new(cfg.clone())?;
+    let output = beam_audio::WasapiAudioOutput::new(cfg)?;
     let stats = AudioReceiveStatsHandle::default();
     let receiver = AudioReceiver::with_stats(decoder, output, stats.clone());
     Ok((Box::new(receiver), stats))

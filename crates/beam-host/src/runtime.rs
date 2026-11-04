@@ -245,6 +245,33 @@ impl HostSessionHandle {
     pub fn audio_stats(&self) -> Option<&AudioStatsHandle> {
         self.audio_stats.as_ref()
     }
+
+    /// **停止**主机侧音频采集（§3.7）。
+    ///
+    /// 采集任务被取消 ⇒ WASAPI loopback 设备关闭、Opus 编码器随之释放。
+    /// **画面完全不受影响**（音频停止只是降级为「只有画面」，§3.7）。
+    ///
+    /// 用途有两个：
+    ///
+    /// - 产品侧：用户按下「静音」；
+    /// - 验证侧：`beam-host` 的 `client_loopback` 示例在本机同时跑主机与客户端，
+    ///   客户端把收到的音频**回放**到同一个默认渲染端点时，主机的 loopback
+    ///   会把这段回放**再采回来** ⇒ 形成反馈回路。
+    ///   先停掉采集，客户端再回放，回路就断了。
+    ///
+    /// 返回 `true` 表示确实停掉了一次采集任务（此前有任务在跑）。
+    pub async fn stop_audio(&mut self) -> bool {
+        match self.audio_task.take() {
+            Some(task) => {
+                task.abort();
+                // 等任务真正被取消：采集设备随之关闭（`LoopbackInner` 的 `Drop`
+                // 会置停止标志并 join 采集线程）。
+                let _ = task.await;
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 /// 按 feature 选一条主机侧画面流水线（§3.9）。

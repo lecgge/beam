@@ -171,6 +171,7 @@
 
 pub mod config;
 pub mod datagram;
+pub mod demux;
 pub mod endpoint;
 pub mod error;
 pub mod fec;
@@ -190,6 +191,7 @@ pub use datagram::{
     group_index, packetize, packetize_with_codec, with_group_index, EncodedFrameView, Packet,
     Reassembler, GROUP_INDEX_MASK, GROUP_INDEX_SHIFT, MAX_GROUPS_PER_FRAME,
 };
+pub use demux::DemuxStream;
 pub use endpoint::{Conn, NetEndpoint, VideoReceiver, VideoSender, VideoStream};
 pub use error::{message, NetError};
 pub use fec::{parity_shard_count, FecCodec, FecGroup, FEC_ENABLED};

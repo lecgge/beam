@@ -23,6 +23,10 @@
 //!   **WASAPI 输出**（客户端侧，`WasapiAudioOutput`）—— 见 [`wasapi`] 模块。
 //!   格式协商 / PCM 转换 / 分帧累积是**纯逻辑**，放在 [`pcm`] 模块里单测覆盖；
 //!   真机路径（枚举设备、打开端点）默认**不跑**（`#[ignore]` + 环境变量门控）。
+//! - **已落地**：**客户端侧接收端**（[`receive`] 模块）—— 音频数据报 → Opus 解码
+//!   → WASAPI 输出。这套组装住在 L1 而不是 `beam-client`，是因为 §4 规定
+//!   **L3 之间不得横向依赖**（`beam-host` 与 `beam-client` 同层），
+//!   而主机侧的验证入口与客户端侧都要用同一份实现。
 //! - **未落地**：Android 侧的解码与输出（由 `core-audio` 负责，不在本 crate）。
 //!
 //! ## 错误码
@@ -69,6 +73,7 @@ pub mod audio;
 pub mod error;
 pub mod opus;
 pub mod pcm;
+pub mod receive;
 pub mod wasapi;
 pub mod wire;
 
@@ -79,6 +84,10 @@ pub use audio::{
     SAMPLES_PER_FRAME, SAMPLE_RATE,
 };
 pub use error::{message, AudioError};
+pub use receive::{
+    default_audio_sink, AudioDatagramSink, AudioReceiveStats, AudioReceiveStatsHandle,
+    AudioReceiver,
+};
 pub use wire::{
     audio_frame_id, decode_audio_datagram, encode_audio_datagram, is_audio_datagram, AudioDatagram,
     AUDIO_FRAME_ID_FLAG, AUDIO_MAX_PAYLOAD_LEN,

@@ -217,7 +217,46 @@ where
         let Some(pcm) = self.source.next_frame() else {
             return Ok(false);
         };
-        let opus = self.encoder.encode(&pcm)?;
+        self.encode_and_send(&pcm)?;
+        Ok(true)
+    }
+
+    /// 把采集侧**攒下的所有帧**都编码并发出，返回发出的帧数。
+    ///
+    /// ## 为什么必须「一次发完」
+    ///
+    /// §3.7 的音频帧是 **5 ms 一帧** ⇒ 实时需要 **200 帧/秒**。
+    /// 如果每轮循环只取一帧，消费速率就被**循环的唤醒间隔**限死了：
+    /// 唤醒间隔一旦是 15 ms，速率就掉到 65 帧/秒，采集队列随即积压、
+    /// 开始丢帧（实测：主机只送出 65 帧/秒，采集队列刷「积压」告警）。
+    ///
+    /// 一次把队列里攒下的帧全发走，速率就**与唤醒间隔无关**：
+    /// 唤醒晚了，只是这一轮多发几帧。
+    /// （实测对照：同样的采集 + Opus 编码 + 建数据报，在「一轮发完」的写法下
+    /// 是 199.7 帧/秒 —— 处理能力本身完全够用，瓶颈在循环结构。）
+    ///
+    /// ## 空负载不发出
+    ///
+    /// Opus 编码器有**一帧的流水线延迟**（头几帧送进去还取不出包），
+    /// 这时编码返回**空负载**。空负载**不是**一帧音频 ⇒ 不发数据报、
+    /// 也不占用帧号（否则客户端会拿到一个空包，解码失败）。
+    pub fn drain_available(&mut self) -> Result<usize, AudioPipelineError> {
+        let mut sent = 0usize;
+        while let Some(pcm) = self.source.next_frame() {
+            if self.encode_and_send(&pcm)? {
+                sent += 1;
+            }
+        }
+        Ok(sent)
+    }
+
+    /// 编码一帧 PCM 并发出；返回是否真的发出了数据报。
+    fn encode_and_send(&mut self, pcm: &beam_audio::PcmFrame) -> Result<bool, AudioPipelineError> {
+        let opus = self.encoder.encode(pcm)?;
+        if opus.is_empty() {
+            // 编码器还在流水线里 ⇒ 这一帧还没编码出来，不是错误，也不发数据报。
+            return Ok(false);
+        }
         let datagram = wire::encode_audio_datagram(self.sequence, now_us(), &opus)?;
         self.sequence = self.sequence.wrapping_add(1);
         self.sender.send_audio_datagram(&datagram)?;
@@ -250,6 +289,13 @@ where
 /// 主机侧音频循环：开设备 → 编码 → 发数据报，直到出错或任务被取消。
 ///
 /// 出错时**停掉采集**并把错误码如实抛给调用方（调用方负责记录并降级为「只有画面」）。
+///
+/// ## 每轮「一次发完」
+///
+/// 循环里调的是 [`AudioPipeline::drain_available`] 而不是 `poll()`：
+/// 音频是 5 ms 一帧（实时 200 帧/秒），一轮只取一帧的话，速率会被
+/// **循环的唤醒间隔**限死（实测 15 ms 的唤醒间隔 ⇒ 只有 65 帧/秒，
+/// 采集队列一路积压到丢帧）。一轮把攒下的帧全发走，速率就与唤醒间隔无关。
 pub async fn run_audio_loop<S, E, T>(
     source: S,
     encoder: E,
@@ -265,11 +311,21 @@ where
     let mut pipeline = AudioPipeline::with_stats(source, encoder, sender, cfg, stats);
     pipeline.start()?;
     loop {
-        if let Err(e) = pipeline.poll() {
-            pipeline.stop();
-            return Err(e);
+        let sent = match pipeline.drain_available() {
+            Ok(sent) => sent,
+            Err(e) => {
+                pipeline.stop();
+                return Err(e);
+            }
+        };
+        if sent > 0 {
+            // 刚发过一批：立刻再问一次（队列里可能还有）。
+            // 这里**不睡** —— 睡了就等于把速率交给唤醒间隔；
+            // 但要 `yield_now` 让出调度，别占死一个 worker。
+            tokio::task::yield_now().await;
+            continue;
         }
-        // 采集侧是非阻塞的：还没攒够 5 ms 时 `poll` 返回 `Ok(false)`。
+        // 采集侧是非阻塞的：还没攒够 5 ms 时 `drain_available` 返回 0。
         // 这里睡 1 ms 再问一次，兼顾延迟（§3.7 采集→编码 ≤6 ms）与 CPU 占用。
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
@@ -404,6 +460,64 @@ mod tests {
         assert_eq!(sent.len(), 2);
         assert_eq!(sender.count.load(Ordering::SeqCst), 2);
         assert_eq!(pipeline.stats().snapshot().frames_sent, 2);
+    }
+
+    #[test]
+    fn drain_available_sends_every_queued_frame_in_one_pass() {
+        // §3.7：5 ms 一帧 ⇒ 实时 200 帧/秒。一轮只取一帧的话，
+        // 速率会被循环的唤醒间隔限死 ⇒ 必须一次把攒下的帧全发走。
+        let sender = FakeSender::default();
+        let mut pipeline = AudioPipeline::new(
+            FakeSource::new(vec![pcm_frame(), pcm_frame(), pcm_frame()]),
+            FakeEncoder { fail: false },
+            sender.clone(),
+            cfg(),
+        );
+        pipeline.start().expect("应当能启动");
+
+        assert_eq!(
+            pipeline.drain_available().expect("应当发得出去"),
+            3,
+            "一轮必须把攒下的 3 帧全发走"
+        );
+        assert_eq!(sender.count.load(Ordering::SeqCst), 3);
+        assert_eq!(pipeline.stats().snapshot().frames_sent, 3);
+
+        // 队列空了 ⇒ 这一轮 0 帧。
+        assert_eq!(pipeline.drain_available().expect("应当发得出去"), 0);
+        assert_eq!(sender.count.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn empty_opus_payload_is_not_sent_as_an_audio_datagram() {
+        /// 假编码器：返回**空**负载（模拟编码器的一帧流水线延迟）。
+        struct EmptyEncoder;
+        impl OpusEncoder for EmptyEncoder {
+            fn encode(&mut self, _pcm: &PcmFrame) -> Result<Bytes, AudioError> {
+                Ok(Bytes::new())
+            }
+            fn reset(&mut self) {}
+        }
+
+        let sender = FakeSender::default();
+        let mut pipeline = AudioPipeline::new(
+            FakeSource::new(vec![pcm_frame()]),
+            EmptyEncoder,
+            sender.clone(),
+            cfg(),
+        );
+        pipeline.start().expect("应当能启动");
+
+        assert_eq!(
+            pipeline.drain_available().expect("空负载不是错误"),
+            0,
+            "空负载不算发出去了一帧"
+        );
+        assert!(
+            sender.sent.lock().unwrap().is_empty(),
+            "空负载不得发出数据报（客户端会拿到空包）"
+        );
+        assert_eq!(pipeline.stats().snapshot().frames_sent, 0);
     }
 
     #[test]
