@@ -87,6 +87,9 @@ beam-render = { workspace = true, optional = true }
 beam-perf = { workspace = true, optional = true }
 # §5 控制流 / 输入流的读写原语（quinn 直接实现了 tokio 的 AsyncRead / AsyncWrite）。
 tokio = { workspace = true }
+# `SessionEventStream` 是 `futures::Stream`：主机侧的「配对成功 ⇒ 写信任库」
+# 要消费它（§3.3）。
+futures = { workspace = true }
 # `beam_proto::encode` 的输出缓冲类型（§5 线上格式）。
 bytes = { workspace = true }
 thiserror = { workspace = true }

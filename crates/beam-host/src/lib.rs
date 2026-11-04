@@ -104,5 +104,5 @@ pub use audio::{
 };
 pub use input::map_input_permissions;
 pub use net::{HostInput, HostListener, HostTransport};
-pub use pairing::{HostTrustGate, ObservedPeer};
+pub use pairing::{HostPairing, HostTrustGate, ObservedPeer, PeerVerdict};
 pub use runtime::{default_frame_pipeline, HostConfig, HostError, HostRuntime, HostSessionHandle};

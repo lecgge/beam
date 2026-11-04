@@ -153,6 +153,13 @@ struct CrateInner {
     probing: Vec<String>,
     /// 当前配对码(含真实二维码载荷与轮换时间,§3.3)。
     pairing: PairingCode,
+    /// 当前二维码载荷里的**一次性 token**（§3.3 `pin_ttl=120s`）。
+    ///
+    /// 主机把它放进会话层的 `PairingConfig.token` ——
+    /// 扫码那条路（Android 扫二维码）走 `PairRequest{token}`（§5），
+    /// 不需要用户手输 PIN。二维码载荷里已经带着它，这里单独存一份
+    /// 免得每次都去解析 URI。
+    host_pairing_token: Option<String>,
     config_path: Option<PathBuf>,
     trust_path: Option<PathBuf>,
     desktop_path: Option<PathBuf>,
@@ -270,7 +277,7 @@ impl CrateService {
         spawn_discovery_browser(discovery.clone());
 
         // §3.3:初始配对码。
-        let pairing = build_pairing(&identity, host.local_ip.as_deref(), ui.port);
+        let (pairing, pairing_token) = build_pairing(&identity, host.local_ip.as_deref(), ui.port);
 
         Self {
             inner: Arc::new(Mutex::new(CrateInner {
@@ -290,6 +297,7 @@ impl CrateService {
                 rejected_pairs: Vec::new(),
                 probing: Vec::new(),
                 pairing,
+                host_pairing_token: Some(pairing_token),
                 config_path,
                 trust_path,
                 desktop_path,
@@ -315,7 +323,10 @@ impl CrateService {
     }
 
     /// 生成配对码与真实二维码载荷(§3.3)。
-    fn build_pairing(&self, inner: &CrateInner) -> PairingCode {
+    ///
+    /// 返回 `(配对码, 一次性 token)` —— token 单独给主机侧放进
+    /// 会话层的 `PairingConfig.token`(§5 `PairRequest{token}`)。
+    fn build_pairing(&self, inner: &CrateInner) -> (PairingCode, String) {
         build_pairing(
             &inner.identity,
             inner.host.local_ip.as_deref(),
@@ -707,7 +718,23 @@ impl BeamService for CrateService {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         let resolved = inner.resolved.clone();
-        self.spawn_client_session(resolved, peer, host.name.clone(), identity, trust);
+        // §3.3：客户端输入的 PIN **真的进到会话层** —— 会话层拿它发起
+        // SPAKE2 配对（§4.1「PairRequest(token 或 SPAKE2 msg)」），
+        // 主机侧用同一个 PIN 校验，通过之后才进串流。
+        // 已配对的主机传空串 ⇒ 不配对（对端已在信任库里）。
+        let pin_for_pairing = if pin.is_empty() {
+            None
+        } else {
+            Some(pin.to_string())
+        };
+        self.spawn_client_session(
+            resolved,
+            peer,
+            host.name.clone(),
+            identity,
+            trust,
+            pin_for_pairing,
+        );
 
         Ok(session)
     }
@@ -1128,8 +1155,10 @@ impl BeamService for CrateService {
         if now_ms().saturating_sub(elapsed) < PIN_TTL.as_millis() as u64 {
             return None;
         }
-        let code = self.build_pairing(&inner);
+        let (code, token) = self.build_pairing(&inner);
         inner.pairing = code.clone();
+        // §3.3：token 跟着 PIN 一起轮换（两者同属一份配对码）。
+        inner.host_pairing_token = Some(token);
         inner.host.revision += 1;
         Some(code)
     }
@@ -1237,6 +1266,7 @@ impl CrateService {
         host_name: String,
         identity: Identity,
         trust: TrustStore,
+        pin: Option<String>,
     ) {
         *self
             .transport_outcome
@@ -1255,6 +1285,9 @@ impl CrateService {
         // QUIC 需要 tokio reactor:在 tauri 的异步运行时里跑,
         // 不用 futures::executor::block_on(它不驱动 reactor,会挂住)。
         tauri::async_runtime::spawn(async move {
+            // §3.3：本机指纹（放进挑战载荷，让主机知道客户端是谁）。
+            // 先取出来 —— `identity` 下面要移交给连接请求。
+            let client_fingerprint = identity.fingerprint();
             let request = crate::transport::TransportRequest {
                 addr,
                 resolved: resolved.clone(),
@@ -1312,7 +1345,14 @@ impl CrateService {
             );
             let factory = ReadyTransportFactory::new(Box::new(demux) as Box<dyn Transport>);
 
-            let runtime = ClientRuntime::new(ClientConfig::from_resolved(&resolved));
+            let runtime = ClientRuntime::new({
+                // §3.3：把用户输入的 PIN 与**本机**指纹交给客户端运行时 ——
+                // PIN 用于发起 SPAKE2，本机指纹放进挑战载荷（让主机知道是谁）。
+                let mut cfg = ClientConfig::from_resolved(&resolved);
+                cfg.pin = pin.clone();
+                cfg.fingerprint = Some(client_fingerprint);
+                cfg
+            });
 
             // §3.10 / 产品方案第 45 行:客户端画面上屏到**独立原生窗口**
             // (不走 WebView)。分工:
@@ -1411,6 +1451,17 @@ impl CrateService {
         let inner = self.inner.clone();
         // 闸门与桌面端共享同一份信任库:用户点「同意」写库后,闸门立刻能看到。
         let gate = Arc::new(HostTrustGate::new(trust));
+        // §3.3:**配对模式** —— 未信任对端的握手也放行。
+        //
+        // 为什么:客户端要把 PIN 交给主机校验,只能走**控制通道**;
+        // 如果握手就被拒,控制通道根本开不了,PIN 也就没有用武之地。
+        // 安全兜底移到控制面:主机在 `require_pairing` 为真时
+        // **拒绝**未配对对端的 `Hello`(beam-session 的控制层把关),
+        // 所以「握手放行」不等于「能串流」。
+        //
+        // 未信任的对端照样被记进 `observed` ⇒ 用户在弹窗里点「同意」
+        // 这条路(产品方案 §8)仍然保留。
+        gate.set_pairing_mode(true);
 
         tauri::async_runtime::spawn(async move {
             let request = crate::transport::ListenRequest {
@@ -1447,9 +1498,32 @@ impl CrateService {
             loop {
                 match listener.accept().await {
                     Ok(conn) => {
-                        // 握手通过 → 对端已在信任库里 → 起主机会话。
-                        tracing::info!("客户端已通过信任校验,建立主机会话");
-                        spawn_host_session(inner.clone(), resolved.clone(), conn);
+                        // §3.3：握手通过 ⇒ 取走这次握手的**信任判定**。
+                        // - `Trusted` ⇒ 对端已在信任库里，不需要再配对；
+                        // - `NeedsPairing` ⇒ 对端是新的，控制面必须先完成
+                        //   PIN / token 交换（§4.1）。
+                        let verdict = gate.take_verdict();
+                        // 主机当前显示的 PIN（每 `pin_ttl=120s` 轮换一次，
+                        // 所以**每次接受连接时现取**，不用构造期缓存的）。
+                        let (pin, token, host_fp) = {
+                            let g = inner.lock().unwrap_or_else(|e| e.into_inner());
+                            (
+                                Some(g.pairing.code.clone()),
+                                g.host_pairing_token.clone(),
+                                Some(g.identity.fingerprint()),
+                            )
+                        };
+                        let pairing = beam_host::HostPairing::for_verdict(
+                            verdict,
+                            pin,
+                            token,
+                            host_fp,
+                        );
+                        tracing::info!(
+                            require_pairing = pairing.require_pairing,
+                            "客户端已通过信任校验,建立主机会话"
+                        );
+                        spawn_host_session(inner.clone(), resolved.clone(), conn, pairing);
                     }
                     Err(err) => {
                         if listener.is_closed() {
@@ -1608,6 +1682,7 @@ fn spawn_host_session(
     inner: Arc<Mutex<CrateInner>>,
     resolved: ResolvedConfig,
     conn: beam_net::Conn,
+    pairing: beam_host::HostPairing,
 ) {
     tauri::async_runtime::spawn(async move {
         let runtime = HostRuntime::new(HostConfig::from_resolved(&resolved));
@@ -1616,7 +1691,7 @@ fn spawn_host_session(
         // 用 beam-host 提供的空接收器把输入流读走 —— 客户端的输入通道不会堵住。
         let input = beam_host::NoopInputSink::new();
         let handle = match runtime
-            .start_quic_session_with_pipeline(conn, pipeline, errors, Some(input))
+            .start_quic_session_with_pipeline(conn, pipeline, errors, Some(input), pairing)
             .await
         {
             Ok(handle) => Arc::new(handle),
@@ -1655,6 +1730,22 @@ fn spawn_host_session(
             guard.host.message = None;
             guard.host.revision += 1;
             guard.host.updated_at_ms = now_ms();
+        }
+
+        // §3.3：配对成功 ⇒ 把对端指纹**真的写进信任库**。
+        //
+        // 这一步放在 `beam-host` 里(主机编排层owns 主机侧的信任语义)，
+        // 桌面端与真机验证入口共用**同一份实现**。
+        //
+        // PIN 路径不需要用户再点一次「同意」:用户在客户端输入了主机屏幕上
+        // 显示的 PIN,这本身就是授权。写库之后,这个对端下次握手就是「已信任」
+        // ⇒ 不用再配对(§3.3「已配对的主机可传空串」的对称面)。
+        {
+            let trust = {
+                let guard = inner.lock().unwrap_or_else(|e| e.into_inner());
+                Arc::clone(&guard.trust)
+            };
+            handle.spawn_trust_writer(trust);
         }
 
         // 推进会话:真实错误从这里冒泡(不静默吞掉)。
@@ -1751,18 +1842,19 @@ fn translate_session_event(event: SessionEvent) -> Option<SessionEventInfo> {
 ///
 /// 载荷格式固定为 `beam://pair?h=ip:port&fp=..&t=token`(§3.3),
 /// 里面装的是**真实**的本机地址、真实指纹与一次性 token。
-fn build_pairing(identity: &Identity, local_ip: Option<&str>, port: u16) -> PairingCode {
+fn build_pairing(identity: &Identity, local_ip: Option<&str>, port: u16) -> (PairingCode, String) {
     let host = local_ip.unwrap_or("127.0.0.1");
     let ip: Ipv4Addr = host.parse().unwrap_or(Ipv4Addr::LOCALHOST);
     let addr = SocketAddr::new(ip.into(), port);
 
     // 真实的一次性 token(§3.3 `pin_ttl`),带真实 TTL 校验。
     let token = PairingToken::issue(PIN_TTL);
+    let token_value = token.value().to_string();
     let payload = PairPayload {
         host: addr.ip().to_string(),
         port: addr.port(),
         fingerprint: identity.fingerprint(),
-        token: token.value().to_string(),
+        token: token_value.clone(),
     };
 
     // 4 位 PIN(§3.3 `pin_len=4`):用随机字节取模,保证每次不同。
@@ -1774,12 +1866,17 @@ fn build_pairing(identity: &Identity, local_ip: Option<&str>, port: u16) -> Pair
         .map(|b| char::from(b'0' + (b % 10)))
         .collect();
 
-    PairingCode {
-        code,
-        qr_payload: payload.to_uri(),
-        expires_in_s: PIN_TTL.as_secs() as u32,
-        rotated_at_ms: now_ms(),
-    }
+    (
+        PairingCode {
+            code,
+            qr_payload: payload.to_uri(),
+            expires_in_s: PIN_TTL.as_secs() as u32,
+            rotated_at_ms: now_ms(),
+        },
+        // token 一并返回:主机把它放进会话层的 `PairingConfig.token`
+        // ⇒ 扫码那条路走 `PairRequest{token}`(§5),不需要用户手输 PIN。
+        token_value,
+    )
 }
 
 /// `beam_proto::CodecKind` → 前端使用的 codec 名。

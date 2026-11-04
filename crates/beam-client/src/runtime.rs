@@ -7,8 +7,8 @@ use beam_net::PeerVerifier;
 use beam_proto::StreamConfig;
 use beam_render::{D3D11Renderer, Renderer};
 use beam_session::{
-    ClientDeps, ClientSession, ClientSessionConfig, PeerAddr, SessionHandle, SessionTimeouts,
-    TransportFactory,
+    ClientControlDeps, ClientDeps, ClientSession, ClientSessionConfig, PairingConfig, PeerAddr,
+    SessionHandle, SessionTimeouts, TransportFactory,
 };
 
 use crate::adapters::DecodeRenderConsumer;
@@ -65,6 +65,16 @@ pub struct ClientConfig {
     /// `mode = off`（默认）时客户端**不接音频**；非 off 时用
     /// [`ClientRuntime::transport_factory_with_audio`] 建立带音频分流的传输。
     pub audio: beam_audio::AudioConfig,
+    /// 客户端输入的 PIN（§3.3，4 位数字）。
+    ///
+    /// 有值时客户端在控制通道上发起 SPAKE2 配对（§4.1「`PairRequest`
+    /// (token 或 SPAKE2 msg)」），**配对成功之后才发 `Hello`**。
+    ///
+    /// `None` = 本次连接不需要配对（对端已在信任库里，§3.3
+    /// 「已配对的主机可传空串」）。
+    pub pin: Option<String>,
+    /// **本机**证书指纹（放进挑战载荷，让主机知道客户端是谁，§3.3）。
+    pub fingerprint: Option<beam_pair::Fingerprint>,
 }
 
 impl ClientConfig {
@@ -96,6 +106,10 @@ impl ClientConfig {
                 sample_rate: beam_audio::SAMPLE_RATE,
                 channels: 2,
             },
+            // §3.3：默认**不配对**（对端已在信任库里的情形）。
+            // 需要配对时由调用方设置 `pin` / `fingerprint`。
+            pin: None,
+            fingerprint: None,
         }
     }
 }
@@ -153,7 +167,17 @@ impl ClientRuntime {
             stall_threshold: SessionTimeouts::default().stall_threshold,
             transport: None,
         };
-        ClientSession::connect_with(peer, session_cfg, deps)
+        // §3.3：把客户端输入的 PIN 与本机指纹交给控制层 ——
+        // 有 PIN 就发起 SPAKE2 配对，**配对成功之后才发 `Hello`**。
+        let ctrl_deps = ClientControlDeps {
+            pairing: PairingConfig {
+                pin: self.cfg.pin.clone(),
+                fingerprint: self.cfg.fingerprint,
+                ..PairingConfig::default()
+            },
+            rate: None,
+        };
+        ClientSession::connect_with_control(peer, session_cfg, deps, ctrl_deps)
     }
 
     /// 用**默认的解码 + 上屏组合**建立客户端会话（§3.9 / §3.10）。

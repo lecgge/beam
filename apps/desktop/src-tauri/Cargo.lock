@@ -242,6 +242,7 @@ dependencies = [
  "beam-proto",
  "beam-session",
  "bytes",
+ "futures",
  "thiserror 2.0.21",
  "tokio",
  "tracing",

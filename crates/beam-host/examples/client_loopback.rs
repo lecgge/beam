@@ -120,6 +120,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // 这不是 bug，但它让「整链验证」变得不确定（实测同一台机器上
     // 同样的命令，帧数在 0 与 1 之间跳）。所以这里起一个后台进程
     // 持续刷新屏幕，让抓屏**确定地**有帧 —— 验证入口必须可重复。
+    //
+    // 刷屏窗口是 **TopMost** 的（见 [`ScreenAgitator`]），客户端那个
+    // 1920×1080 的串流窗口盖不住它；起得早一点，好让 PowerShell
+    // 把窗口建出来（建窗要一两秒）。
     let _screen_agitator = ScreenAgitator::start();
 
     // ---------------------------------------------------------------- 监听
@@ -301,6 +305,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         "客户端降级成清屏的帧数 = {}",
         client_result.cleared_presents
     );
+    if client_result.frames_received == 0 {
+        // WGC 是内容驱动的（§3.5）：画面不变就没有新帧。
+        // 最常见的原因不是代码坏了，而是**桌面此刻是静态的** ——
+        // 例如会话处于**锁屏**状态（锁屏画面除了时钟几乎不变 ⇒ 一分钟才一帧）。
+        // 实测：锁屏时抓屏只能拿到 3 帧（初始合成），而音频照常 800 帧。
+        println!(
+            "      提示: 画面 0 帧 —— WGC 是内容驱动的(§3.5)。\
+             若当前桌面处于**锁屏**或全屏静止,就没有新帧可发;\
+             解锁并让桌面有变化后重跑。"
+        );
+    }
 
     // ---------------------------------------------------------------- 音频
     println!("--------------------------------------------------");
@@ -416,24 +431,68 @@ fn stream_config() -> StreamConfig {
 
 /// 让屏幕**持续变化**的后台进程（WGC 是内容驱动的，详见调用处）。
 ///
-/// 起一个 `cmd` 子进程不停往屏幕上打点 —— 显示器内容就一直变，
-/// WGC 就一直有帧。进程在 [`Drop`] 时被杀掉。
+/// ## 为什么不用「一个往控制台打点的 cmd 进程」
+///
+/// 那样做有两个致命问题（都是实测踩出来的）：
+///
+/// 1. `cmd /C for /L %i in (1,1,100000) do @echo .` **很快就跑完**，
+///    之后屏幕就不再变化 ⇒ WGC 没有新帧可发 ⇒ 抓屏 0 帧
+///    （音频照常 800 帧，因为音频不依赖屏幕变化）；
+/// 2. 即便循环够长，那个控制台窗口也可能被客户端那个 **1920×1080** 的
+///    串流窗口盖住 ⇒ 被抓到的画面同样不变。
+///
+/// ## 现在的做法
+///
+/// 起一个 PowerShell + WinForms 的 **TopMost 小窗口**，每 40 ms 换一次底色：
+/// - **TopMost** ⇒ 任何普通窗口都盖不住它（客户端那个串流窗口也盖不住）；
+/// - **每 40 ms 变一次** ⇒ 桌面内容真的在变 ⇒ WGC 一定有帧；
+/// - **一直跑** ⇒ 整个测试期间都在变。
+///
+/// 进程在 [`Drop`] 时被杀掉，临时脚本一并删掉。
 struct ScreenAgitator {
+    script: std::path::PathBuf,
     child: std::process::Child,
 }
+
+/// 刷屏用的 PowerShell 脚本（WinForms TopMost 小窗口 + 变色定时器）。
+const AGITATOR_PS1: &str = r#"
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$form = New-Object System.Windows.Forms.Form
+$form.TopMost = $true
+$form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
+$form.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
+$form.Location = New-Object System.Drawing.Point 0,0
+$form.Size = New-Object System.Drawing.Size 200,120
+$form.BackColor = [System.Drawing.Color]::Black
+$timer = New-Object System.Windows.Forms.Timer
+$timer.Interval = 40
+$script:n = 0
+$timer.Add_Tick({
+    $script:n = $script:n + 1
+    $form.BackColor = [System.Drawing.Color]::FromArgb(($script:n * 29) % 256, 0, 0)
+    $form.Invalidate()
+})
+$form.Add_Shown({ $timer.Start() })
+[System.Windows.Forms.Application]::Run($form)
+"#;
 
 impl ScreenAgitator {
     /// 起这个后台进程。
     fn start() -> Self {
-        // `for /L` 循环不停输出 ⇒ 终端窗口内容持续变化。
-        // 用 `cmd /C` 而不是 PowerShell：Windows 自带、无依赖、启动快。
-        let child = std::process::Command::new("cmd")
-            .args(["/C", "for /L %i in (1,1,100000) do @echo ."])
+        // 脚本名带上 pid ⇒ 多个实例互不打架。
+        let script =
+            std::env::temp_dir().join(format!("beam-screen-agitator-{}.ps1", std::process::id()));
+        std::fs::write(&script, AGITATOR_PS1).expect("写刷屏脚本应当成功");
+        let child = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(&script)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .expect("起屏幕活动进程失败");
-        Self { child }
+        Self { script, child }
     }
 }
 
@@ -441,6 +500,7 @@ impl Drop for ScreenAgitator {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        let _ = std::fs::remove_file(&self.script);
     }
 }
 
@@ -595,7 +655,11 @@ async fn host_side(
     runtime: &HostRuntime,
 ) -> Result<HostResult, Box<dyn std::error::Error + Send + Sync>> {
     let mut handle = listener
-        .accept_platform_session(runtime, None::<beam_host::NoopInputSink>)
+        .accept_platform_session(
+            runtime,
+            None::<beam_host::NoopInputSink>,
+            beam_host::HostPairing::default(),
+        )
         .await?;
     println!("      主机已接受连接并启动平台会话（WGC 抓屏 + NVENC 硬编 + WASAPI 采集）");
 

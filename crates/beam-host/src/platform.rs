@@ -263,6 +263,7 @@ impl HostRuntime {
         &self,
         conn: beam_net::Conn,
         input: Option<I>,
+        pairing: crate::pairing::HostPairing,
     ) -> Result<HostSessionHandle, HostError>
     where
         I: PlatformInputSink + Send + 'static,
@@ -278,7 +279,7 @@ impl HostRuntime {
             ),
         );
         let errors = pipeline.errors();
-        self.start_quic_session_with_pipeline(conn, Box::new(pipeline), errors, input)
+        self.start_quic_session_with_pipeline(conn, Box::new(pipeline), errors, input, pairing)
             .await
     }
 }
@@ -294,11 +295,12 @@ impl HostListener {
         &self,
         runtime: &HostRuntime,
         input: Option<I>,
+        pairing: crate::pairing::HostPairing,
     ) -> Result<HostSessionHandle, HostError>
     where
         I: PlatformInputSink + Send + 'static,
     {
         let conn = self.accept().await?;
-        runtime.start_platform_session(conn, input).await
+        runtime.start_platform_session(conn, input, pairing).await
     }
 }

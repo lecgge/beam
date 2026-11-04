@@ -431,7 +431,11 @@ async fn host_side(
     runtime: &HostRuntime,
 ) -> Result<HostResult, Box<dyn std::error::Error + Send + Sync>> {
     let handle = listener
-        .accept_platform_session(runtime, None::<SendInputSink>)
+        .accept_platform_session(
+            runtime,
+            None::<SendInputSink>,
+            beam_host::HostPairing::default(),
+        )
         .await?;
     println!("      主机已接受连接并启动平台会话(WGC 抓屏 + NVENC 硬编)");
 

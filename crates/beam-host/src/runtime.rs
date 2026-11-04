@@ -9,8 +9,8 @@ use beam_net::VideoSender as NetVideoSenderTrait;
 use beam_pair::PeerPerms;
 use beam_proto::StreamConfig;
 use beam_session::{
-    HostControlDeps, HostDeps, HostSession, HostSessionConfig, PairingConfig, SessionError,
-    SessionHandle, SessionInput, SessionTimeouts,
+    HostControlDeps, HostDeps, HostSession, HostSessionConfig, SessionError, SessionHandle,
+    SessionInput, SessionTimeouts,
 };
 
 use crate::adapters::{CaptureEncodePipeline, InputAdapter, NetVideoSender, PipelineErrors};
@@ -246,6 +246,58 @@ impl HostSessionHandle {
         self.audio_stats.as_ref()
     }
 
+    /// 起一个后台任务：**配对成功后把对端指纹写进信任库**（§3.3）。
+    ///
+    /// ## 为什么在这里做
+    ///
+    /// 主机侧的信任库是「谁可以连我」的唯一真值来源，而配对成功的信号
+    /// （会话事件 `Paired`）只有会话层知道 ⇒ 这一步天然属于主机编排层。
+    /// 桌面端（L4）与真机验证入口都用**这一个实现**，不各写一份。
+    ///
+    /// ## 为什么 PIN 路径不需要用户再点一次「同意」
+    ///
+    /// PIN 流程里，用户在客户端输入了主机屏幕上显示的 PIN ——
+    /// 这本身就是授权（主机显示 PIN、客户端输入 PIN 是这类产品一贯的设计）。
+    /// 写库之后，这个对端下次握手就是「已信任」⇒ 不用再配对。
+    ///
+    /// 用户点「同意」那条路（产品方案 §8）写的是同一份信任库，
+    /// 由调用方（桌面端）在收到配对请求时处理。
+    ///
+    /// 返回 `None` 表示这次会话的事件流已经被取走（`events()` 只能取一次）。
+    pub fn spawn_trust_writer(
+        &self,
+        trust: std::sync::Arc<std::sync::Mutex<beam_pair::TrustStore>>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        let mut events = self.session.events();
+        Some(tokio::spawn(async move {
+            use futures::StreamExt;
+            while let Some(event) = events.next().await {
+                let beam_session::SessionEvent::Paired { fingerprint } = event else {
+                    continue;
+                };
+                let fp = match beam_pair::Fingerprint::from_hex(&fingerprint) {
+                    Ok(fp) => fp,
+                    Err(err) => {
+                        tracing::warn!(reason = %err, "配对成功但指纹非法,未写入信任库");
+                        continue;
+                    }
+                };
+                trust.lock().unwrap_or_else(|e| e.into_inner()).upsert(
+                    beam_pair::TrustedPeer::new(
+                        fp,
+                        "已配对设备",
+                        beam_discovery::UNKNOWN_PLATFORM,
+                        0,
+                    ),
+                );
+                tracing::info!(
+                    fingerprint = %fp.short_hex(),
+                    "配对成功,已把对端写入信任库"
+                );
+            }
+        }))
+    }
+
     /// **停止**主机侧音频采集（§3.7）。
     ///
     /// 采集任务被取消 ⇒ WASAPI loopback 设备关闭、Opus 编码器随之释放。
@@ -441,6 +493,7 @@ impl HostRuntime {
         capture: C,
         encoder: E,
         input: Option<I>,
+        pairing: crate::pairing::HostPairing,
     ) -> Result<HostSessionHandle, HostError>
     where
         C: CaptureSource + Send + 'static,
@@ -450,7 +503,7 @@ impl HostRuntime {
         let pipeline = CaptureEncodePipeline::new(capture, encoder, self.cfg.capture.clone());
         // 与 `start_session` 同法：先把共享错误槽取出来，再把流水线移进 `HostDeps`。
         let errors = pipeline.errors();
-        self.start_quic_session_with_pipeline(conn, Box::new(pipeline), errors, input)
+        self.start_quic_session_with_pipeline(conn, Box::new(pipeline), errors, input, pairing)
             .await
     }
 
@@ -470,6 +523,7 @@ impl HostRuntime {
         pipeline: Box<dyn beam_session::FramePipeline>,
         errors: PipelineErrors,
         input: Option<I>,
+        pairing: crate::pairing::HostPairing,
     ) -> Result<HostSessionHandle, HostError>
     where
         I: PlatformInputSink + Send + 'static,
@@ -492,7 +546,14 @@ impl HostRuntime {
         };
         let control = HostControlDeps {
             control: Box::new(transport),
-            pairing: PairingConfig::default(),
+            // §3.3：主机侧的 PIN / token / 本机指纹，以及「对端必须先配对」的判定。
+            pairing: beam_session::PairingConfig {
+                pin: pairing.pin,
+                token: pairing.token,
+                peer: pairing.peer,
+                fingerprint: pairing.fingerprint,
+                require_pairing: pairing.require_pairing,
+            },
             rate: None,
         };
         let session = HostSession::start_with_control(session_cfg, deps, Some(control));

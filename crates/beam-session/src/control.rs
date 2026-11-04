@@ -53,15 +53,33 @@ pub enum ControlRole {
 /// 会话层不直接持有密钥材料，只持有「配对要用什么」：
 /// - `pin`：客户端用它发起 SPAKE2，主机用它校验；
 /// - `token`：主机期望的一次性 token（`PairRequest` 路径，§5）；
-/// - `fingerprint`：本机证书指纹，用于 `PairOk` 与挑战载荷。
+/// - `peer`：本次会话的**对端**指纹（主机侧，由 TLS 层给出）；
+/// - `fingerprint`：本机证书指纹，用于 `PairOk` 与挑战载荷；
+/// - `require_pairing`：主机侧「对端**必须**先完成配对才准进串流」。
 #[derive(Debug, Clone, Default)]
 pub struct PairingConfig {
     /// PIN（客户端发起 / 主机校验）。
     pub pin: Option<String>,
     /// 主机期望的一次性 token（`PairRequest` 路径）。
     pub token: Option<String>,
+    /// 本次会话的**对端**指纹（主机侧；由 TLS 层给出）。
+    ///
+    /// token 路径（`PairRequest{token}`）用得到：那条路上协议里没有
+    /// 携带对端指纹的字段，对端身份只能从 TLS 握手那里拿。
+    /// SPAKE2 路径则用挑战载荷里带的指纹（更严格：它跟着密码学证明一起过来）。
+    pub peer: Option<Fingerprint>,
     /// 本机证书指纹。
     pub fingerprint: Option<Fingerprint>,
+    /// 主机侧：未完成配对的对端**不得**进入串流（§3.3）。
+    ///
+    /// 为什么需要它：主机在「配对模式」下会**放行**未信任对端的 TLS 握手
+    /// （不然对端连控制通道都到不了，PIN 就没有用武之地），
+    /// 因此**控制面**必须自己把关：SPAKE2 / token 交换没成功之前，
+    /// 一律不接受 `Hello`。
+    ///
+    /// 已经在信任库里的对端走的是另一条路（TLS 层直接放行），
+    /// 那时主机把本字段置 `false`（见 `beam_host::HostPairing`）。
+    pub require_pairing: bool,
 }
 
 /// 控制消息处理的结果（会话层内部使用）。
@@ -98,6 +116,21 @@ pub struct ControlContext {
     pairing: PairingConfig,
     /// 客户端侧 SPAKE2 状态（§3.3），发起配对后才有。
     client_pairing: Option<PinPairing>,
+    /// 主机侧：**已完成配对**的对端指纹（§3.3）。
+    ///
+    /// `require_pairing` 为真时，这个字段是 `None` 就表示「还没配对」——
+    /// 此时主机**拒绝** `Hello`（见 [`ControlContext::handle_hello`]）。
+    paired: Option<Fingerprint>,
+    /// 主机侧：客户端在挑战载荷里带来的**对端指纹**（还没证明它知道 PIN）。
+    ///
+    /// SPAKE2 的密码学证明在**客户端**那一步才成立（客户端拿自己的 PIN
+    /// 校验主机的应答，对不上就发 `PairFail`）。所以主机**不能**在
+    /// 「收到首条挑战」时就认定配对成功 —— 那样一个**输错 PIN** 的客户端
+    /// 也会被写进信任库。
+    ///
+    /// 主机的做法是：收到挑战时先记住对端指纹（`pending_peer`），
+    /// 等客户端回 `PairOk`（= 它真的过了 PIN 校验）才把配对坐实。
+    pending_peer: Option<Fingerprint>,
     /// 是否已经发起过配对（避免重复发 `PairRequest` / `PairChallenge`）。
     pairing_started: bool,
     /// 码率控制器（§3.2）。
@@ -133,6 +166,8 @@ impl ControlContext {
             local_caps,
             pairing,
             client_pairing: None,
+            paired: None,
+            pending_peer: None,
             pairing_started: false,
             rate,
             agreed: None,
@@ -143,6 +178,14 @@ impl ControlContext {
     /// 当前角色。
     pub fn role(&self) -> ControlRole {
         self.role
+    }
+
+    /// 已完成配对的对端指纹（`None` = 还没配对）。
+    ///
+    /// 主机侧用它判断「能不能进串流」：`require_pairing` 为真且这里是 `None`
+    /// ⇒ 拒绝 `Hello`。
+    pub fn paired(&self) -> Option<Fingerprint> {
+        self.paired
     }
 
     /// 本机能力集。
@@ -204,7 +247,23 @@ impl ControlContext {
                 ControlRole::Client => self.handle_client_challenge(&msg, &mut out),
             },
             ControlMsg::PairOk { fingerprint } => {
-                out.paired = Some(Fingerprint::from_bytes(fingerprint));
+                let fp = Fingerprint::from_bytes(fingerprint);
+                match self.role {
+                    // 主机：客户端的 `PairOk` 表示**它真的过了 PIN 校验**
+                    // （SPAKE2 的密码学证明在客户端那一步才成立）。
+                    // 对端指纹取自挑战载荷 —— 客户端在 `PairOk` 里带的是
+                    // **主机**的指纹，对主机自己没用。
+                    ControlRole::Host => {
+                        if let Some(peer) = self.pending_peer {
+                            self.paired = Some(peer);
+                            out.paired = Some(peer);
+                        }
+                    }
+                    ControlRole::Client => {
+                        self.paired = Some(fp);
+                        out.paired = Some(fp);
+                    }
+                }
             }
             ControlMsg::PairFail { code, reason } => {
                 out.error = Some(SessionError::TransportFailed {
@@ -255,8 +314,21 @@ impl ControlContext {
         out
     }
 
-    /// 主机侧：处理 `Hello` —— 版本协商 + 能力协商（§3.1 / §5）。
+    /// 主机侧：处理 `Hello` —— 配对把关 + 版本协商 + 能力协商（§3.1 / §5）。
     fn handle_hello(&mut self, hello: Hello, out: &mut ControlOutcome) {
+        // §3.3：主机在「配对模式」下会放行未信任对端的 TLS 握手
+        // （不然对端连控制通道都到不了，PIN 没有用武之地），
+        // 因此**控制面**必须自己把关：配对没成功之前一律不接受 `Hello`。
+        if self.role == ControlRole::Host && self.pairing.require_pairing && self.paired.is_none() {
+            out.replies.push(ControlMsg::PairFail {
+                code: 3001,
+                reason: "尚未完成配对,请先完成 PIN 校验".to_string(),
+            });
+            out.error = Some(SessionError::TransportFailed {
+                reason: "配对失败(E3001): 尚未完成配对,请先完成 PIN 校验".to_string(),
+            });
+            return;
+        }
         if let Err(e) = negotiate_version(&ProtocolVersion::CURRENT, &hello.ver) {
             out.replies.push(ControlMsg::Error { code: e.code() });
             out.error = Some(SessionError::TransportFailed {
@@ -289,7 +361,11 @@ impl ControlContext {
                 out.replies.push(ControlMsg::PairOk {
                     fingerprint: *fingerprint.as_bytes(),
                 });
-                out.paired = Some(fingerprint);
+                // 配对完成（§3.3）：token 本身就是客户端「知道一次性口令」的证明，
+                // 所以这条路上**当场**就能坐实。
+                // 对端指纹取自 TLS 层（协议里没有携带对端指纹的字段）。
+                self.paired = self.pairing.peer;
+                out.paired = self.paired;
             }
             _ => {
                 out.replies.push(ControlMsg::PairFail {
@@ -322,7 +398,11 @@ impl ControlContext {
                     msg: host_challenge(&reply, fingerprint, &outcome.shared_key),
                 });
                 // 对端（客户端）的指纹由挑战载荷带出。
-                out.paired = Some(outcome.fingerprint);
+                // **先只记着**，不坐实配对：SPAKE2 的密码学证明在**客户端**
+                // 那一步才成立（客户端拿自己的 PIN 校验主机的应答，
+                // 对不上就回 `PairFail`）。坐实发生在收到客户端的 `PairOk` 时。
+                self.pending_peer = Some(outcome.fingerprint);
+                out.paired = None;
             }
             Err(e) => {
                 out.replies.push(ControlMsg::PairFail {
@@ -510,6 +590,8 @@ mod tests {
             PairingConfig {
                 token: Some("right".into()),
                 fingerprint: Some(Fingerprint::from_bytes([7u8; 32])),
+                // token 路径的对端指纹来自 TLS 层（协议消息里没有这个字段）。
+                peer: Some(Fingerprint::from_bytes([8u8; 32])),
                 ..PairingConfig::default()
             },
             None,
@@ -522,7 +604,11 @@ mod tests {
             ControlMsg::PairOk { fingerprint } => assert_eq!(*fingerprint, [7u8; 32]),
             other => panic!("期望 PairOk,实际 {other:?}"),
         }
-        assert!(out.paired.is_some());
+        assert_eq!(
+            out.paired,
+            Some(Fingerprint::from_bytes([8u8; 32])),
+            "token 路径：配对坐实,对端指纹取自 TLS 层"
+        );
     }
 
     #[test]
@@ -567,6 +653,188 @@ mod tests {
             other => panic!("期望 PairOk,实际 {other:?}"),
         }
         assert_eq!(done.paired, Some(host_fp));
+    }
+
+    /// 主机侧要求配对时，**没配对就不许进串流**（§3.3）。
+    ///
+    /// 这是「配对模式放行未信任对端握手」的安全兜底：
+    /// 握手放行了，但控制面必须自己把关。
+    #[test]
+    fn host_rejects_hello_when_pairing_required_but_not_done() {
+        let mut host = ControlContext::new(
+            ControlRole::Host,
+            caps(),
+            PairingConfig {
+                pin: Some("1234".into()),
+                fingerprint: Some(Fingerprint::from_bytes([2u8; 32])),
+                token: None,
+                peer: None,
+                require_pairing: true,
+            },
+            None,
+            Arc::new(ManualClock::new()),
+        );
+        let out = host.handle(ControlMsg::Hello(Hello {
+            ver: ProtocolVersion::CURRENT,
+            caps: caps(),
+        }));
+        assert!(out.error.is_some(), "未配对的主机不得接受 Hello");
+        assert!(out.negotiated.is_none(), "未配对时不得完成能力协商");
+        match &out.replies[0] {
+            ControlMsg::PairFail { code, .. } => assert_eq!(*code, 3001),
+            other => panic!("期望 PairFail,实际 {other:?}"),
+        }
+    }
+
+    /// 配对成功之后，主机就准这个对端进串流（§3.3）。
+    #[test]
+    fn host_accepts_hello_after_successful_spake2_pairing() {
+        let client_fp = Fingerprint::from_bytes([1u8; 32]);
+        let host_fp = Fingerprint::from_bytes([2u8; 32]);
+
+        let mut client = ControlContext::new(
+            ControlRole::Client,
+            caps(),
+            PairingConfig {
+                pin: Some("1234".into()),
+                fingerprint: Some(client_fp),
+                ..PairingConfig::default()
+            },
+            None,
+            Arc::new(ManualClock::new()),
+        );
+        let mut host = ControlContext::new(
+            ControlRole::Host,
+            caps(),
+            PairingConfig {
+                pin: Some("1234".into()),
+                fingerprint: Some(host_fp),
+                token: None,
+                peer: None,
+                require_pairing: true,
+            },
+            None,
+            Arc::new(ManualClock::new()),
+        );
+
+        // 完整跑一遍 SPAKE2：客户端发起 → 主机应答 → 客户端回 PairOk。
+        let ControlMsg::PairChallenge { msg } = client.start_pairing().expect("应当发起配对")
+        else {
+            panic!("期望 PairChallenge");
+        };
+        let reply = host.handle(ControlMsg::PairChallenge { msg });
+        // 主机此时**还没有**坐实配对 —— SPAKE2 的密码学证明在客户端那一步
+        // 才成立（客户端拿自己的 PIN 校验主机的应答）。
+        assert_eq!(
+            host.paired(),
+            None,
+            "收到首条挑战不等于配对成功：主机还不知道客户端是否知道 PIN"
+        );
+        let ControlMsg::PairChallenge { msg } = reply.replies[0].clone() else {
+            panic!("期望主机回 PairChallenge");
+        };
+        let done = client.handle(ControlMsg::PairChallenge { msg });
+        let pair_ok = done
+            .replies
+            .iter()
+            .find_map(|m| match m {
+                ControlMsg::PairOk { fingerprint } => Some(*fingerprint),
+                _ => None,
+            })
+            .expect("客户端应当回 PairOk");
+
+        // 客户端回了 `PairOk` ⇒ 它真的过了 PIN 校验 ⇒ 主机这才坐实配对。
+        let host_done = host.handle(ControlMsg::PairOk {
+            fingerprint: pair_ok,
+        });
+        assert_eq!(host.paired(), Some(client_fp));
+        assert_eq!(host_done.paired, Some(client_fp));
+
+        // 于是 `Hello` 被接受。
+        let out = host.handle(ControlMsg::Hello(Hello {
+            ver: ProtocolVersion::CURRENT,
+            caps: caps(),
+        }));
+        assert!(out.error.is_none(), "配对成功后不得再拒绝 Hello");
+        assert!(out.negotiated.is_some());
+    }
+
+    /// **安全回归**：PIN 输错时，主机**不得**把对端坐实为「已配对」。
+    ///
+    /// SPAKE2 的密码学证明在**客户端**那一步才成立：客户端拿自己的 PIN
+    /// 校验主机的应答，对不上就回 `PairFail`。
+    /// 主机若在「收到首条挑战」时就坐实配对（并写信任库），
+    /// 一个**输错 PIN** 的客户端也会被当成已配对设备 —— 这正是本测试要挡住的。
+    #[test]
+    fn host_does_not_confirm_pairing_before_the_client_proves_it() {
+        let client_fp = Fingerprint::from_bytes([1u8; 32]);
+        let host_fp = Fingerprint::from_bytes([2u8; 32]);
+
+        let mut client = ControlContext::new(
+            ControlRole::Client,
+            caps(),
+            PairingConfig {
+                pin: Some("9999".into()), // 故意输错
+                fingerprint: Some(client_fp),
+                ..PairingConfig::default()
+            },
+            None,
+            Arc::new(ManualClock::new()),
+        );
+        let mut host = ControlContext::new(
+            ControlRole::Host,
+            caps(),
+            PairingConfig {
+                pin: Some("1234".into()),
+                fingerprint: Some(host_fp),
+                token: None,
+                peer: None,
+                require_pairing: true,
+            },
+            None,
+            Arc::new(ManualClock::new()),
+        );
+
+        let ControlMsg::PairChallenge { msg } = client.start_pairing().expect("应当发起配对")
+        else {
+            panic!("期望 PairChallenge");
+        };
+        let reply = host.handle(ControlMsg::PairChallenge { msg });
+        // 主机只是**记下了**对端指纹，还没有坐实。
+        assert_eq!(host.paired(), None);
+
+        let ControlMsg::PairChallenge { msg } = reply.replies[0].clone() else {
+            panic!("期望主机回 PairChallenge");
+        };
+        let done = client.handle(ControlMsg::PairChallenge { msg });
+        // 客户端发现 PIN 对不上 ⇒ 回 `PairFail`，**不会**回 `PairOk`。
+        assert!(
+            done.replies
+                .iter()
+                .any(|m| matches!(m, ControlMsg::PairFail { .. })),
+            "PIN 对不上时客户端必须回 PairFail"
+        );
+        assert!(
+            !done
+                .replies
+                .iter()
+                .any(|m| matches!(m, ControlMsg::PairOk { .. })),
+            "PIN 对不上时客户端绝不能回 PairOk"
+        );
+        // 主机因此始终没有坐实配对 ⇒ 之后写不进信任库。
+        assert_eq!(host.paired(), None);
+    }
+
+    /// 不要求配对时（默认路径），`Hello` 的行为**不变**（回归保护）。
+    #[test]
+    fn host_accepts_hello_when_pairing_not_required() {
+        let mut host = ctx(ControlRole::Host);
+        let out = host.handle(ControlMsg::Hello(Hello {
+            ver: ProtocolVersion::CURRENT,
+            caps: caps(),
+        }));
+        assert!(out.error.is_none());
+        assert!(out.negotiated.is_some());
     }
 
     #[test]
