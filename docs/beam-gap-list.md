@@ -49,13 +49,13 @@
 |---|---|---|---|---|---|
 | 已实现 | 364 | 12 | 0 | 0 | 352 |
 | 占位 | 43 | 35 | 0 | 0 | 8 |
-| 缺失 | 111 | 57 | 1 | 0 | 40 |
+| 缺失 | 111 | 57 | 3 | 0 | 39 |
 | 偏差 | 76 | 54 | 0 | 0 | 22 |
 | 超出 | 3 | 0 | 0 | 0 | 3 |
-| **合计** | **597** | **158** | **1** | **0** | **425** |
+| **合计** | **597** | **158** | **3** | **0** | **424** |
 
 - 审计判定为**未达成**（占位+缺失+偏差）：**230** 条
-- 其中**已落地**：**160** 条；**仍未排期**：**70** 条
+- 其中**已落地**：**161** 条；**仍未排期**：**69** 条
 
 > 「未开始」不代表这一条没人管，而是**还没排进任何一批**。排期后的条目会出现在「落地进度台账」一节，带批次号与验收方式。
 
@@ -155,10 +155,10 @@
 
 | 状态 | 条目数 |
 |---|---|
-| 未开始 | 0 |
-| 进行中 | 1 |
+| 未开始 | 1 |
+| 进行中 | 3 |
 | 已完成 | 159 |
-| 已阻塞 | 12 |
+| 已阻塞 | 11 |
 | 暂不做 | 1 |
 
 ### 批次记录
@@ -450,6 +450,19 @@
 | 整链回环还没有覆盖音频与输入回传 | `client_loopback` 验证的是画面链路（§3.10）。音频（§3.7 WASAPI loopback + Opus）与输入回传（§3.8 SendInput / ViGEm 手柄）在这条链上还没验证过 | 需后续批次 |
 | E13xxx/E14xxx/E15xxx 仍未写进设计文档 | 与 B16 遗留一致：perf / ffi / gamestream 三段的编号归属只在代码里 | 需后续批次 |
 
+| B20 | 2026-11-04 | 第二十批：音频进整链（真机）+ 上屏性能实测 + 修掉主机音频只能跑 1/3 速率的缺陷 | crates/beam-audio（receive 模块 + 速率对照入口）/ crates/beam-net（DemuxStream 分流读点）/ crates/beam-client（分流改用 beam-net）/ crates/beam-host（音频接线 + stop_audio + 示例）/ docs（设计文档 §3.2 / §3.7 / §3.10） | 已完成 | cargo fmt --all --check exit 0；cargo clippy --workspace --all-targets -- -D warnings exit 0 / 0 warning；cargo test --workspace exit 0（48 套件 / 475 passed / 0 failed / 9 ignored）；cargo clippy -p beam-host --features platform,client-video --all-targets -- -D warnings exit 0；cargo clippy -p beam-host --features platform,client-video,perf-stats --all-targets -- -D warnings exit 0；cargo clippy -p beam-capture --features wgc --all-targets -- -D warnings exit 0；cargo clippy -p beam-render --features d3d11 --all-targets -- -D warnings exit 0；cargo clippy -p beam-audio --features opus --all-targets -- -D warnings exit 0；cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings exit 0；npm --prefix apps/desktop run build exit 0；设计令牌检查 54 项全过；清单引用 909 条全部有效（verify_refs 0 无效）；**真机实测**（RTX 3070 / 驱动 596.49 / 1920×1080 交互式桌面）：`cargo run -p beam-host --example client_loopback --features platform,client-video,perf-stats --release` exit 0 —— **画面 285 帧全部经 VideoProcessor 转换后搬进交换链、降级 0**；**音频 800 帧走完整链**（采集发出 800 / 客户端解码 800 / 回放 800，错误 0），解码 PCM 的 RMS = 0.084、峰值 = 0.148（非静音 ⇒ 采到的是真声音）；采集队列**零积压**（修复前刷「积压，丢弃最旧的一帧」且只有 65 帧/秒）；性能：解码均值 0.348 ms vs 预算 8 ms ⇒ 达标，上屏均值 0.106 ms vs 半帧预算 8.33 ms ⇒ 达标；`cargo run -p beam-audio --example audio_rate_probe --features opus --release` exit 0 —— 采集 199.5 / +Opus 编码 199.6 / +建数据报 199.7 帧/秒 ⇒ 处理能力本身够用，瓶颈在循环结构 |
+
+- **B20（主会话自办）** — 写入范围：`crates/beam-audio/**`、`crates/beam-net/src/demux.rs`、`crates/beam-client/src/{audio,transport}.rs`、`crates/beam-host/**`、`docs/**`；覆盖条目 ST-07, V-10, V-11, DX-02, A-01, A-04
+
+**B20 追加项（审计中顺带发现，不在原 551 条内）**
+
+| 项 | 说明 | 归属 |
+|---|---|---|
+| 客户端 PIN 的 SPAKE2 密码学校验仍未接线 | 主机侧未把 PIN 配进 PairingConfig，且主机信任闸门在 TLS 层就拒绝未信任对端 ⇒ 客户端到不了控制通道（B16 遗留） | 需后续批次 |
+| Android 端的 plat 只到发现结果，未进信任库 | Android 配对走扫码，§3.3 的二维码载荷不带平台标识 ⇒ TrustedPeer.platform 仍是未知平台 | 需后续批次 |
+| 上屏『等 vblank 的等待时长』仍测不了 | flip-model 交换链的 GetFrameStatistics 不可用（B18 已记）⇒ V-11 保持已阻塞；本批只测到了上屏**成本** | 需后续批次 |
+| 音画同步偏差（§3.15 <30 ms）仍无测量 | 需要跨设备时钟同步（四时间戳），本机同机回环量不出真实偏差（X8-16） | 需后续批次 |
+
 ### 已裁决事项
 
 | # | 议题 | 裁决 | 裁决日期 | 说明 | 解锁范围 |
@@ -517,6 +530,7 @@
 | 2026-11-01 | Windows 客户端的「解码 → 上屏」链路此前是**假成功** | B10 把 D3D11VA 硬解与原生窗口上屏的代码路径搭好了，但**从未在真机跑过**。B17 第一次真机跑就发现：解码纹理是 DXGI_FORMAT_420Opaque / 1920×1152（对齐后的 coded height），交换链是 B8G8R8A8_UNORM / 1920×1080 —— 格式与尺寸双双不匹配，于是 `present` 每一帧都走「清屏 + 照样走完整条呈现路径」的静默降级：**不报错、不警告**，会话状态正常，用户看到的是空白窗口。之前的回环验证只统计「收到的帧数」，分不清「画面上屏了」与「画面被丢在地上」 | ① `beam_render::PresentInfo` 把「真的搬纹理」与「降级清屏」分开计数，并报出两边的真实格式与尺寸；② 新增 `present_smoke` 验收门禁（它现在如实报 FAIL）；③ 交换链格式改为可选并给视频格式单开路径；④ 用对照实验**实测排除**了零拷贝（420Opaque/NV12 交换链建不出来，VideoProcessor 建不出输入视图）；⑤ 静默降级改成如实报错 E10015；⑥ 结论写进设计文档 §3.10 |
 | 2026-11-01 | Windows 客户端的画面**从来没真正上过屏**（B17 定位，B18 修好） | B10 把 D3D11VA 硬解与原生窗口上屏的代码路径搭好了，但从未在真机跑过。B17 第一次真机跑就发现：解码纹理是 DXGI_FORMAT_420Opaque / 1920×1152（对齐后的 coded height），交换链是 B8G8R8A8_UNORM / 1920×1080 —— 格式与尺寸双双不匹配，于是每一帧都走「清屏 + 照样走完整条呈现路径」的静默降级：不报错、不警告，会话状态正常，用户看到的是空白窗口。B18 补上了 VideoProcessor 转换路径（4:2:0 → BGRA），画面这才真的上屏 | ① `beam_render::vp` 用 D3D11 VideoProcessor 做 4:2:0 → BGRA 转换；关键在于输入视图的 FourCC 必须用 `'420O'`（`beam-encode` 那次 96 组变体全灭，是因为源纹理是自造的 NV12/BGRA，从没试过解码器真实输出的 420Opaque）；② `PresentInfo` 增加 `converted_presents`，区分「直接搬」与「转换后搬」；③ 真机实测 9 帧全部上屏（转换 9 / 降级 0）；④ 转换也不可用时如实报 E10015，不再假装在串流；⑤ 顺带把 V-13 的丢帧统计贯通：抓屏单槽覆盖开始计数，进主机会话汇总；客户端补上渲染侧丢帧，`dropped_frames` 覆盖从抓到屏到上屏的全程 |
 | 2026-11-04 | Windows 串流的**画面链路**第一次端到端真机跑通 | B17 定位到「画面从来没上过屏」，B18 用 VideoProcessor 转换修好了上屏，但那只是「解码 → 上屏」这一段。B19 把整链接通：主机侧真抓屏 + 真硬编 → QUIC → 客户端侧真硬解 + 真上屏到独立原生窗口。过程中还发现两个「验证入口本身会骗人」的坑：① WGC 是内容驱动的，屏幕静止时主机一帧都发不出来（同一台机器上帧数在 0 与 1 之间跳）；② 客户端先断开时主机会话必然进 Error 态（正常断开语义），两个时限弄反就会被误判成「主机出错」 | 新增验证入口 `crates/beam-host/examples/client_loopback.rs`：本机实测 345 帧全部经 VideoProcessor 转换后搬进交换链（降级 0）⇒ 产品方案第 45 行的「画面真的出现在窗口里」达成。顺带把三个 crate 的 `perf_span!` 占位符统一成零尺寸结构体（B18 只改了 beam-render，其余三个在 `--features wgc/ffmpeg` 组合下会被 clippy 拦下） |
+| 2026-11-04 | Windows 串流的**音频链路**第一次端到端真机跑通，并修掉了一个「跑通了但速率只有 1/3」的缺陷 | B20 接上音频后立刻暴露两个问题：① 客户端用裸 `video_stream()` 收帧，而画面重组器**不看帧头 `type`** ⇒ 音频数据报会被当成画面分片组装（负载是裸 Opus 字节）；② 主机只送出 **65 帧/秒**，而 §3.7 的音频是 5 ms 一帧（实时 200 帧/秒），采集队列一路积压到丢帧。对照实验（采集 / +Opus 编码 / +建数据报 三段各测速率）证明**处理能力有 199.7 帧/秒**，瓶颈在消费循环「一轮只取一帧」—— 速率被循环的唤醒间隔限死。改成「一轮把攒下的帧全发走」后实测 800 帧 / 4 秒 = 200 帧/秒、队列零积压。分流读点也从 `beam-client` 下沉到 `beam-net::DemuxStream`（L1）：§4 规定 L3 之间不得横向依赖，而主机侧的整链验证入口也需要同一个读点 | 真机实测：音频 **800 帧走完整链**（WASAPI loopback 采集 → Opus 编码 → QUIC datagram → 按帧头 type 分流 → Opus 解码 → WASAPI 输出），错误 0 次，解码 PCM 的 RMS = 0.084（非静音）；画面同一次运行 285 帧全部经 VideoProcessor 转换后搬进交换链、降级 0。顺带把 §3.10 的渲染预算**第一次对照实测**：解码均值 0.348 ms（预算 8 ms）、上屏均值 0.106 ms（半帧预算 8.33 ms）⇒ 均达标 |
 
 ---
 
@@ -874,7 +888,7 @@
 | V-07 | 「`Renderer::present(&DecodedFrame)`」 | `crates/beam-render/src/renderer.rs:11-14` | 已实现 | `fn present(&mut self, f: &DecodedFrame) -> Result<(), RenderError>`（`renderer.rs:13`），签名吻合；`DecodedFrame` 同样来自 L0（`crates/beam-proto/src/lib.rs:145-157`）。 | 未开始 |
 | V-08 | 「线程:解码线程 → 单槽 → 渲染线程(按 vblank)」 | 未找到（已搜索：`thread::spawn`、`std::thread::`、`sync_channel`、`单槽`、`WaitForSingleObject`、`Present`；`crates/beam-decode/`、`crates/beam-render/` 零命中） | 缺失 | **既无解码线程、无单槽交换、也无渲染线程**。唯一的「节拍」是 `FramePacer::should_present()`（`renderer.rs:113-124`），它只是比较两次时间戳差值是否小于 `interval_us`——这是**软件时间闸门，不是 vblank 对齐**，且其 `interval_us` 由调用方传入，代码中无任何地方调用它（`crates/beam-render/` 内除单测外无调用点）。 | 已完成 |
 | V-09 | 「错误码 `E10xxx`」 | `crates/beam-decode/src/error.rs:6-14,32-52`；`crates/beam-render/src/error.rs:7-15,33-53` | 占位 | 解码侧 10001/10002/10003（`error.rs:8,10,12`）与渲染侧 10011/10012/10013（`error.rs:9,11,13`）的变体与文案齐备，但**没有任何产生路径**——默认路径只抛 `E10004`（`decoder.rs:87`）/`E10014`（`renderer.rs:92`）。 | 已完成 |
-| V-10 | 「性能:解码 T1 ≤8、T2 ≤5、T3 ≤4 ms」 | 未找到（已搜索：`bench`、`criterion`、`p99`；全仓零命中） | 缺失 | 无基准设施、无计时点（与 E-23/E-25/C-18 同源）。 | 已阻塞 |
+| V-10 | 「性能:解码 T1 ≤8、T2 ≤5、T3 ≤4 ms」 | 未找到（已搜索：`bench`、`criterion`、`p99`；全仓零命中） | 缺失 | 无基准设施、无计时点（与 E-23/E-25/C-18 同源）。 | 进行中 |
 | V-11 | 「性能:上屏等待平均半帧」 | 未找到（已搜索：`latency`、`half_frame`、`vblank`、`present_time`；`crates/beam-render/src/` 零命中） | 缺失 | 无上屏延迟测量。 | 已阻塞 |
 | V-12 | 「测试:各显卡解码基准」 | 未找到（已搜索：`bench`、`criterion`、`gpu`；全仓零命中） | 缺失 | 同 V-10。 | 已阻塞 |
 | V-13 | 「测试:丢帧统计」 | `crates/beam-render/src/renderer.rs:74-77,127-129` | 占位 | 计数器确实存在且逻辑为真：`D3D11Renderer::dropped()`（`renderer.rs:74-77`）与 `FramePacer::dropped()`（`renderer.rs:127-129`），后者在 `should_present` 判定丢帧时自增（`renderer.rs:116`）。但**没有任何真实管线会调用它们**：默认 feature 下 `present()` 恒失败，`FramePacer` 无生产调用点，故统计恒为 0。 | 已完成 |

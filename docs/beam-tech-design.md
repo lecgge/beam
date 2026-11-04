@@ -94,7 +94,7 @@ pub struct RateController { pub fn on_feedback(&mut self, fb: &Feedback) -> Bitr
 - 错误码:`E2xxx`(2001 连接超时,2002 证书拒绝,2003 datagram 不支持,2004 帧过期丢弃)。
 - 配置:`fec_ratio`(默认 0.2,码率>150 Mbps 时下调到 0.1)、`max_datagram=1200`、`jitter_frames`(有线 0,Wi-Fi 自适应 0–1)、`bitrate_min/max`。
 - 性能:分包+FEC 编码 T1 ≤0.8 ms、T2 ≤0.4 ms、T3 ≤0.3 ms;重组+FEC 恢复同量级。
-- 测试:丢包/乱序/抖动注入(自写 UDP 代理)、FEC 恢复率、码率控制仿真。 里程碑:MVP(无 FEC)/v1(FEC+码率控制+抖动缓冲)。
+- **数据报分流读点(B20)**:§5 里视频与音频走**同一条** datagram 通道，靠帧头 `type` 区分(`0` 视频 / `1` 音频 / `2` FEC 冗余)。而画面重组器**不看 `type`** —— 它把每一条数据报都当画面分片处理⇒ 音频数据报会被组装成「一帧画面」(负载是裸 Opus 字节，没有视频路径那 8 字节前缀)，解码出来是垃圾；音频帧号又与画面帧号同号段 ⇒ 两边的分片还会互相污染。所以「按 `type` 分流」必须发生在**唯一读走数据报的地方**。这个读点是 `beam_net::DemuxStream`(`drain` 把 `type = 0/2` 送进画面重组器 + 抖动缓冲，把 `type = 1` 与保留类型交给调用方的回调)；`beam_client::DemuxTransport` 与**主机侧整链验证入口**都用它 ⇒ **全仓只有一份分流实现**。放在 `beam-net`(L1)而不是 `beam-client`(L3)：§4 规定 L3 之间不得横向依赖(`beam-host` 与 `beam-client` 同层)，而主机侧的整链验证入口也需要同一个分流读点。
 
 ### 3.3 beam-pair
 - 职责:Ed25519 自签证书(rcgen);信任库;二维码载荷 `beam://pair?h=ip:port&fp=..&t=token`;SPAKE2 PIN;实现 rustls 校验器。
@@ -136,7 +136,7 @@ pub struct CapturedFrame { pub tex: ID3D11Texture2D, pub ts_us: u64, pub dirty: 
 
 ### 3.7 beam-audio
 - 职责:主机 WASAPI loopback 48 kHz → Opus 5 ms 帧;Windows 客户端 Opus 解码 + WASAPI 输出;Android 由 core-audio 解码(可复用 ffi 中的 Opus 解码)。
-- 边界:不做混音/回声消除。错误码 `E7xxx`。配置:`audio_mode=host+stream|stream_only|off`、`bitrate=128k`。性能:采集→编码 ≤6 ms,端到端目标 ≤40 ms。测试:音画同步偏差 <30 ms。里程碑:v1。
+- **音频整链已验证(B20)**:主机侧真采集(WASAPI loopback)→ 真 Opus 编码 → QUIC datagram → 客户端侧按帧头 `type` 分流 → 真 Opus 解码 → 真 WASAPI 输出 ⇒ 本机实测 **800 帧走完整链**(采集发出 800 / 客户端解码 800 / 回放到设备 800，错误 0 次)，解码 PCM 的 RMS = 0.084、峰值 = 0.148(非静音 ⇒ 采到的是真声音，不是空数据)。验证入口:`crates/beam-host/examples/client_loopback.rs`(与画面整链同一个入口)；速率对照入口 `crates/beam-audio/examples/audio_rate_probe.rs`。三个坑要记住:① **loopback 只采渲染流** —— 系统没在播声音就一帧都没有，所以验证入口会自己播一段 440 Hz 测试音(与「WGC 是内容驱动的」同一个道理);② **音频帧是 5 ms 一帧 ⇒ 实时需要 200 帧/秒** —— 消费循环若「一轮只取一帧」，速率就被**循环的唤醒间隔**限死(实测 15 ms 的唤醒间隔 ⇒ 只有 65 帧/秒，采集队列一路积压到丢帧)，必须**一轮把攒下的帧全发走**(改完后实测 800 帧 / 4 秒 = 200 帧/秒，队列零积压);③ **同一台机器上跑两端会形成反馈回路** —— 客户端把收到的音频回放到默认渲染端点，主机的 loopback 又把它采回来，所以顺序必须是「主机先停采集(`HostSessionHandle::stop_audio`)→ 客户端再回放」。
 
 ### 3.8 beam-input
 - 职责:输入事件模型(在 proto 定义);主机侧 SendInput 注入键鼠、vigem-client 虚拟 Xbox 手柄、震动回传;权限控制(按设备)。
@@ -157,6 +157,7 @@ pub struct CapturedFrame { pub tex: ID3D11Texture2D, pub ts_us: u64, pub dirty: 
 - 线程:解码线程 → 单槽 → 渲染线程(按 vblank)。错误码 `E10xxx`。性能:解码 T1 ≤8、T2 ≤5、T3 ≤4 ms;上屏等待平均半帧。测试:各显卡解码基准、丢帧统计。里程碑:MVP(简版)/v1。
 - **整链已验证(B19)**:主机侧真抓屏(WGC)+ 真硬编(NVENC)→ QUIC → 客户端侧真硬解(D3D11VA)+ 真上屏(独立原生窗口,§3.10「画面不走 WebView」)⇒ 本机实测 345 帧**全部**经 VideoProcessor 转换后搬进交换链(`PresentInfo::converted_presents` = 345、降级 = 0),验证入口 `crates/beam-host/examples/client_loopback.rs`。两个坑要记住:① **WGC 是内容驱动的**(只在画面变化时投递新帧)⇒ 屏幕上完全静止时主机一帧都发不出来,验证入口会自己起一个持续刷新屏幕的后台进程,否则同一台机器上帧数在 0 与 1 之间跳;② **客户端必须比主机活得久**(客户端一断开,主机的控制流就断了 ⇒ 主机会话必然进 Error 态,那是正常的断开语义,不是故障)。
 - **格式转换(B17/B18 实测)**:D3D11VA 视频解码的原生输出是 `DXGI_FORMAT_420Opaque`(4:2:0 双平面,纹理高度是**对齐后**的 coded height,1080p 实测 1920×1152),而 flip-model 交换链**不接受** 4:2:0 视频格式(实测 `DXGI_FORMAT_420Opaque` / `DXGI_FORMAT_NV12` 建链均失败)⇒ **「解码纹理零拷贝交给交换链」不可行**,必须先做 4:2:0 → BGRA 的转换。转换走 **D3D11 VideoProcessor**(硬件):输入视图的 `FourCC` 必须用 **`'420O'`**(`MAKEFOURCC('4','2','0','O')` = `0x4F303234`)—— 用 DXGI 枚举值或 `'W8B8'` 都建不出来(`beam-encode` 那次 96 组变体全灭,是因为它的源纹理是自造的 NV12/BGRA,没有试过 `'420O'`)。转换按**可见高度**采样(4:2:0 的 Y 平面行距 = 宽度,解码器把画面写在前面、后面是 padding)。本机实测:9 帧全部经转换后搬进交换链,`PresentInfo::converted_presents` = 9、降级 = 0。实现上**不静默降级**:转换也不可用时如实报 `E10015`(非文档码位),而不是清屏后假装在串流;`beam_render::PresentInfo` 分别统计「真的搬纹理」「经转换搬纹理」「降级」,是判断画面是否上屏的**唯一可靠依据**。另:`IDXGISwapChain::GetFrameStatistics` 按微软说明**不支持 flip-model** ⇒ 交换链丢帧统计在本路径下不可用。
+- **上屏性能已实测(B20)**:§3.13 的采集器把整链各阶段耗时真的采下来(本机 RTX 3070 / 1080p / HEVC 硬解):**解码**均值 **0.348 ms**、p99 1.500 ms、最大 21.116 ms ⇒ 对 §3.10 的「解码 T1 ≤8 ms」**达标**;**上屏(含 VideoProcessor 转换 + 交换链 Present)**均值 **0.106 ms**、p99 0.375 ms ⇒ 对「上屏等待平均半帧」(60 fps ⇒ 8.33 ms)**达标**。采集入口:`crates/beam-host/examples/client_loopback.rs --features perf-stats`(§7:release 禁开 perf-stats，所以它是独立 feature)。同一次运行里 285 帧全部经转换后搬进交换链、降级 0。
 
 ### 3.11 host-app / client(Tauri,apps/desktop)
 - 职责:UI、托盘、通知;只通过 commands/events 与 Rust 交互;视频帧不经 IPC。
