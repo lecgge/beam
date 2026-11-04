@@ -350,7 +350,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 stat.p99_ns as f64 / 1e6,
                 stat.max_ns as f64 / 1e6,
             );
-        }        // §3.10 的渲染预算：解码 T1 ≤8 ms；上屏等待平均半帧（60 fps ⇒ 8.33 ms）。
+        } // §3.10 的渲染预算：解码 T1 ≤8 ms；上屏等待平均半帧（60 fps ⇒ 8.33 ms）。
         let half_frame_ms = 1000.0 / 60.0 / 2.0;
         for (stage, stat) in &snapshot.stages {
             let budget = match stage {
