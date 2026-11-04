@@ -48,11 +48,11 @@
 | 审计判定 | 条数 | 已完成 | 进行中 | 已排期 | 未开始 |
 |---|---|---|---|---|---|
 | 已实现 | 364 | 12 | 0 | 0 | 352 |
-| 占位 | 43 | 34 | 1 | 0 | 8 |
-| 缺失 | 111 | 56 | 2 | 0 | 40 |
+| 占位 | 43 | 35 | 0 | 0 | 8 |
+| 缺失 | 111 | 57 | 1 | 0 | 40 |
 | 偏差 | 76 | 54 | 0 | 0 | 22 |
 | 超出 | 3 | 0 | 0 | 0 | 3 |
-| **合计** | **597** | **156** | **3** | **0** | **425** |
+| **合计** | **597** | **158** | **1** | **0** | **425** |
 
 - 审计判定为**未达成**（占位+缺失+偏差）：**230** 条
 - 其中**已落地**：**160** 条；**仍未排期**：**70** 条
@@ -156,8 +156,8 @@
 | 状态 | 条目数 |
 |---|---|
 | 未开始 | 0 |
-| 进行中 | 3 |
-| 已完成 | 157 |
+| 进行中 | 1 |
+| 已完成 | 159 |
 | 已阻塞 | 12 |
 | 暂不做 | 1 |
 
@@ -877,7 +877,7 @@
 | V-10 | 「性能:解码 T1 ≤8、T2 ≤5、T3 ≤4 ms」 | 未找到（已搜索：`bench`、`criterion`、`p99`；全仓零命中） | 缺失 | 无基准设施、无计时点（与 E-23/E-25/C-18 同源）。 | 已阻塞 |
 | V-11 | 「性能:上屏等待平均半帧」 | 未找到（已搜索：`latency`、`half_frame`、`vblank`、`present_time`；`crates/beam-render/src/` 零命中） | 缺失 | 无上屏延迟测量。 | 已阻塞 |
 | V-12 | 「测试:各显卡解码基准」 | 未找到（已搜索：`bench`、`criterion`、`gpu`；全仓零命中） | 缺失 | 同 V-10。 | 已阻塞 |
-| V-13 | 「测试:丢帧统计」 | `crates/beam-render/src/renderer.rs:74-77,127-129` | 占位 | 计数器确实存在且逻辑为真：`D3D11Renderer::dropped()`（`renderer.rs:74-77`）与 `FramePacer::dropped()`（`renderer.rs:127-129`），后者在 `should_present` 判定丢帧时自增（`renderer.rs:116`）。但**没有任何真实管线会调用它们**：默认 feature 下 `present()` 恒失败，`FramePacer` 无生产调用点，故统计恒为 0。 | 进行中 |
+| V-13 | 「测试:丢帧统计」 | `crates/beam-render/src/renderer.rs:74-77,127-129` | 占位 | 计数器确实存在且逻辑为真：`D3D11Renderer::dropped()`（`renderer.rs:74-77`）与 `FramePacer::dropped()`（`renderer.rs:127-129`），后者在 `should_present` 判定丢帧时自增（`renderer.rs:116`）。但**没有任何真实管线会调用它们**：默认 feature 下 `present()` 恒失败，`FramePacer` 无生产调用点，故统计恒为 0。 | 已完成 |
 
 #### 文档未覆盖但代码里有的
 
@@ -1282,7 +1282,7 @@
 | ST-04 | `src/stores/` 存在且有内容 | `apps/desktop/src/stores/hostStore.ts:31`、`apps/desktop/src/stores/deviceStore.ts:43`、`apps/desktop/src/stores/sessionStore.ts:30`、`apps/desktop/src/stores/settingsStore.ts:22`、`apps/desktop/src/stores/perfStore.ts:27`、`apps/desktop/src/stores/toastStore.ts:25` | 已实现 | 6 个 store + 1 个 `index.ts` 汇总导出。 | 未开始 |
 | ST-05 | `src/i18n/` 存在且有内容 | `apps/desktop/src/i18n/index.tsx:19`、`apps/desktop/src/i18n/zh-CN.ts:7`、`apps/desktop/src/i18n/en.ts:9` | 已实现 | provider + 两份词表。 | 未开始 |
 | ST-06 | `src-tauri/` 应有 (commands.rs, events.rs, tray.rs, main.rs) | `apps/desktop/src-tauri/src/commands.rs:1`、`apps/desktop/src-tauri/src/events.rs:1`、`apps/desktop/src-tauri/src/tray.rs:1`、`apps/desktop/src-tauri/src/main.rs:1` | 已实现 | 4 个文件齐全（另有 `dto.rs`/`error.rs`/`service.rs`/`service_crates.rs`/`transport.rs` 5 个支撑文件）。 | 未开始 |
-| ST-07 | Windows 作为客户端：用独立原生 D3D11/wgpu 窗口渲染，不走 WebView（产品方案第 45 行） | 未找到（已搜索：`wgpu`、`d3d11`、`D3D11`、`WebviewWindow`、`WebviewBuilder`、`native_window`、`beam_render`、`beam_decode` 于 `apps/desktop/src-tauri/src/**`） | 缺失 | 桌面端只有一个 WebView 窗口（`apps/desktop/src-tauri/tauri.conf.json:14-27`），客户端画面区是纯 CSS 渐变占位加一个「GAME」字样（`apps/desktop/src/pages/ConnectPage.tsx:82`、`apps/desktop/src/styles.css:733-749`）；`beam-render` / `beam-decode` 两个 crate **未进入桌面端依赖**（`apps/desktop/src-tauri/Cargo.toml:57-69`），`beam-render` 自己也标注未启用 `d3d11` feature 时 `present` 返回 `E10014`（`crates/beam-render/src/renderer.rs:45`）。原生渲染窗口这一条整条未落地。 | 进行中 |
+| ST-07 | Windows 作为客户端：用独立原生 D3D11/wgpu 窗口渲染，不走 WebView（产品方案第 45 行） | 未找到（已搜索：`wgpu`、`d3d11`、`D3D11`、`WebviewWindow`、`WebviewBuilder`、`native_window`、`beam_render`、`beam_decode` 于 `apps/desktop/src-tauri/src/**`） | 缺失 | 桌面端只有一个 WebView 窗口（`apps/desktop/src-tauri/tauri.conf.json:14-27`），客户端画面区是纯 CSS 渐变占位加一个「GAME」字样（`apps/desktop/src/pages/ConnectPage.tsx:82`、`apps/desktop/src/styles.css:733-749`）；`beam-render` / `beam-decode` 两个 crate **未进入桌面端依赖**（`apps/desktop/src-tauri/Cargo.toml:57-69`），`beam-render` 自己也标注未启用 `d3d11` feature 时 `present` 返回 `E10014`（`crates/beam-render/src/renderer.rs:45`）。原生渲染窗口这一条整条未落地。 | 已完成 |
 | ST-08 | §6 第 69 行 Commands 清单（`get_host_status`、`start_hosting(opts)`/`stop_hosting`、`get_pairing_code`、`approve_pair(id)`/`remove_device(id)`、`list_hosts`/`connect(host_id)`、`get_settings`/`set_settings(patch)`） | `apps/desktop/src-tauri/src/main.rs:74-97`、`apps/desktop/src-tauri/src/commands.rs:30-153` | 已实现 | §6 清单里的 11 个命令全部注册且实现；§3.11 多出的 `reject_pair`/`disconnect` 也已实现（`apps/desktop/src-tauri/src/commands.rs:82-87`、`apps/desktop/src-tauri/src/commands.rs:116-129`）。（注：§6 第 69 行本身比 §3.11 少列 `reject_pair` 与 `disconnect`，是文档两处清单不一致，代码按 §3.11 的更全清单实现。） | 未开始 |
 | ST-09 | §6 第 70 行 Events 清单 | `apps/desktop/src-tauri/src/events.rs:24-31`、`apps/desktop/src/ipc/events.ts:23-37` | 已实现 | 6 个事件名与 §6 逐字一致（§6 把 `reconnecting` 写成 `session://disconnected/reconnecting`，代码按 §3.11 的 `session://reconnecting` 实现）；另加 §3.11 的 `session://reconnecting` 与 `perf://tick` 共 8 个，前后端事件名两两对齐。 | 未开始 |
 | ST-10 | §6 第 71 行：视频帧永远不经过 IPC | `apps/desktop/src-tauri/src/dto.rs:3-4`、`apps/desktop/src-tauri/src/events.rs:43-47` | 已实现 | 同 T-21：全部事件载荷都是控制面/统计面结构，无帧类型。 | 未开始 |
