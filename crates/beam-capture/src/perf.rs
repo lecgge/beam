@@ -22,6 +22,19 @@
 //! // 作用域结束时自动记录耗时。
 //! ```
 
+/// `perf-stats` 关闭时的**零成本占位**。
+///
+/// 之所以不是 `()`：调用点写的是 `let _span = perf_span!("...");`，
+/// 展开成 unit 值会触发 clippy 的 `let_unit_value`。
+/// 零尺寸结构体同样是零开销，但不是 unit。
+#[cfg(not(feature = "perf-stats"))]
+#[derive(Debug, Default)]
+#[allow(
+    dead_code,
+    reason = "真实后端（wgc feature）关闭时没有调用点，这个占位类型确实没被构造"
+)]
+pub(crate) struct NoopSpan;
+
 /// 作用域计时宏：`perf_span!("capture")`。
 ///
 /// - `perf-stats` **开启**：展开为 `beam_perf::perf_span!` 的计时守卫；
@@ -37,7 +50,7 @@ macro_rules! perf_span {
         #[cfg(feature = "perf-stats")]
         let beam_perf_guard = beam_perf::perf_span!($stage);
         #[cfg(not(feature = "perf-stats"))]
-        let beam_perf_guard = ();
+        let beam_perf_guard = $crate::perf::NoopSpan;
         beam_perf_guard
     }};
 }
@@ -47,8 +60,8 @@ mod tests {
     /// §3.13：`perf_span!` 在 `perf-stats` 关闭时必须展开为空（`()`）。
     #[cfg(not(feature = "perf-stats"))]
     #[test]
-    fn span_expands_to_unit_when_feature_disabled() {
-        let _: () = perf_span!("capture");
+    fn span_expands_to_noop_when_feature_disabled() {
+        let _: super::NoopSpan = perf_span!("capture");
     }
 
     /// `perf-stats` 开启时，`perf_span!` 展开为 `beam-perf` 的作用域计时守卫。

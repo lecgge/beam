@@ -40,6 +40,19 @@ platform = ["platform-wgc", "beam-encode/ffmpeg", "opus"]
 # 返回 `BackendDisabled`），运行时**不出画面**；它只是让 CI 能查编译。
 platform-wgc = ["beam-capture/wgc"]
 
+# 客户端画面验证路径（§3.10 / 产品方案第 45 行）：真机解码 + 真上屏。
+#
+# §4 规定平台 crate（decode / render）**只能**被 host / client 引用 ——
+# 本 crate 是那一层，因此引入它们不违反分层；而且它们是**可选依赖**，
+# 默认构建不碰任何原生 API（§7：perf-stats 之外的原生后端默认关闭）。
+#
+# 用途：整链验证入口 `examples/client_loopback.rs` —— 主机侧真的抓屏 + 硬编，
+# 客户端侧真的硬解 + 上屏到独立原生窗口（§3.10「画面不走 WebView」）。
+#
+# `beam-decode/ffmpeg` 需要 LGPL 构建的 ffmpeg（§7），所以这个 feature
+# 默认关闭，且示例用 `required-features` 声明 ⇒ CI 的默认构建不会碰它。
+client-video = ["dep:beam-decode", "dep:beam-render", "beam-decode/ffmpeg", "beam-render/d3d11"]
+
 [dependencies]
 beam-proto = { workspace = true }
 beam-session = { workspace = true }
@@ -53,6 +66,11 @@ beam-net = { workspace = true }
 beam-pair = { workspace = true }
 beam-config = { workspace = true }
 beam-log = { workspace = true }
+# 客户端画面验证路径的可选依赖（§3.10）：硬解 + 上屏。
+# §4：平台 crate 只能被 host / client 引用 —— 本 crate 属于那一层。
+# 默认关闭；`client-video` feature 才打开（见上）。
+beam-decode = { workspace = true, optional = true }
+beam-render = { workspace = true, optional = true }
 # §5 控制流 / 输入流的读写原语（quinn 直接实现了 tokio 的 AsyncRead / AsyncWrite）。
 tokio = { workspace = true }
 # `beam_proto::encode` 的输出缓冲类型（§5 线上格式）。
@@ -64,6 +82,8 @@ tracing = { workspace = true }
 bytes = { workspace = true }
 # 示例要驱动 mDNS 浏览流（`futures::Stream`）。
 futures = { workspace = true }
+# 整链示例要把 tracing 打到 stderr，才能看到主机侧的**真实**错误。
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 # 真机回环验证入口（§9 M-1 验证点）：本机起一个监听 + 一个客户端，
 # 验证「监听建立 → 客户端连上 → Hello 协商成功 → 双方状态到 Streaming」。
@@ -71,6 +91,18 @@ futures = { workspace = true }
 [[example]]
 name = "host_loopback"
 required-features = ["platform"]
+
+# 整链验证入口（§3.10 / 产品方案第 45 行）：
+# 主机侧真抓屏 + 真硬编 → QUIC → 客户端侧真硬解 + 真上屏到独立原生窗口。
+#
+# 与 `host_loopback` 的差别：那个的客户端只数帧，这个的客户端**真的解码并上屏**，
+# 并统计「真的搬进交换链」的帧数（`PresentInfo`）—— 那才是画面上屏的证据。
+#
+# 需要 `platform`（主机侧真后端）与 `client-video`（客户端侧硬解 + 上屏），
+# 两者都要 ffmpeg 开发库（§7）。
+[[example]]
+name = "client_loopback"
+required-features = ["platform", "client-video"]
 
 [lints]
 workspace = true

@@ -254,6 +254,7 @@ dependencies = [
  "beam-audio",
  "beam-capture",
  "beam-config",
+ "beam-decode",
  "beam-discovery",
  "beam-encode",
  "beam-input",
@@ -261,12 +262,14 @@ dependencies = [
  "beam-net",
  "beam-pair",
  "beam-proto",
+ "beam-render",
  "beam-session",
  "bytes",
  "futures",
  "thiserror",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

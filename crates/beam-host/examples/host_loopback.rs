@@ -192,18 +192,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             Arc::new(client_trust.clone()),
         ),
     );
+    // 注意 quinn 的语义：**客户端**的 `connect()` 在验证完**服务端**证书后就返回 Ok
+    // （它不等服务端验证自己的证书）；被拒的是**服务端**的 `accept()`。
+    // 所以这里要分别看两边，不能把「客户端连上了」当成闸门失效。
     match &client_first {
-        Ok(_) => println!("      不该成功：主机在未确认前就放行了客户端"),
+        Ok(_) => println!("      客户端已连上（quinn 语义：不等服务端验自己）"),
         Err(err) => println!(
             "      客户端握手被拒绝：{} ({})",
             err.text(),
             err.code_str()
         ),
     }
-    // 主机侧：被拒绝的那次握手同样会回到 accept 上。
+    // 主机侧：被拒绝的那次握手同样会回到 accept 上 —— **这才是闸门生效的证据**。
     match host_first {
-        Ok(_) => println!("      不该成功：主机接受了未确认的客户端"),
-        Err(err) => println!("      主机拒绝该连接：{err}"),
+        Ok(_) => println!("      不该成功：主机接受了未确认的客户端（闸门失效）"),
+        Err(err) => println!("      主机拒绝该连接：{err}（闸门生效）"),
     }
     let observed = gate.observed();
     if observed.is_empty() {

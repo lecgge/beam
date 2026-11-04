@@ -438,6 +438,18 @@
 | 转换路径的性能还没实测 | VideoProcessor 转换 + CopyResource 的单帧耗时未测（B18 只验证了「能上屏」）。§3.10 的渲染预算（按 vblank 上屏）需要对照实测 | 下一批 |
 | E13xxx/E14xxx/E15xxx 仍未写进设计文档 | 与 B16 遗留一致：perf / ffi / gamestream 三段的编号归属只在代码里 | 需后续批次 |
 
+| B19 | 2026-11-04 | 第十九批：整链回环真机跑通（抓屏→NVENC→QUIC→硬解→画面上屏） | crates/beam-host（示例 + 可选依赖 + perf_span 占位符统一）/ docs（设计文档 §3.10） | 已完成 | cargo fmt --all --check exit 0；cargo clippy --workspace --all-targets -- -D warnings exit 0 / 0 warning；cargo test --workspace exit 0（48 套件 / 470 passed / 0 failed / 9 ignored）；cargo clippy -p beam-host --features platform,client-video --all-targets -- -D warnings exit 0 / 0 warning；cargo clippy -p beam-capture --features wgc --all-targets -- -D warnings exit 0；cargo clippy -p beam-render --features d3d11 --all-targets -- -D warnings exit 0；cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings exit 0；npm --prefix apps/desktop run build exit 0；**真机实测**（RTX 3070 / 驱动 596.49 / 1920×1080 交互式桌面）：`cargo run -p beam-host --example client_loopback --features platform,client-video --release` exit 0 —— **抓屏→NVENC→QUIC→硬解→上屏 整链通过**：收到 345 帧，「真的搬进交换链」345 帧（其中经 VideoProcessor 转换 345）、降级 0；`cargo run -p beam-host --example host_loopback --features platform --release` exit 0 —— 既有回环仍然通过（真机整链，未受本次改动影响）；设计文档 §3.10 已按实测结论改写（CRLF + UTF-8 无 BOM 保持不变） |
+
+- **B19（主会话自办）** — 写入范围：`crates/beam-host/**`、`crates/beam-capture/src/perf.rs`、`crates/beam-decode/src/perf.rs`、`crates/beam-encode/src/perf.rs`、`docs/**`；覆盖条目 ST-07
+
+**B19 追加项（审计中顺带发现，不在原 551 条内）**
+
+| 项 | 说明 | 归属 |
+|---|---|---|
+| 转换路径的性能还没实测 | VideoProcessor 转换 + CopyResource 的单帧耗时未测（B18/B19 只验证了「能上屏」）。§3.10 的渲染预算（按 vblank 上屏）需要对照实测 | 需后续批次 |
+| 整链回环还没有覆盖音频与输入回传 | `client_loopback` 验证的是画面链路（§3.10）。音频（§3.7 WASAPI loopback + Opus）与输入回传（§3.8 SendInput / ViGEm 手柄）在这条链上还没验证过 | 需后续批次 |
+| E13xxx/E14xxx/E15xxx 仍未写进设计文档 | 与 B16 遗留一致：perf / ffi / gamestream 三段的编号归属只在代码里 | 需后续批次 |
+
 ### 已裁决事项
 
 | # | 议题 | 裁决 | 裁决日期 | 说明 | 解锁范围 |
@@ -504,6 +516,7 @@
 | 2026-11-01 | S1 的 `plat` 字段与 S11 的 PIN 参数此前都是「文档写了、代码没接」 | ① `plat` 只在 §3.4 的文字里，beam-discovery 的 TXT 与信任库写入路径都没接上它 —— 发现到的主机恒显示「未知平台」；Android 的 NsdManager 兜底扫描读的键名（`platform`）与实际广播的键名（`plat`）对不上，永远拿不到平台。② 桌面端 `connect(host_id)` 根本没有 PIN 参数 ⇒ 前端 4 位 PIN 输入框是纯装饰，填对填错都能连上。③ S5 裁决的前提被证伪：`E12xxx` 并非空闲，`beam-log` 已占用 `E12001`（日志初始化失败） | S1：`plat` 从 mDNS TXT 贯通到 beam-discovery → beam-ffi → Android / 桌面端 → 信任库，并修掉 Android 兜底扫描的键名 bug。S5：外壳错误迁到 `E12xxx`、`E11xxx` 归配置层独占、日志层迁到 `E16xxx`，一个码只对应一种含义。S11：`connect(host_id, pin)` 补上 PIN，Rust 侧做格式校验与尝试预算（3 次 / 锁 60 s） |
 | 2026-11-01 | Windows 客户端的「解码 → 上屏」链路此前是**假成功** | B10 把 D3D11VA 硬解与原生窗口上屏的代码路径搭好了，但**从未在真机跑过**。B17 第一次真机跑就发现：解码纹理是 DXGI_FORMAT_420Opaque / 1920×1152（对齐后的 coded height），交换链是 B8G8R8A8_UNORM / 1920×1080 —— 格式与尺寸双双不匹配，于是 `present` 每一帧都走「清屏 + 照样走完整条呈现路径」的静默降级：**不报错、不警告**，会话状态正常，用户看到的是空白窗口。之前的回环验证只统计「收到的帧数」，分不清「画面上屏了」与「画面被丢在地上」 | ① `beam_render::PresentInfo` 把「真的搬纹理」与「降级清屏」分开计数，并报出两边的真实格式与尺寸；② 新增 `present_smoke` 验收门禁（它现在如实报 FAIL）；③ 交换链格式改为可选并给视频格式单开路径；④ 用对照实验**实测排除**了零拷贝（420Opaque/NV12 交换链建不出来，VideoProcessor 建不出输入视图）；⑤ 静默降级改成如实报错 E10015；⑥ 结论写进设计文档 §3.10 |
 | 2026-11-01 | Windows 客户端的画面**从来没真正上过屏**（B17 定位，B18 修好） | B10 把 D3D11VA 硬解与原生窗口上屏的代码路径搭好了，但从未在真机跑过。B17 第一次真机跑就发现：解码纹理是 DXGI_FORMAT_420Opaque / 1920×1152（对齐后的 coded height），交换链是 B8G8R8A8_UNORM / 1920×1080 —— 格式与尺寸双双不匹配，于是每一帧都走「清屏 + 照样走完整条呈现路径」的静默降级：不报错、不警告，会话状态正常，用户看到的是空白窗口。B18 补上了 VideoProcessor 转换路径（4:2:0 → BGRA），画面这才真的上屏 | ① `beam_render::vp` 用 D3D11 VideoProcessor 做 4:2:0 → BGRA 转换；关键在于输入视图的 FourCC 必须用 `'420O'`（`beam-encode` 那次 96 组变体全灭，是因为源纹理是自造的 NV12/BGRA，从没试过解码器真实输出的 420Opaque）；② `PresentInfo` 增加 `converted_presents`，区分「直接搬」与「转换后搬」；③ 真机实测 9 帧全部上屏（转换 9 / 降级 0）；④ 转换也不可用时如实报 E10015，不再假装在串流；⑤ 顺带把 V-13 的丢帧统计贯通：抓屏单槽覆盖开始计数，进主机会话汇总；客户端补上渲染侧丢帧，`dropped_frames` 覆盖从抓到屏到上屏的全程 |
+| 2026-11-04 | Windows 串流的**画面链路**第一次端到端真机跑通 | B17 定位到「画面从来没上过屏」，B18 用 VideoProcessor 转换修好了上屏，但那只是「解码 → 上屏」这一段。B19 把整链接通：主机侧真抓屏 + 真硬编 → QUIC → 客户端侧真硬解 + 真上屏到独立原生窗口。过程中还发现两个「验证入口本身会骗人」的坑：① WGC 是内容驱动的，屏幕静止时主机一帧都发不出来（同一台机器上帧数在 0 与 1 之间跳）；② 客户端先断开时主机会话必然进 Error 态（正常断开语义），两个时限弄反就会被误判成「主机出错」 | 新增验证入口 `crates/beam-host/examples/client_loopback.rs`：本机实测 345 帧全部经 VideoProcessor 转换后搬进交换链（降级 0）⇒ 产品方案第 45 行的「画面真的出现在窗口里」达成。顺带把三个 crate 的 `perf_span!` 占位符统一成零尺寸结构体（B18 只改了 beam-render，其余三个在 `--features wgc/ffmpeg` 组合下会被 clippy 拦下） |
 
 ---
 
