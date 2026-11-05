@@ -889,6 +889,8 @@ fn default_settings() -> Settings {
         show_stats_overlay: true,
         minimize_to_tray: true,
         launch_on_startup: false,
+        // §3.8：客户端键鼠回传默认关（敏感操作，用户主动开启）。
+        share_input: false,
     }
 }
 

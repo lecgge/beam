@@ -77,6 +77,8 @@ pub struct DesktopSettings {
     pub show_stats_overlay: bool,
     pub minimize_to_tray: bool,
     pub launch_on_startup: bool,
+    /// 客户端是否把本机键鼠回传给主机(§3.8)。默认关(敏感操作,用户主动开启)。
+    pub share_input: bool,
 }
 
 impl Default for DesktopSettings {
@@ -91,8 +93,18 @@ impl Default for DesktopSettings {
             show_stats_overlay: true,
             minimize_to_tray: true,
             launch_on_startup: false,
+            share_input: false,
         }
     }
+}
+
+/// 客户端会话的接线选项（§3.3 PIN / §3.8 键鼠回传）。
+#[derive(Debug, Clone, Default)]
+struct ClientSessionOptions {
+    /// 客户端输入的 PIN（§3.3）：有值才发起 SPAKE2 配对。
+    pin: Option<String>,
+    /// 是否把本机键鼠回传给主机（§3.8）。
+    share_input: bool,
 }
 
 /// mDNS 浏览结果(由独立线程维护)。
@@ -727,13 +739,18 @@ impl BeamService for CrateService {
         } else {
             Some(pin.to_string())
         };
+        // §3.8：客户端是否把本机键鼠回传给主机。
+        let share_input = inner.ui.share_input;
         self.spawn_client_session(
             resolved,
             peer,
             host.name.clone(),
             identity,
             trust,
-            pin_for_pairing,
+            ClientSessionOptions {
+                pin: pin_for_pairing,
+                share_input,
+            },
         );
 
         Ok(session)
@@ -947,6 +964,9 @@ impl BeamService for CrateService {
         }
         if let Some(v) = patch.launch_on_startup {
             ui.launch_on_startup = v;
+        }
+        if let Some(v) = patch.share_input {
+            ui.share_input = v;
         }
 
         // 真实落盘:%APPDATA%/Beam/config.toml + desktop.json。
@@ -1266,7 +1286,7 @@ impl CrateService {
         host_name: String,
         identity: Identity,
         trust: TrustStore,
-        pin: Option<String>,
+        opts: ClientSessionOptions,
     ) {
         *self
             .transport_outcome
@@ -1349,10 +1369,35 @@ impl CrateService {
                 // §3.3：把用户输入的 PIN 与**本机**指纹交给客户端运行时 ——
                 // PIN 用于发起 SPAKE2，本机指纹放进挑战载荷（让主机知道是谁）。
                 let mut cfg = ClientConfig::from_resolved(&resolved);
-                cfg.pin = pin.clone();
+                cfg.pin = opts.pin.clone();
                 cfg.fingerprint = Some(client_fingerprint);
                 cfg
             });
+
+            // §3.8：开关打开时装上客户端键鼠采集（低级钩子）。
+            //
+            // 采集失败**不影响连接**：只是「本次不回传输入」，画面照常。
+            let runtime = if opts.share_input {
+                match beam_client::capture::WindowsInputCapture::start() {
+                    Ok(capture) => {
+                        if capture.is_installed() {
+                            tracing::info!("已启用键鼠回传：低级钩子采集已启动");
+                        } else {
+                            tracing::warn!(
+                                reason = %capture.error().unwrap_or_default(),
+                                "键鼠采集钩子未能安装，本次不回传输入"
+                            );
+                        }
+                        runtime.with_input(Arc::new(capture))
+                    }
+                    Err(e) => {
+                        tracing::warn!(reason = %e, "键鼠采集启动失败，本次不回传输入");
+                        runtime
+                    }
+                }
+            } else {
+                runtime
+            };
 
             // §3.10 / 产品方案第 45 行:客户端画面上屏到**独立原生窗口**
             // (不走 WebView)。分工:
@@ -1969,6 +2014,7 @@ fn settings_from(resolved: &ResolvedConfig, ui: &DesktopSettings) -> Settings {
         show_stats_overlay: ui.show_stats_overlay,
         minimize_to_tray: ui.minimize_to_tray,
         launch_on_startup: ui.launch_on_startup,
+        share_input: ui.share_input,
     }
 }
 

@@ -37,7 +37,7 @@
 //! - 装/卸钩子、跑消息循环：`SetWindowsHookExW` / `GetMessageW` 等。
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use beam_proto::{ButtonAction, InputEvent, KeyAction, MouseButton};
@@ -47,6 +47,37 @@ use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 
 /// 采集队列（采集线程写 → 会话线程读）。
 type Queue = Arc<Mutex<VecDeque<InputEvent>>>;
+
+// 钩子回调用的线程局部状态。
+//
+// **必须只有这一处声明**:`thread_local!` 写在两个不同的函数里就是
+// **两个不同的变量** —— 钩子回调读到的那个永远是默认值
+// （实测:注入事件被「跳过注入事件」的判断挡掉,一个都采不到）。
+#[cfg(windows)]
+thread_local! {
+    /// 事件队列（钩子回调写 → 会话线程读）。
+    static QUEUE: std::cell::RefCell<Option<Queue>> = const { std::cell::RefCell::new(None) };
+    /// 已采集事件计数。
+    static CAPTURED: std::cell::RefCell<Option<Arc<AtomicU64>>> =
+        const { std::cell::RefCell::new(None) };
+    /// 采集选项（是否收注入事件）。
+    static OPTIONS: std::cell::RefCell<CaptureOptions> =
+        const { std::cell::RefCell::new(CaptureOptions { capture_injected: false }) };
+}
+
+/// 采集源的选项。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CaptureOptions {
+    /// 是否采集**注入事件**（别的程序用 `SendInput` 打进来的）。
+    ///
+    /// 默认**否**：注入事件多半来自本机另一端的主机回灌，
+    /// 回采它会形成「注入 → 采集 → 回传 → 再注入」的回环。
+    ///
+    /// 打开它是为了**验证**用：验证入口需要自己注入一个键，
+    /// 再确认它真的被钩子采到了（注入事件带 `LLKHF_INJECTED` 标记，
+    /// 默认会被跳过）。
+    pub capture_injected: bool,
+}
 
 /// Windows 客户端键鼠采集（低级钩子）。
 ///
@@ -59,11 +90,18 @@ pub struct WindowsInputCapture {
     queue: Queue,
     stop: Arc<AtomicBool>,
     /// 钩子线程句柄（`Drop` 时停掉它）。
-    worker: Option<std::thread::JoinHandle<()>>,
+    ///
+    /// 用 `Mutex` 包一层：`JoinHandle` 是 `Send` 但**不是 `Sync`**，
+    /// 而采集源要以 `Arc<dyn InputSource>`（`Send + Sync`）交给会话层。
+    worker: Mutex<Option<std::thread::JoinHandle<()>>>,
     /// 钩子是否真的装上了（装不上是最常见的失败：权限 / 钩子被策略拦）。
     installed: Arc<AtomicBool>,
     /// 装钩子失败的原因。
     error: Arc<Mutex<Option<String>>>,
+    /// 已采集到的事件数（供验证入口观察「钩子真的在干活」）。
+    captured: Arc<AtomicU64>,
+    /// 选项（钩子回调在别的线程上跑，用线程局部传下去）。
+    options: CaptureOptions,
     /// 采集线程的 **Win32** 线程 id（`GetCurrentThreadId`）。
     ///
     /// Rust 的 `std::thread::ThreadId` 拿不到 OS 线程 id（`as_u64` 还不稳定），
@@ -87,11 +125,20 @@ impl WindowsInputCapture {
     /// （原因记在 [`WindowsInputCapture::error`] 里），因为那更像是
     /// 「这台机器上钩子不可用」而不是「程序坏了」。
     pub fn start() -> Result<Self, String> {
+        Self::start_with_options(CaptureOptions::default())
+    }
+
+    /// 用指定选项启动采集（§3.8）。
+    pub fn start_with_options(options: CaptureOptions) -> Result<Self, String> {
         let queue: Queue = Arc::new(Mutex::new(VecDeque::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let installed = Arc::new(AtomicBool::new(false));
         let error = Arc::new(Mutex::new(None));
         let thread_id = Arc::new(AtomicU32::new(0));
+        let captured = Arc::new(AtomicU64::new(0));
+        // 就绪信号：`start()` 必须等钩子**真的装好**（或失败）才返回 ——
+        // 否则调用方拿到的是「钩子还在装」的中间状态，会误判成失败。
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<bool>(1);
 
         let worker = {
             let queue = Arc::clone(&queue);
@@ -99,21 +146,50 @@ impl WindowsInputCapture {
             let installed = Arc::clone(&installed);
             let error = Arc::clone(&error);
             let thread_id = Arc::clone(&thread_id);
+            let captured = Arc::clone(&captured);
             std::thread::Builder::new()
                 .name("beam-input-capture".to_string())
                 .spawn(move || {
-                    hook_thread_main(queue, stop, installed, error, thread_id);
+                    hook_thread_main(CaptureShared {
+                        queue,
+                        stop,
+                        installed,
+                        error,
+                        thread_id,
+                        captured,
+                        options,
+                        ready: Some(ready_tx),
+                    });
                 })
                 .map_err(|e| format!("起采集线程失败: {e}"))?
         };
 
+        // 等钩子**真的装好**（或失败）再返回：否则调用方拿到的是
+        // 「钩子还在装」的中间状态，会误判成失败。
+        match ready_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(true) => {}
+            Ok(false) => {
+                let reason = error
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone()
+                    .unwrap_or_else(|| "低级钩子没能装上".to_string());
+                return Err(reason);
+            }
+            Err(_) => {
+                return Err("等待低级钩子安装超时(5 秒)".to_string());
+            }
+        }
+
         Ok(Self {
             queue,
             stop,
-            worker: Some(worker),
+            worker: Mutex::new(Some(worker)),
             installed,
             error,
             thread_id,
+            captured,
+            options,
         })
     }
 
@@ -127,14 +203,28 @@ impl WindowsInputCapture {
         self.error.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
+    /// 已采集到的事件数（验证入口用它确认「钩子真的在干活」）。
+    pub fn captured_count(&self) -> u64 {
+        self.captured.load(Ordering::SeqCst)
+    }
+
+    /// 本次采集的选项。
+    pub fn options(&self) -> CaptureOptions {
+        self.options
+    }
+
     /// 当前队列里攒了多少事件。
     pub fn queued(&self) -> usize {
         self.queue.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// 停掉采集（卸钩子 + 结束采集线程）。
+    /// 停掉采集（卸钩子 + 结束采集线程）。
+    ///
+    /// 用 `&self`：采集源要以 `Arc<dyn InputSource>` 交给会话层，
+    /// 调用方拿不到 `&mut`。
     #[allow(unsafe_code)]
-    pub fn stop(&mut self) {
+    pub fn stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
         // 让消息循环醒来：往线程消息队列里塞一条 WM_QUIT。
         #[cfg(windows)]
@@ -146,7 +236,8 @@ impl WindowsInputCapture {
                 windows::Win32::Foundation::LPARAM(0),
             );
         }
-        if let Some(worker) = self.worker.take() {
+        let worker = self.worker.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(worker) = worker {
             let _ = worker.join();
         }
     }
@@ -167,17 +258,33 @@ impl beam_session::InputSource for WindowsInputCapture {
     }
 }
 
-/// 采集线程主体：装钩子 + 跑消息循环。
+/// 采集线程共享的状态（打包成结构体，避免参数过多）。
 #[cfg(windows)]
-#[allow(unsafe_code)]
-fn hook_thread_main(
+struct CaptureShared {
     queue: Queue,
     stop: Arc<AtomicBool>,
     installed: Arc<AtomicBool>,
     error: Arc<Mutex<Option<String>>>,
     thread_id: Arc<AtomicU32>,
-) {
-    use std::cell::RefCell;
+    captured: Arc<AtomicU64>,
+    options: CaptureOptions,
+    ready: Option<std::sync::mpsc::SyncSender<bool>>,
+}
+
+/// 采集线程主体：装钩子 + 跑消息循环。
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn hook_thread_main(shared: CaptureShared) {
+    let CaptureShared {
+        queue,
+        stop,
+        installed,
+        error,
+        thread_id,
+        captured,
+        options,
+        ready: ready_tx,
+    } = shared;
     use windows::Win32::UI::WindowsAndMessaging::{
         DispatchMessageW, GetMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
         MSG, WH_KEYBOARD_LL, WH_MOUSE_LL,
@@ -185,11 +292,9 @@ fn hook_thread_main(
 
     // 钩子回调是 `extern "system"` 的普通函数 ⇒ 抓不到闭包。
     // 低级钩子的回调在**安装它的线程**上执行 ⇒ 用**线程局部**把队列传进去。
-    thread_local! {
-        static QUEUE: RefCell<Option<Queue>> = const { RefCell::new(None) };
-        static INSTALLED: RefCell<bool> = const { RefCell::new(false) };
-    }
     QUEUE.with(|q| *q.borrow_mut() = Some(Arc::clone(&queue)));
+    CAPTURED.with(|c| *c.borrow_mut() = Some(Arc::clone(&captured)));
+    OPTIONS.with(|o| *o.borrow_mut() = options);
     // 记下本线程的 Win32 线程 id：`stop()` 要用它发 WM_QUIT 唤醒消息循环。
     thread_id.store(
         // SAFETY: GetCurrentThreadId 只是读当前线程 id，没有参数前置条件。
@@ -211,8 +316,10 @@ fn hook_thread_main(
                 Some(format!("安装鼠标低级钩子失败: {e}"));
         }
         let ok = kb.is_ok() || ms.is_ok();
-        INSTALLED.with(|i| *i.borrow_mut() = ok);
         installed.store(ok, Ordering::SeqCst);
+        if let Some(tx) = ready_tx {
+            let _ = tx.send(ok);
+        }
 
         // 消息循环：低级钩子靠它被调度。
         let mut msg = MSG::default();
@@ -240,13 +347,14 @@ fn hook_thread_main(
 
 /// 非 Windows 平台没有 Win32 钩子 ⇒ 采集线程直接返回（什么也不采）。
 #[cfg(not(windows))]
-fn hook_thread_main(
-    _queue: Queue,
-    stop: Arc<AtomicBool>,
-    installed: Arc<AtomicBool>,
-    error: Arc<Mutex<Option<String>>>,
-    _thread_id: Arc<AtomicU32>,
-) {
+fn hook_thread_main(shared: CaptureShared) {
+    let CaptureShared {
+        stop,
+        installed,
+        error,
+        ready,
+        ..
+    } = shared;
     *error.lock().unwrap_or_else(|e| e.into_inner()) =
         Some("非 Windows 平台没有 Win32 钩子,客户端采集不可用".to_string());
     installed.store(false, Ordering::SeqCst);
@@ -276,14 +384,14 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
     // SAFETY: `lParam` 在低级键盘钩子里指向一个有效的 `KBDLLHOOKSTRUCT`。
     let kb = unsafe { *(lparam.0 as *const KBDLLHOOKSTRUCT) };
     // 别的程序注入的事件（LLKHF_INJECTED）不回采 ⇒ 不会形成「注入→采集→回传」回环。
-    if kb.flags.contains(LLKHF_INJECTED) {
+    if kb.flags.contains(LLKHF_INJECTED) && !capture_injected_now() {
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     }
     let vk = kb.vkCode;
     // 键码翻译：Win32 虚拟键码 → USB HID 用法 ID（§3.8）。
     let Some(hid) = beam_input::hid::vk_to_hid(vk) else {
         // 表里没有的键：跳过（**不静默丢弃整条流**，只是这一个键不转发）。
-        tracing::trace!(vk, "HID 表里没有这个虚拟键码,跳过该按键");
+        tracing::debug!(vk, "HID 表里没有这个虚拟键码,跳过该按键");
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     };
     push_event(InputEvent::Key { code: hid, action });
@@ -306,7 +414,7 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
     let msg = wparam.0 as u32;
     // SAFETY: `lParam` 在低级鼠标钩子里指向一个有效的 `MSLLHOOKSTRUCT`。
     let ms = unsafe { *(lparam.0 as *const MSLLHOOKSTRUCT) };
-    if ms.flags & LLMHF_INJECTED != 0 {
+    if ms.flags & LLMHF_INJECTED != 0 && !capture_injected_now() {
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     }
 
@@ -367,13 +475,26 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
 }
 
+/// 当前是否采集注入事件（线程局部：钩子回调在采集线程上跑）。
+#[cfg(windows)]
+fn capture_injected_now() -> bool {
+    OPTIONS.with(|o| o.borrow().capture_injected)
+}
+
+/// 已采集事件数（线程局部）。
+#[cfg(windows)]
+fn bump_captured() {
+    CAPTURED.with(|c| {
+        if let Some(counter) = c.borrow().as_ref() {
+            counter.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+}
+
 /// 把一个采集到的事件放进队列（钩子回调 → 线程局部队列）。
 #[cfg(windows)]
 fn push_event(ev: InputEvent) {
-    use std::cell::RefCell;
-    thread_local! {
-        static QUEUE: RefCell<Option<Queue>> = const { RefCell::new(None) };
-    }
+    bump_captured();
     QUEUE.with(|q| {
         if let Some(queue) = q.borrow().as_ref() {
             let mut guard = queue.lock().unwrap_or_else(|e| e.into_inner());

@@ -162,6 +162,8 @@ export const zhCN = {
     network: '网络',
     audio: '音频',
     interface: '界面',
+    input: '输入',
+    shareInput: '把本机键鼠回传给主机',
     resolution: '分辨率',
     fps: '帧率',
     bitrate: '码率',

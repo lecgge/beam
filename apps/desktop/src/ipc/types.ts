@@ -168,6 +168,8 @@ export interface Settings {
   showStatsOverlay: boolean
   minimizeToTray: boolean
   launchOnStartup: boolean
+  // 输入(§3.8)：是否把本机键鼠回传给主机
+  shareInput: boolean
 }
 
 /** `set_settings(patch)` 的增量载荷:只带需要改的字段。 */

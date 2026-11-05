@@ -203,6 +203,17 @@ export function SettingsPage() {
         </Card>
 
         <Card>
+          <CardTitle>{t('settings.input')}</CardTitle>
+          <SettingRow label={t('settings.shareInput')}>
+            <Toggle
+              checked={settings.shareInput}
+              ariaLabel={t('settings.shareInput')}
+              onChange={(value) => void apply({ shareInput: value }, t('settings.saved'))}
+            />
+          </SettingRow>
+        </Card>
+
+        <Card>
           <CardTitle>{t('settings.interface')}</CardTitle>
           <SettingRow label={t('settings.language')}>
             <select

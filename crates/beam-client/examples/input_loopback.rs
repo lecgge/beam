@@ -160,25 +160,56 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             Ok(conn) => conn,
             Err(err) => {
                 println!("客户端连接失败: {err}");
-                return (0, 0, 0);
+                return (0, 0, 0, 0);
             }
         };
         let transport = match beam_session::NetTransport::connect(conn).await {
             Ok(t) => t,
             Err(err) => {
                 println!("客户端建流失败: {err}");
-                return (0, 0, 0);
+                return (0, 0, 0, 0);
             }
         };
         let factory = beam_client::ReadyTransportFactory::new(
             Box::new(transport) as Box<dyn beam_session::Transport>
         );
 
+        // 模式：默认用**脚本源**（确定性强，不依赖用户的手）；
+        // 设 `BEAM_REAL_CAPTURE=1` 则用**真实钩子**（验证采集后端真的能力）。
+        let real_capture = std::env::var("BEAM_REAL_CAPTURE").as_deref() == Ok("1");
+        let capture = if real_capture {
+            match beam_client::capture::WindowsInputCapture::start_with_options(
+                beam_client::capture::CaptureOptions {
+                    capture_injected: true,
+                },
+            ) {
+                Ok(capture) => {
+                    println!(
+                        "      客户端键鼠采集: 低级钩子已安装 = {}错误 = {:?}",
+                        capture.is_installed(),
+                        capture.error()
+                    );
+                    Some(Arc::new(capture))
+                }
+                Err(e) => {
+                    println!("      客户端键鼠采集启动失败: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let source = Arc::new(ScriptedInput::new());
         let mut cfg = ClientConfig::from_resolved(&beam_config::ResolvedConfig::default());
         cfg.pin = None;
         cfg.fingerprint = Some(client_identity.fingerprint());
-        let client_runtime = ClientRuntime::new(cfg).with_input(source.clone());
+        let client_runtime = ClientRuntime::new(cfg.clone()).with_input(source.clone());
+        // 真实模式：装上采集源（脚本源与采集源不共存，这里只用真实采集源）。
+        let client_runtime = match &capture {
+            Some(capture) => ClientRuntime::new(cfg)
+                .with_input(Arc::clone(capture) as Arc<dyn beam_session::InputSource>),
+            None => client_runtime,
+        };
 
         let peer = PeerAddr {
             host: addr.ip().to_string(),
@@ -208,6 +239,24 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
         println!("      客户端状态 = {}", handle.state());
 
+        // 真实模式：注入一个测试键（F13，机器上没人用）。
+        // 注入事件带 `LLKHF_INJECTED` 标记 → 默认会被采集侧跳过，
+        // 所以验证时开了 `capture_injected`。
+        if let Some(capture) = &capture {
+            inject_test_key();
+            let until = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < until && capture.captured_count() == 0 {
+                let _ = handle.pump();
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            println!(
+                "      客户端钩子采到的事件数 = {}",
+                capture.captured_count()
+            );
+            // 断掉回环：采集派生的注入事件不能再回传。
+            capture.stop();
+        }
+
         // 阶段 1：把光标挪 1 像素。
         //
         // **全程继续泵会话** —— 输入事件是泵循环里发出去的。
@@ -228,7 +277,8 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
 
-        (x, y, source.sent())
+        let captured_total = capture.as_ref().map(|c| c.captured_count()).unwrap_or(0);
+        (x, y, source.sent(), captured_total)
     });
 
     let (host_result, client_result) = runtime.block_on(async { tokio::join!(host, client) });
@@ -238,14 +288,14 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     });
     let client_result = client_result.unwrap_or_else(|e| {
         println!("客户端任务异常: {e}");
-        (0, 0, 0)
+        (0, 0, 0, 0)
     });
     let (before, after, injector_stats) = host_result;
-    let (cx, cy, sent) = client_result;
+    let (cx, cy, sent, captured_total) = client_result;
 
     // ---------------------------------------------------------------- 结论
     println!("--------------------------------------------------");
-    println!("客户端发出的输入事件数 = {sent}");
+    println!("客户端发出的输入事件数 = {sent} (+钩子采到 {captured_total})");
     let moved = (after.0 - before.0).abs() + (after.1 - before.1).abs();
     println!(
         "主机光标位置：注入前 = ({}, {})，注入后 = ({}, {})，位移 = {moved} 像素",
@@ -263,11 +313,13 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // SendInput 时才增加）。光标位移只作旁证 —— 这台机器上**用户自己**
     // 也在动鼠标（实测：注入器一个事件都没收到，光标却「位移 97 像素」，
     // 那是用户的手，不是我们的注入 ⇒ 不能拿它当判据）。
+    // 客户端发出的事件数：脚本模式计脚本源，真实模式计钩子采到的。
+    let sent_total = sent as u64 + captured_total;
     let injected = injector_stats
         .as_ref()
         .map(|s| s.snapshot().injected)
         .unwrap_or(0);
-    let ok = sent >= 2 && injected >= 1;
+    let ok = sent_total >= 2 && injected >= 1;
     println!(
         "RESULT: {} —— 客户端事件真的经输入流到了主机,主机的桌面真的动了",
         if ok { "PASS" } else { "FAIL" }
@@ -321,6 +373,38 @@ fn mouse_move_to(x: i32, y: i32) -> InputEvent {
     let nx = (x.clamp(0, w - 1) as i64 * 65535 / (w - 1).max(1) as i64) as i32;
     let ny = (y.clamp(0, h - 1) as i64 * 65535 / (h - 1).max(1) as i64) as i32;
     InputEvent::MouseMove { x: nx, y: ny }
+}
+
+/// 注入一个测试键（F13 下 + 上）。
+///
+/// F13 机器上没人用 → 不会影响任何应用。
+fn inject_test_key() {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
+    };
+    // 用 **Ctrl**（单独按 Ctrl 没有任何副作用），而不是自定义的键码：
+    // 虚拟键码必须在 HID 表里（否则会被「表里没有就跳过」拒掉）。
+    const VK_CONTROL: VIRTUAL_KEY = VIRTUAL_KEY(0xA2); // VK_LCONTROL
+    let make = |flags: windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VK_CONTROL,
+                wScan: 0,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    let inputs = [
+        make(windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS(0)),
+        make(KEYEVENTF_KEYUP),
+    ];
+    // SAFETY: `inputs` 是合法的 `INPUT` 切片，`SendInput` 只在调用期间读它。
+    unsafe {
+        let _ = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    }
 }
 
 /// 读当前光标位置（像素）。

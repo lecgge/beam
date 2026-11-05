@@ -286,6 +286,10 @@ pub struct Settings {
     pub show_stats_overlay: bool,
     pub minimize_to_tray: bool,
     pub launch_on_startup: bool,
+    /// 客户端是否把本机键鼠回传给主机(§3.8)。
+    ///
+    /// 默认**关**：把自己的键盘发给远程主机是敏感操作，必须由用户主动开启。
+    pub share_input: bool,
 }
 
 /// `set_settings(patch)` 的参数:只带需要改的字段(§3.14 增量合并)。
@@ -316,6 +320,8 @@ pub struct SettingsPatch {
     pub show_stats_overlay: Option<bool>,
     pub minimize_to_tray: Option<bool>,
     pub launch_on_startup: Option<bool>,
+    /// 客户端是否把本机键鼠回传给主机(§3.8)。
+    pub share_input: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------

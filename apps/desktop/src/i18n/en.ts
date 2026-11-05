@@ -158,6 +158,8 @@ export const en: Dictionary = {
     encoding: 'Encoding',
     network: 'Network',
     audio: 'Audio',
+    input: 'Input',
+    shareInput: 'Forward this computer\'s keyboard and mouse to the host',
     interface: 'Interface',
     resolution: 'Resolution',
     fps: 'Framerate',
