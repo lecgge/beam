@@ -50,8 +50,8 @@ use crate::control::{
 };
 use crate::error::SessionError;
 use crate::event::{
-    FrameConsumer, RateControl, ReconnectingInfo, SessionEvent, SessionInput, Transport,
-    TransportFactory,
+    FrameConsumer, InputSource, RateControl, ReconnectingInfo, SessionEvent, SessionInput,
+    Transport, TransportFactory,
 };
 use crate::handle::{SessionHandle, SessionInner, SessionRunner, SessionTimeouts};
 use crate::state::{SessionState, StateMachine};
@@ -123,6 +123,12 @@ pub struct ClientDeps {
     pub consumer: Option<Box<dyn FrameConsumer>>,
     /// 传输工厂。
     pub transport: Option<Box<dyn TransportFactory>>,
+    /// 客户端输入采集源（§3.8）。
+    ///
+    /// 有它时，会话层在每次 `pump` 里把采集到的事件写进 §5 的
+    /// **输入单向流**（客户端 → 主机），主机侧再注入到自己的桌面。
+    /// `None` = 本次会话不回传输入（纯看）。
+    pub input: Option<Arc<dyn InputSource>>,
 }
 
 impl std::fmt::Debug for ClientDeps {
@@ -130,6 +136,7 @@ impl std::fmt::Debug for ClientDeps {
         f.debug_struct("ClientDeps")
             .field("consumer", &self.consumer.is_some())
             .field("transport", &self.transport.is_some())
+            .field("input", &self.input.is_some())
             .finish()
     }
 }
@@ -157,6 +164,8 @@ pub(crate) struct ClientRunner {
     machine: StateMachine,
     peer: PeerAddr,
     consumer: Option<Box<dyn FrameConsumer>>,
+    /// 客户端输入采集源（§3.8）：有它才回传键鼠。
+    input: Option<Arc<dyn InputSource>>,
     transport: Option<Box<dyn Transport>>,
     /// 传输工厂：保留下来，重连时用它重建一条**新连接**
     /// （§4.1「新连接/迁移 + Resume{session_id}」）。
@@ -660,6 +669,30 @@ impl ClientRunner {
         }
     }
 
+    /// 把采集到的输入事件写进 §5 的**输入单向流**（客户端 → 主机，§3.8）。
+    ///
+    /// - 只在 `Streaming` 时回传：还没进串流时发输入没有意义；
+    /// - 一次尽量多取（采集源是非阻塞的）：`poll_event` 返回 `None` 才停；
+    /// - 发送失败**不**把会话打进错误态：输入回传失败只是「这次没回传」，
+    ///   画面照旧（与 §3.7 音频的降级语义一致）。
+    fn pump_input(&mut self) {
+        if self.machine.state() != SessionState::Streaming {
+            return;
+        }
+        let Some(source) = self.input.as_ref() else {
+            return;
+        };
+        while let Some(ev) = source.poll_event() {
+            let Some(transport) = self.transport.as_mut() else {
+                return;
+            };
+            if let Err(e) = transport.send_input(ev) {
+                tracing::debug!(reason = %e, "输入事件发送失败,本次不回传(画面不受影响)");
+                return;
+            }
+        }
+    }
+
     /// 读帧并交给解码 + 上屏。
     fn pump_frames(&mut self) {
         if self.machine.state() != SessionState::Streaming {
@@ -807,6 +840,7 @@ impl SessionRunner for ClientRunner {
         self.maybe_reconnect();
         self.drain_control();
         self.pump_frames();
+        self.pump_input();
         self.report_dropped_frames();
         self.report_consumer_dropped_frames();
         self.maybe_send_feedback();
@@ -888,6 +922,7 @@ impl ClientSession {
             ClientDeps {
                 consumer: None,
                 transport: None,
+                input: None,
             },
         )
     }
@@ -944,6 +979,7 @@ impl ClientSession {
             machine: StateMachine::new(),
             peer,
             consumer: deps.consumer,
+            input: deps.input,
             transport,
             factory,
             inner: Arc::downgrade(handle.inner()),
@@ -1102,6 +1138,7 @@ mod tests {
             transport: Some(Box::new(FakeFactory {
                 transport: Some(Box::new(transport)),
             })),
+            input: None,
         };
         let handle = ClientSession::connect_with(peer(), cfg, deps);
         (handle, sent)
@@ -1118,6 +1155,7 @@ mod tests {
             transport: Some(Box::new(FakeFactory {
                 transport: Some(Box::new(transport)),
             })),
+            input: None,
         };
         ClientSession::connect_with(peer(), cfg, deps)
     }

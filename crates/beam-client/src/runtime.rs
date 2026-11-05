@@ -1,5 +1,7 @@
 //! 客户端运行时组装（§3.9 / §3.10）。
 
+use std::sync::Arc;
+
 use beam_config::ResolvedConfig;
 use beam_decode::{D3D11VaDecoder, VideoDecoder};
 use beam_discovery::{Browser, DiscoveryEvent};
@@ -115,15 +117,36 @@ impl ClientConfig {
 }
 
 /// 客户端运行时。
-#[derive(Debug)]
 pub struct ClientRuntime {
     cfg: ClientConfig,
+    /// 客户端输入采集源（§3.8）：有它才回传键鼠。
+    input: Option<Arc<dyn beam_session::InputSource>>,
+}
+
+impl std::fmt::Debug for ClientRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientRuntime")
+            .field("cfg", &self.cfg)
+            .field("has_input", &self.input.is_some())
+            .finish()
+    }
 }
 
 impl ClientRuntime {
     /// 创建运行时。
     pub fn new(cfg: ClientConfig) -> Self {
-        Self { cfg }
+        Self { cfg, input: None }
+    }
+
+    /// 装上**客户端输入采集源**（§3.8）。
+    ///
+    /// 装上之后，本次会话在 `Streaming` 期间会把采集到的键鼠事件
+    /// 写进 §5 的**输入单向流**（客户端 → 主机），主机侧再注入到自己的桌面。
+    ///
+    /// 真机实现：[`crate::capture::WindowsInputCapture`]（低级键鼠钩子）。
+    pub fn with_input(mut self, input: Arc<dyn beam_session::InputSource>) -> Self {
+        self.input = Some(input);
+        self
     }
 
     /// 当前配置。
@@ -160,6 +183,8 @@ impl ClientRuntime {
         let deps = ClientDeps {
             consumer: Some(Box::new(consumer)),
             transport,
+            // §3.8：客户端输入采集源（没有它就不回传输入）。
+            input: self.input.clone(),
         };
         let session_cfg = ClientSessionConfig {
             stream: self.cfg.stream.clone(),

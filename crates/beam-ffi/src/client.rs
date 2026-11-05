@@ -406,6 +406,9 @@ impl BeamClient {
         let deps = beam_session::ClientDeps {
             consumer: Some(consumer),
             transport: Some(factory),
+            // §3.8：Android 侧的输入由 `core-input` 采集后经 uniffi 上报，
+            // 不走本 crate 的 `InputSource` ⇒ 这里不装输入源。
+            input: None,
         };
         let handle =
             beam_session::ClientSession::connect_with(peer.to_peer_addr(), session_cfg, deps);

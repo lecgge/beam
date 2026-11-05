@@ -130,8 +130,9 @@ pub use control::{
 };
 pub use error::{message, SessionError};
 pub use event::{
-    ControlChannel, FrameConsumer, FramePipeline, InputSink, RateControl, ReconnectingInfo,
-    SessionEvent, SessionInput, Transport, TransportFactory, VideoSender, FRAME_EXPIRED_CODE,
+    ControlChannel, FrameConsumer, FramePipeline, InputSink, InputSource, RateControl,
+    ReconnectingInfo, SessionEvent, SessionInput, Transport, TransportFactory, VideoSender,
+    FRAME_EXPIRED_CODE,
 };
 pub use handle::{SessionEventStream, SessionHandle, SessionTimeouts};
 pub use host::{HostControlDeps, HostDeps, HostSession, HostSessionConfig};

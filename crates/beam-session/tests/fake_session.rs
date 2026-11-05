@@ -283,6 +283,7 @@ fn harness_with(
                 received: Arc::clone(&received),
             })),
             transport: Some(factory),
+            input: None,
         },
         ClientControlDeps::default(),
     );

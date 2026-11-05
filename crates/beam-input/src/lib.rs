@@ -70,6 +70,7 @@
 #![deny(unsafe_code)]
 
 pub mod error;
+pub mod hid;
 pub mod injector;
 pub mod sink;
 

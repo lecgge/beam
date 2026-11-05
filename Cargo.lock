@@ -156,6 +156,7 @@ dependencies = [
  "beam-decode",
  "beam-discovery",
  "beam-host",
+ "beam-input",
  "beam-net",
  "beam-pair",
  "beam-perf",
@@ -167,6 +168,8 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "tracing-subscriber",
+ "windows 0.62.2",
 ]
 
 [[package]]

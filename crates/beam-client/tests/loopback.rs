@@ -178,6 +178,7 @@ async fn loopback_hello_negotiate_hello_ack() {
                     .take()
                     .map(|t| Box::new(t) as Box<dyn Transport>),
             })),
+            input: None,
         },
         ClientControlDeps::default(),
     );
@@ -322,6 +323,7 @@ async fn loopback_client_and_host_can_talk_over_control_stream() {
                     .take()
                     .map(|t| Box::new(t) as Box<dyn Transport>),
             })),
+            input: None,
         },
         ClientControlDeps::default(),
     );
@@ -527,6 +529,7 @@ async fn loopback_session_streams_frame_from_host_to_client() {
                     .take()
                     .map(|t| Box::new(t) as Box<dyn Transport>),
             })),
+            input: None,
         },
         ClientControlDeps::default(),
     );

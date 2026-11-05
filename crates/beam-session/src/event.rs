@@ -125,6 +125,26 @@ pub enum SessionInput {
     Stop,
 }
 
+/// 客户端侧输入采集源（§3.8）。
+///
+/// §3.8 的边界写着「**不采集客户端输入**（Windows 客户端由 beam-client 采集，
+/// Android 由 `core-input`）」—— 本 trait 就是那条边界在会话层的镜像：
+/// 会话层**不认识**任何平台采集后端，只从它这里取事件，
+/// 再写进 §5 的**输入单向流**（客户端 → 主机）。
+///
+/// 真机实现：
+/// - Windows：[`beam_client::capture::WindowsInputCapture`]（低级键鼠钩子）；
+/// - Android：`core-input`（Kotlin 侧，经 uniffi 上报）。
+///
+/// 语义：**非阻塞**。暂无新事件返回 `None`（调用方自己决定轮询节奏）。
+pub trait InputSource: Send + Sync {
+    /// 取下一个输入事件；暂无新事件返回 `None`。
+    ///
+    /// 用 `&self`（内部可变性）：采集源通常由**采集线程**写入队列、
+    /// 由**会话线程**读取，两边共享同一个句柄（`Arc`）。
+    fn poll_event(&self) -> Option<InputEvent>;
+}
+
 /// 主机侧帧流水线（抓屏 → 编码）。
 ///
 /// 这是 §3.9 里 `CaptureSource` / `VideoEncoder` 的会话侧镜像，

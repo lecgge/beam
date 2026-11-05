@@ -39,6 +39,8 @@ beam-net = { workspace = true }
 # §4 允许 L3（host/client）引用平台 crate；`beam-audio` 的模块文档也写明
 # 「被依赖：beam-host、beam-client、beam-ffi」。
 beam-audio = { workspace = true }
+# §3.8 “客户端由 beam-client 采集”:键盘 HID ↔ Win32 虚拟键码的共用表在这里。
+beam-input = { workspace = true }
 # §3.13 的性能采集器。可选依赖 + perf-stats feature（默认关，见上）。
 beam-perf = { workspace = true, optional = true }
 # §4「只允许上层依赖下层」：client(L3) 需要 pair(L1) 的 PeerVerifier 来校验主机证书。
@@ -55,8 +57,19 @@ tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+# §3.8 客户端键鼠采集（低级钩子）需要 Win32 消息循环与钩子 API。
+windows = { workspace = true, features = [
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Foundation",
+    "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 bytes = { workspace = true }
+# 验证入口要看 tracing 的真实错误（输入回传失败等）。
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 # 回环测试需要主机侧的 QUIC 接受端（已下沉到 beam-host）。
 beam-host = { workspace = true }
 

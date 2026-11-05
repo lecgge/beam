@@ -374,6 +374,7 @@ async fn start_loopback(first_frame: EncodedFrame) -> Loopback {
             transport: Some(Box::new(FixedFactory {
                 transport: Some(Box::new(client_transport)),
             })),
+            input: None,
         },
         ClientControlDeps::default(),
     );

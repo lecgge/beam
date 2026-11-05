@@ -50,10 +50,11 @@
 //! 画面重组与抖动缓冲仍用 `beam-net` 的同一套原语。
 //! 需要在会话层长期落地时，见交付报告里的说明。
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 pub mod adapters;
 pub mod audio;
+pub mod capture;
 pub mod runtime;
 pub mod transport;
 
