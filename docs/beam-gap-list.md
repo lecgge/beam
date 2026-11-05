@@ -47,12 +47,12 @@
 
 | 审计判定 | 条数 | 已完成 | 进行中 | 已排期 | 未开始 |
 |---|---|---|---|---|---|
-| 已实现 | 364 | 12 | 0 | 0 | 352 |
+| 已实现 | 364 | 13 | 0 | 0 | 351 |
 | 占位 | 43 | 35 | 0 | 0 | 8 |
 | 缺失 | 111 | 57 | 3 | 0 | 39 |
 | 偏差 | 76 | 54 | 0 | 0 | 22 |
 | 超出 | 3 | 0 | 0 | 0 | 3 |
-| **合计** | **597** | **158** | **3** | **0** | **424** |
+| **合计** | **597** | **159** | **3** | **0** | **423** |
 
 - 审计判定为**未达成**（占位+缺失+偏差）：**230** 条
 - 其中**已落地**：**161** 条；**仍未排期**：**69** 条
@@ -157,7 +157,7 @@
 |---|---|
 | 未开始 | 1 |
 | 进行中 | 3 |
-| 已完成 | 159 |
+| 已完成 | 160 |
 | 已阻塞 | 11 |
 | 暂不做 | 1 |
 
@@ -476,6 +476,18 @@
 | 音画同步偏差（§3.15 <30 ms）仍无测量 | 需要跨设备时钟同步（四时间戳），本机同机回环量不出真实偏差（X8-16） | 需后续批次 |
 | 画面整链在本轮无法复验：会话处于锁屏 | WGC 内容驱动 ⇒ 锁屏画面几乎不变 ⇒ 抓屏只有 3 帧（音频照常 800 帧）。已用 B20 的已提交版本做对照实验确认**不是代码回归**；解锁后可复验 | 环境 |
 
+| B22 | 2026-11-05 | 第二十二批：输入回传进整链（客户端采集 + 会话管道 + 主机注入真机验证） | crates/beam-session（InputSource 抽象 + 会话侧输入泵）/ crates/beam-client（Windows 低级钩子采集 + 运行时接线）/ crates/beam-input（HID↔VK 表公开为共用）/ crates/beam-ffi（ClientDeps 适配）/ crates/beam-client/examples（输入回环验证入口）/ docs（设计文档 §3.8） | 已完成 | cargo fmt --all --check exit 0；cargo clippy --workspace --all-targets -- -D warnings exit 0 / 0 warning；cargo test --workspace exit 0（48 套件 / 485 passed / 0 failed / 9 ignored）；**真机实测**：`cargo run -p beam-client --example input_loopback --release` exit 0 —— 客户端发出 2 个输入事件，主机注入器统计 **submitted = 2 / injected = 2 / denied = 0**（真的调过 `SendInput`，桌面真的动了） |
+
+- **B22（主会话自办）** — 写入范围：`crates/beam-session/src/{event,client,lib}.rs`、`crates/beam-client/src/{capture,runtime,lib}.rs`、`crates/beam-client/examples/input_loopback.rs`、`crates/beam-client/Cargo.toml`、`crates/beam-input/src/{hid,lib,sink}.rs`、`crates/beam-ffi/src/client.rs`、`docs/**`；覆盖条目 I-02, I-06, I-10, T-20
+
+**B22 追加项（审计中顺带发现，不在原 551 条内）**
+
+| 项 | 说明 | 归属 |
+|---|---|---|
+| 桌面端还没装上客户端采集 | B22 把采集后端做出来了，但桌面端（L4）的 `connect` 还没把 `WindowsInputCapture` 装到客户端运行���上 ⇒ UI 上还没有「回传键鼠」的开关 | 需后续批次 |
+| Android 侧的输入采集（core-input）没接进这条管道 | 会话层已有 `InputSource` 抽象，Android 侧（Kotlin）需要把 `core-input` 的事件经 uniffi 送上来 | 需后续批次（无 Android 真机） |
+| 输入回传的「注入延迟 ≤1 ms」没单独测 | 注入器有延迟统计（mean / max / last），但本批没在整链上核对 §3.8 的 ≤1 ms 预算 | 需后续批次 |
+
 ### 已裁决事项
 
 | # | 议题 | 裁决 | 裁决日期 | 说明 | 解锁范围 |
@@ -545,6 +557,7 @@
 | 2026-11-04 | Windows 串流的**画面链路**第一次端到端真机跑通 | B17 定位到「画面从来没上过屏」，B18 用 VideoProcessor 转换修好了上屏，但那只是「解码 → 上屏」这一段。B19 把整链接通：主机侧真抓屏 + 真硬编 → QUIC → 客户端侧真硬解 + 真上屏到独立原生窗口。过程中还发现两个「验证入口本身会骗人」的坑：① WGC 是内容驱动的，屏幕静止时主机一帧都发不出来（同一台机器上帧数在 0 与 1 之间跳）；② 客户端先断开时主机会话必然进 Error 态（正常断开语义），两个时限弄反就会被误判成「主机出错」 | 新增验证入口 `crates/beam-host/examples/client_loopback.rs`：本机实测 345 帧全部经 VideoProcessor 转换后搬进交换链（降级 0）⇒ 产品方案第 45 行的「画面真的出现在窗口里」达成。顺带把三个 crate 的 `perf_span!` 占位符统一成零尺寸结构体（B18 只改了 beam-render，其余三个在 `--features wgc/ffmpeg` 组合下会被 clippy 拦下） |
 | 2026-11-04 | Windows 串流的**音频链路**第一次端到端真机跑通，并修掉了一个「跑通了但速率只有 1/3」的缺陷 | B20 接上音频后立刻暴露两个问题：① 客户端用裸 `video_stream()` 收帧，而画面重组器**不看帧头 `type`** ⇒ 音频数据报会被当成画面分片组装（负载是裸 Opus 字节）；② 主机只送出 **65 帧/秒**，而 §3.7 的音频是 5 ms 一帧（实时 200 帧/秒），采集队列一路积压到丢帧。对照实验（采集 / +Opus 编码 / +建数据报 三段各测速率）证明**处理能力有 199.7 帧/秒**，瓶颈在消费循环「一轮只取一帧」—— 速率被循环的唤醒间隔限死。改成「一轮把攒下的帧全发走」后实测 800 帧 / 4 秒 = 200 帧/秒、队列零积压。分流读点也从 `beam-client` 下沉到 `beam-net::DemuxStream`（L1）：§4 规定 L3 之间不得横向依赖，而主机侧的整链验证入口也需要同一个读点 | 真机实测：音频 **800 帧走完整链**（WASAPI loopback 采集 → Opus 编码 → QUIC datagram → 按帧头 type 分流 → Opus 解码 → WASAPI 输出），错误 0 次，解码 PCM 的 RMS = 0.084（非静音）；画面同一次运行 285 帧全部经 VideoProcessor 转换后搬进交换链、降级 0。顺带把 §3.10 的渲染预算**第一次对照实测**：解码均值 0.348 ms（预算 8 ms）、上屏均值 0.106 ms（半帧预算 8.33 ms）⇒ 均达标 |
 | 2026-11-04 | Windows 串流的**配对密码学校验**第一次真的发生（PIN → SPAKE2 → 信任库 → 串流） | B16 遗留的缺口：PIN 只到「格式校验 + 尝试预算」，**密码学验证从未真正发生** —— 主机侧没把 PIN 配进 `PairingConfig`，信任闸门又在 TLS 层就把未信任对端拒了，客户端连控制通道都到不了。B21 补了三段接线:客户端 `ClientConfig.pin` → 会话层 `PairingConfig`（配对成功才发 `Hello`）；主机信任闸门增加**配对模式**（握手放行，**控制面**把关 —— 未配对不许进串流）；配对成功后主机把对端指纹写进信任库。接线过程中还挖出一个**安全缺陷**:主机原先在「收到 SPAKE2 首条挑战」时就坐实配对并写信任库，但密码学证明在**客户端**那一步才成立 —— 输错 PIN 的客户端也会被写进信任库（实测复现：错 PIN 那一轮信任库从 0 变成了 1） | 真机实测三阶段全过:错 PIN ⇒ 被拒且**信任库保持为空**；对 PIN ⇒ 配对成功、**写进信任库**、进串流；已配对 ⇒ 不传 PIN 也**免配对**直接放行。安全缺陷已修:主机改为「记住对端指纹 → 等客户端回 `PairOk`（= 它真的过了 PIN 校验）→ 才坐实」，并补了对应的回归单测 |
+| 2026-11-05 | Windows 串流的**输入回传**第一次端到端真机跑通（客户端 → 输入流 → 主机注入 → 桌面真的动了） | 此前输入链路的协议（§5 输入单向流、`Transport::send_input`）与主机侧的注入器（`beam-input` 的 `InputInjector`：有界通道 + 专用注入线程 + MMCSS "Games"）都是真的，但**客户端侧没有采集端**，会话层也没有对外的输入发送口 ⇒ 这条链路从未被端到端验证过。B22 补了三段：会话层新增 `InputSource` 抽象（§3.8 边界在会话层的镜像）与 `ClientDeps.input` + `pump_input`；`beam-client` 新增 `WindowsInputCapture`（低级键鼠钩子 + 消息循环线程）；`beam_input::hid` 把 HID↔VK 表公开出来，让采集侧（VK→HID）与注入侧（HID→VK）**共用同一张表**。接线过程中踩到两个坑：① 客户端会话**进串流后不能再不泵** —— 「把事件写进输入单向流」发生在 `pump` 里，不再泵 ⇒ 事件堵在采集源里直到任务结束，那时连接正要关闭 ⇒ 主机报「接受输入流失败 closed by peer」；② 判据不能用光标位移 —— 这台机器上用户自己也在动鼠标（实测：注入器一个事件都没收到，光标却「位移 97 像素」） | 真机实测通过：客户端发出 2 个输入事件，主机注入器统计 **submitted = 2 / injected = 2 / denied = 0** —— 真的调过 `SendInput`，主机的桌面真的动了。设计文档 §3.8 已补上客户端采集的落地方式、键码口径只有一张表、不回采注入事件的理由，以及回传链路的那两个坑 |
 
 ---
 
@@ -878,7 +891,7 @@
 | I-03 | 「vigem-client 虚拟 Xbox 手柄」 | `crates/beam-input/src/sink.rs:58-82` | 占位 | `vigem_client` 是**唯一被真正调用的原生依赖**（`sink.rs:71` 的 `vigem_client::Client::connect()`，失败映射为 `E8001`），但**只连总线、不创建 X360 虚拟手柄**——代码注释自己写明「X360 目标的创建与震动回传在 M3（v1）落地」（`sink.rs:68`）。`GamepadHub` 只在 `attached` 里记一个 `slot`（`sink.rs:74-75`），没有任何虚拟设备句柄。文档标注手柄属 v1（§3.8 第 145 行「里程碑:MVP(键鼠)/v1(手柄)」）。 | 未开始 |
 | I-04 | 「震动回传」 | `crates/beam-input/src/sink.rs:34-38` | 占位 | 只有 `trait RumbleSink { fn rumble(&mut self, handle: GamepadHandle, strong: u16, weak: u16) -> Result<(), InputError>; }` 的接口声明，**没有任何实现**（已搜索 `impl RumbleSink`，`crates/` 全目录零命中）。 | 未开始 |
 | I-05 | 「权限控制(按设备)」 | `crates/beam-input/src/sink.rs:99-113,116-120`；`crates/beam-pair/src/trust.rs:49` | 偏差 | 协议侧有按设备的权限位：`TrustedPeer.perms: PeerPerms`（`crates/beam-pair/src/trust.rs:49`），配置侧有 `InputSettings{gamepad, allow_keyboard, allow_mouse}`（`crates/beam-config/src/model.rs:271-278`）。但**注入路径完全不看这些**：`SendInputSink` 只有一个全局布尔 `allowed`（`sink.rs:101`），`apply()` 只判断 `if !self.allowed`（`sink.rs:118-120`），既不区分键/鼠/手柄，也不按来源设备查询 `perms`。单测 `sink_requires_permission`（`sink.rs:140-152`）也只验证了这个全局开关。 | 已完成 |
-| I-06 | 「边界:不采集客户端输入」 | `crates/beam-input/src/`、`crates/beam-input/Cargo.toml:16-27` | 已实现 | crate 内无任何输入采集代码（无 `GetAsyncKeyState` / `Raw Input` / 事件钩子），只做注入与手柄管理。 | 未开始 |
+| I-06 | 「边界:不采集客户端输入」 | `crates/beam-input/src/`、`crates/beam-input/Cargo.toml:16-27` | 已实现 | crate 内无任何输入采集代码（无 `GetAsyncKeyState` / `Raw Input` / 事件钩子），只做注入与手柄管理。 | 已完成 |
 | I-07 | 「边界:禁止依赖 capture/encode」 | `crates/beam-input/Cargo.toml:16-27` | 已实现 | 依赖仅 `beam-proto` / `thiserror` / `tracing`（+ optional `vigem-client`），无 `beam-capture`、无 `beam-encode`、无 `beam-session`、无 `beam-net`。 | 未开始 |
 | I-08 | 「`trait InputSink { fn apply(&mut self, ev: InputEvent) -> Result<(), InputError>; }`」 | `crates/beam-input/src/sink.rs:12-15` | 已实现 | 逐字一致（`Send` 约束 + `apply` 签名）。 | 未开始 |
 | I-09 | 「`GamepadHub::attach(slot) -> GamepadHandle`」 | `crates/beam-input/src/sink.rs:58-82` | 已实现 | 接口存在且行为合理。文档简写省略了 `Result`；代码为 `attach(&mut self, slot: u8) -> Result<GamepadHandle, InputError>`（`sink.rs:58`），这是 §3.8 强制要求 `E8001` 所必需的（ViGEmBus 未安装 / 槽位越界分别返回 `E8001`/`E8002`，`sink.rs:60,71,80`），判定为可接受的等价实现。`vigem` feature **默认开启**（`crates/beam-input/Cargo.toml:12,14`，与 §7「`vigem`(默认开)」一致）。 | 未开始 |

@@ -145,6 +145,12 @@ pub struct CapturedFrame { pub tex: ID3D11Texture2D, pub ts_us: u64, pub dirty: 
 - 边界:不采集客户端输入(Windows 客户端由 beam-client 采集,Android 由 core-input)。禁止依赖 capture/encode。
 - 接口:`trait InputSink { fn apply(&mut self, ev: InputEvent) -> Result<(), InputError>; }`;`GamepadHub::attach(slot) -> GamepadHandle`。
 - 线程:输入 stream 接收任务 → 有界通道 → 注入线程(高优先级)。错误码 `E8xxx`(8001 ViGEmBus 未安装,8002 权限拒绝,**8004 键码无法映射为 HID/VK**——与 8001/8002 同段的**段内扩展**)。滚轮 `Scroll{dx,dy}` 为 **Q16.16 定点数**,**整数部分表示滚轮刻度**(1 刻度 = 鼠标滚轮一格;Windows 注入侧再乘 `WHEEL_DELTA=120`),小数部分留给高精度滚轮。性能:接收→注入 ≤1 ms。测试:回放脚本、手柄热插拔。里程碑:MVP(键鼠)/v1(手柄)。
+- **客户端采集已落地(B22)**:§3.8 的边界写着「不采集客户端输入(Windows 客户端由 beam-client 采集)」—— `beam-client` 新增 `capture` 模块:`WindowsInputCapture` 用**低级钩子**(`WH_KEYBOARD_LL` / `WH_MOUSE_LL`)采集**全局**键鼠(普通窗口钩子只能拿到**本进程**的输入,而串流要转发的是用户在**别的应用**里的操作)。低级钩子的回调在**安装它的线程**上执行 ⇒ 该线程必须跑消息循环(`GetMessageW`),否则 Windows 会把钩子摘掉。
+- **键码口径只有一张表(B22)**:钩子给的是 Win32 **虚拟键码**,而协议侧 `InputEvent::Key.code` 是 **USB HID 用法 ID** ⇒ 采集侧用 `beam_input::hid::vk_to_hid` 翻译,与主机侧注入用的 `hid_to_vk` **是同一张表**(`beam_input::hid`)。两边各写一张表,迟早会漂移(一边加了键、另一边没有 ⇒ 按这个键没反应)。
+- **不回采「注入事件」(B22)**:带 `LLKHF_INJECTED` / `LLMHF_INJECTED` 标记的事件是**别的程序注入**的(包括本机另一端的主机注入)⇒ 一律跳过。否则会形成「注入 → 采集 → 回传 → 再注入」的回环。
+- **输入回传链路已打通(B22)**:会话层新增 `InputSource`(§3.8 边界在会话层的镜像:会话层不认识任何平台采集后端,只从它取事件写进 §5 的**输入单向流**);`beam-client` 的 `ClientRuntime::with_input` 装上采集源;主机侧照旧是「输入 stream 接收任务 → 有界通道 → 注入线程(高优先级/MMCSS)」。
+- **输入回传已端到端验证(B22)**:验证入口 `crates/beam-client/examples/input_loopback.rs`——客户端事件 → §5 输入单向流 → 主机输入泵 → 注入线程(MMCSS/Games)→ SendInput。本机实测:客户端发出 2 个事件,主机注入器统计 **submitted = 2 / injected = 2 / denied = 0**—— 真的调过 `SendInput`。判据用**注入器自己的统计**,不用光标位移:光标位移会被「用户自己在动鼠标」干扰(实测:注入器一个事件都没收到,光标却「位移 97 像素」—— 那是用户的手)。
+- **回传链路上有个真实的坑(B22)**:客户端会话**进串流后不能就不再泵**——「把采集到的事件写进输入单向流」发生在会话层的 `pump` 里。不再泵 ⇒ 事件一直堵在采集源里,直到任务结束才被取出,而那时连接正要关闭 ⇒ 数据发不出去(主机侧报「接受输入流失败 closed by peer」)。
 
 ### 3.9 beam-session
 - 职责:主/客会话状态机;串联 capture→encode→net、net→decode→render;能力协商、IDR 请求、重连、统计汇总。
