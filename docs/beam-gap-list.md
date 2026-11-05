@@ -488,6 +488,18 @@
 | Android 侧的输入采集（core-input）没接进这条管道 | 会话层已有 `InputSource` 抽象，Android 侧（Kotlin）需要把 `core-input` 的事件经 uniffi 送上来 | 需后续批次（无 Android 真机） |
 | 输入回传的「注入延迟 ≤1 ms」没单独测 | 注入器有延迟统计（mean / max / last），但本批没在整链上核对 §3.8 的 ≤1 ms 预算 | 需后续批次 |
 
+| B23 | 2026-11-05 | 第二十三批：桌面端接上客户端键鼠采集（B22 的后端变成产品功能）+ 修掉修饰键映射错 | apps/desktop（设置项 + connect 接线 + 前端开关 + 中英文案）/ crates/beam-client（采集源的就绪握手 + 选项 + 计数）/ crates/beam-input（HID↔VK 表的左右修饰键修正）/ docs（设计文档 §3.8） | 已完成 | cargo fmt --all --check exit 0；cargo clippy --workspace --all-targets -- -D warnings exit 0 / 0 warning；cargo test --workspace exit 0（48 套件 / 485 passed / 0 failed / 9 ignored）；cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings exit 0；npm --prefix apps/desktop run build exit 0（含 tsc 类型检查）；**真机实测**：`cargo run -p beam-client --example input_loopback --release` exit 0（脚本模式）；`BEAM_REAL_CAPTURE=1 cargo run -p beam-client --example input_loopback --release` exit 0（**真实低级钩子**）—— 钩子采到 2 个事件，主机注入器 **submitted = 2 / injected = 2 / denied = 0** |
+
+- **B23（主会话自办）** — 写入范围：`apps/desktop/src-tauri/src/{dto,service,service_crates}.rs`、`apps/desktop/src/{ipc/types.ts,pages/SettingsPage.tsx,i18n/*.ts}`、`crates/beam-client/src/capture.rs`、`crates/beam-client/examples/input_loopback.rs`、`crates/beam-input/src/hid.rs`、`docs/**`；覆盖条目 I-02, I-06
+
+**B23 追加项（审计中顺带发现，不在原 551 条内）**
+
+| 项 | 说明 | 归属 |
+|---|---|---|
+| 「用户点同意」那条路在当前会话即时放行还没做 | 闸门进配对模式后，未信任对端的握手会被放行但控制面要求配对 ⇒ 用户在弹窗点「同意」后，当前会话仍需**重连**一次（信任判定已是 Trusted）。要做即时放行需给会话层加「对端现在是否已被信任」的检查器 | 需后续批次 |
+| Android 侧的输入采集还没接进这条管道 | 会话层已有 `InputSource` 抽象；Android 需要把 `core-input` 的事件经 uniffi 送上来 | 需后续批次（无 Android 真机） |
+| 输入回传的「注入延迟 ≤1 ms」预算没单独核对 | 注入器有延迟统计（mean / max / last），本批没在整链上对照 §3.8 的 ≤1 ms | 需后续批次 |
+
 ### 已裁决事项
 
 | # | 议题 | 裁决 | 裁决日期 | 说明 | 解锁范围 |
@@ -558,6 +570,7 @@
 | 2026-11-04 | Windows 串流的**音频链路**第一次端到端真机跑通，并修掉了一个「跑通了但速率只有 1/3」的缺陷 | B20 接上音频后立刻暴露两个问题：① 客户端用裸 `video_stream()` 收帧，而画面重组器**不看帧头 `type`** ⇒ 音频数据报会被当成画面分片组装（负载是裸 Opus 字节）；② 主机只送出 **65 帧/秒**，而 §3.7 的音频是 5 ms 一帧（实时 200 帧/秒），采集队列一路积压到丢帧。对照实验（采集 / +Opus 编码 / +建数据报 三段各测速率）证明**处理能力有 199.7 帧/秒**，瓶颈在消费循环「一轮只取一帧」—— 速率被循环的唤醒间隔限死。改成「一轮把攒下的帧全发走」后实测 800 帧 / 4 秒 = 200 帧/秒、队列零积压。分流读点也从 `beam-client` 下沉到 `beam-net::DemuxStream`（L1）：§4 规定 L3 之间不得横向依赖，而主机侧的整链验证入口也需要同一个读点 | 真机实测：音频 **800 帧走完整链**（WASAPI loopback 采集 → Opus 编码 → QUIC datagram → 按帧头 type 分流 → Opus 解码 → WASAPI 输出），错误 0 次，解码 PCM 的 RMS = 0.084（非静音）；画面同一次运行 285 帧全部经 VideoProcessor 转换后搬进交换链、降级 0。顺带把 §3.10 的渲染预算**第一次对照实测**：解码均值 0.348 ms（预算 8 ms）、上屏均值 0.106 ms（半帧预算 8.33 ms）⇒ 均达标 |
 | 2026-11-04 | Windows 串流的**配对密码学校验**第一次真的发生（PIN → SPAKE2 → 信任库 → 串流） | B16 遗留的缺口：PIN 只到「格式校验 + 尝试预算」，**密码学验证从未真正发生** —— 主机侧没把 PIN 配进 `PairingConfig`，信任闸门又在 TLS 层就把未信任对端拒了，客户端连控制通道都到不了。B21 补了三段接线:客户端 `ClientConfig.pin` → 会话层 `PairingConfig`（配对成功才发 `Hello`）；主机信任闸门增加**配对模式**（握手放行，**控制面**把关 —— 未配对不许进串流）；配对成功后主机把对端指纹写进信任库。接线过程中还挖出一个**安全缺陷**:主机原先在「收到 SPAKE2 首条挑战」时就坐实配对并写信任库，但密码学证明在**客户端**那一步才成立 —— 输错 PIN 的客户端也会被写进信任库（实测复现：错 PIN 那一轮信任库从 0 变成了 1） | 真机实测三阶段全过:错 PIN ⇒ 被拒且**信任库保持为空**；对 PIN ⇒ 配对成功、**写进信任库**、进串流；已配对 ⇒ 不传 PIN 也**免配对**直接放行。安全缺陷已修:主机改为「记住对端指纹 → 等客户端回 `PairOk`（= 它真的过了 PIN 校验）→ 才坐实」，并补了对应的回归单测 |
 | 2026-11-05 | Windows 串流的**输入回传**第一次端到端真机跑通（客户端 → 输入流 → 主机注入 → 桌面真的动了） | 此前输入链路的协议（§5 输入单向流、`Transport::send_input`）与主机侧的注入器（`beam-input` 的 `InputInjector`：有界通道 + 专用注入线程 + MMCSS "Games"）都是真的，但**客户端侧没有采集端**，会话层也没有对外的输入发送口 ⇒ 这条链路从未被端到端验证过。B22 补了三段：会话层新增 `InputSource` 抽象（§3.8 边界在会话层的镜像）与 `ClientDeps.input` + `pump_input`；`beam-client` 新增 `WindowsInputCapture`（低级键鼠钩子 + 消息循环线程）；`beam_input::hid` 把 HID↔VK 表公开出来，让采集侧（VK→HID）与注入侧（HID→VK）**共用同一张表**。接线过程中踩到两个坑：① 客户端会话**进串流后不能再不泵** —— 「把事件写进输入单向流」发生在 `pump` 里，不再泵 ⇒ 事件堵在采集源里直到任务结束，那时连接正要关闭 ⇒ 主机报「接受输入流失败 closed by peer」；② 判据不能用光标位移 —— 这台机器上用户自己也在动鼠标（实测：注入器一个事件都没收到，光标却「位移 97 像素」） | 真机实测通过：客户端发出 2 个输入事件，主机注入器统计 **submitted = 2 / injected = 2 / denied = 0** —— 真的调过 `SendInput`，主机的桌面真的动了。设计文档 §3.8 已补上客户端采集的落地方式、键码口径只有一张表、不回采注入事件的理由，以及回传链路的那两个坑 |
+| 2026-11-05 | 客户端键鼠采集变成**桌面端里能开的开关**，并修掉 HID 表的左右修饰键映射错误 | B22 把采集后端做出来了，但没有出口 —— 桌面端没人装它。B23 加了设置项「把本机键鼠回传给主机」（**默认关**：把自己的键盘发给远端主机是敏感操作），打开时 `connect` 装上采集源并交给客户端运行时；采集装不上只影响输入回传，不影响连接。接线过程中挖出三个真问题：① `thread_local!` 写在两个不同的函数里就是**两个不同的变量** —— 钩子回调读到的那个永远是默认值，于是注入事件全被「跳过注入事件」挡掉，一个都采不到；② `start()` 在钩子装好之前就返回，调用方拿到的是「还在装」的中间状态，会误判成失败 ⇒ 改成等就绪信号；③ HID↔VK 表里**左右修饰键**映射错了（右 Ctrl/Shift/Menu 用的是左边的常量）⇒ 右侧修饰键既采不到也注不准 | 真机实测（**真实低级钩子**，不是脚本源）：注入一个测试键 ⇒ 钩子采到 2 个事件 ⇒ 主机注入器统计 **submitted = 2 / injected = 2 / denied = 0** ⇒ 「低级钩子 → 会话 → §5 输入流 → 主机 SendInput → 桌面真的动了」全链打通。设计文档 §3.8 已补上桌面端接线与这三个坑 |
 
 ---
 
