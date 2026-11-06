@@ -191,37 +191,44 @@ impl beam_session::FrameConsumer for SinkConsumer {
     }
 }
 
-/// 把**已经建好的** QUIC 连接包装成会话传输的工厂。
+/// **可重建**的会话传输工厂（§4.1「新连接/迁移」）。
 ///
-/// ## 为什么工厂里没有 `await`
+/// ## 为什么不再「连接在工厂之外先建好」
 ///
-/// 会话层的 [`beam_session::TransportFactory::connect`] 是**同步**接口，
-/// 而 `beam_net::NetEndpoint::connect`（建链）与
-/// `beam_session::NetTransport::connect`（开控制双向流 + 输入单向流）都是**异步**的。
+/// 旧的做法只能交出**同一条**连接 ⇒ 断线后的重连根本换不了连接
+/// （§4.1 的「新连接/迁移」在 Android 侧同样是残废的）。
+/// 现在工厂自己知道**怎么建**：地址、网络参数、校验器、运行时句柄。
 ///
-/// 因此**连接在工厂之外先建好**（见 [`BeamClient::connect`]），
-/// 工厂只负责把已经建好的 [`beam_net::Conn`] 包成 [`beam_session::NetTransport`]。
-///
-/// 这里的 `handle.block_on` 在**调用方线程**上驱动那个异步 future：
-/// 调用方线程此时不在 tokio runtime 内部（会话的 `connect_with` 是同步调用），
-/// QUIC 的收发由 `BeamClient` 持有的常驻 runtime 的工作线程驱动。
-struct ConnTransportFactory {
-    conn: Option<beam_net::Conn>,
+/// `start_connect()` 只**发起**建链（异步），会话层在 `pump` 里取结果。
+struct ClientTransportFactory {
+    /// 已解析的对端地址。
+    addr: std::net::SocketAddr,
+    /// 网络参数（§3.2）。
+    net_cfg: NetConfig,
+    /// 对端证书校验器（§3.3）。
+    verifier: Arc<dyn PeerVerifier>,
+    /// 建链用的运行时（§3.12「Rust tokio 运行时在 so 内」）。
     handle: tokio::runtime::Handle,
+    /// 帧通道统计句柄（跨重连复用）。
+    stats: beam_session::FrameStatsHandle,
 }
 
-impl beam_session::TransportFactory for ConnTransportFactory {
-    fn connect(&mut self) -> Result<Box<dyn beam_session::Transport>, beam_session::SessionError> {
-        let conn =
-            self.conn
-                .take()
-                .ok_or_else(|| beam_session::SessionError::MissingDependency {
-                    what: "transport".to_string(),
+impl beam_session::TransportFactory for ClientTransportFactory {
+    fn start_connect(&mut self) -> Box<dyn beam_session::PendingTransport> {
+        let addr = self.addr;
+        let net_cfg = self.net_cfg.clone();
+        let verifier = self.verifier.clone();
+        let handle = self.handle.clone();
+        let stats = self.stats.clone();
+        beam_session::spawn_transport(&handle, async move {
+            let conn = NetEndpoint::connect(addr, net_cfg, verifier)
+                .await
+                .map_err(|e| beam_session::SessionError::TransportFailed {
+                    reason: format!("QUIC 握手失败 {}: {}", e.code_str(), e.text()),
                 })?;
-        let transport = self
-            .handle
-            .block_on(beam_session::NetTransport::connect(conn))?;
-        Ok(Box::new(transport))
+            let transport = beam_session::NetTransport::connect_with_stats(conn, stats).await?;
+            Ok(Box::new(transport) as Box<dyn beam_session::Transport>)
+        })
     }
 }
 
@@ -363,19 +370,15 @@ impl BeamClient {
             trust: self.trust.clone(),
             pinned,
         });
-        // 建链是异步的（QUIC 握手必须 await），而会话的传输工厂是同步的：
-        // 因此**连接在工厂之外先建好**，工厂只负责把已经建好的连接包成传输。
-        let conn = self.runtime.block_on(async {
-            let addr = resolve_addr(&peer.host, peer.port).await?;
-            NetEndpoint::connect(addr, self.net_config(), verifier)
-                .await
-                .map_err(|e| FfiError::ConnectFailed {
-                    reason: format!("QUIC 握手失败 {}: {}", e.code_str(), e.text()),
-                })
-        })?;
-        let factory = ConnTransportFactory {
-            conn: Some(conn),
+        // 地址解析是异步的（可能是主机名）：这里只把它解析出来，
+        // 真正的建链交给工厂在后台**异步**完成（§4.1）。
+        let addr = self.runtime.block_on(resolve_addr(&peer.host, peer.port))?;
+        let factory = ClientTransportFactory {
+            addr,
+            net_cfg: self.net_config(),
+            verifier,
             handle: self.runtime.handle().clone(),
+            stats: beam_session::FrameStatsHandle::default(),
         };
         self.connect_with_transport(peer, cfg, sink, Box::new(factory))
     }
@@ -517,7 +520,9 @@ mod tests {
     use std::sync::mpsc;
 
     use beam_proto::{ControlMsg, EncodedFrame};
-    use beam_session::{ControlChannel, SessionError, Transport, TransportFactory};
+    use beam_session::{
+        ControlChannel, PendingTransport, SessionError, Transport, TransportFactory,
+    };
 
     struct NoopSink;
     impl FrameSink for NoopSink {
@@ -590,11 +595,12 @@ mod tests {
     }
 
     impl TransportFactory for FakeFactory {
-        fn connect(&mut self) -> Result<Box<dyn Transport>, SessionError> {
-            Ok(self
+        fn start_connect(&mut self) -> Box<dyn PendingTransport> {
+            let transport = self
                 .transport
                 .take()
-                .unwrap_or_else(|| Box::new(FakeTransport::new())))
+                .unwrap_or_else(|| Box::new(FakeTransport::new()));
+            Box::new(beam_session::ScriptedPending::ok(transport))
         }
     }
 

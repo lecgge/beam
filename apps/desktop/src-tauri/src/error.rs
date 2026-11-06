@@ -141,11 +141,11 @@ mod tests {
         sorted.dedup();
         assert_eq!(sorted.len(), codes.len(), "外壳错误码必须互不相同");
         for code in codes {
-            let num: u32 = code.trim_start_matches('E').parse().expect("错误码应为数字");
-            assert!(
-                (12000..13000).contains(&num),
-                "{code} 不在外壳段 E12xxx 内"
-            );
+            let num: u32 = code
+                .trim_start_matches('E')
+                .parse()
+                .expect("错误码应为数字");
+            assert!((12000..13000).contains(&num), "{code} 不在外壳段 E12xxx 内");
         }
     }
 
@@ -158,7 +158,10 @@ mod tests {
             E_SHELL_IO,
             E_PERF_UNAVAILABLE,
         ] {
-            let num: u32 = code.trim_start_matches('E').parse().expect("错误码应为数字");
+            let num: u32 = code
+                .trim_start_matches('E')
+                .parse()
+                .expect("错误码应为数字");
             assert!(
                 !(11000..12000).contains(&num),
                 "{code} 落在配置层 E11xxx 段里"

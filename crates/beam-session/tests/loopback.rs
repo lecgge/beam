@@ -29,8 +29,8 @@ use beam_proto::{ControlMsg, EncodedFrame, InputEvent, StreamConfig};
 use beam_session::{
     ClientControlDeps, ClientDeps, ClientSession, ClientSessionConfig, ControlChannel,
     FrameConsumer, FramePipeline, HostControlDeps, HostDeps, HostSession, HostSessionConfig,
-    PairingConfig, PeerAddr, SessionError, SessionEvent, SessionInput, SessionState, Transport,
-    TransportFactory, VideoSender,
+    PairingConfig, PeerAddr, PendingTransport, ScriptedPending, SessionError, SessionEvent,
+    SessionInput, SessionState, Transport, TransportFactory, VideoSender,
 };
 use bytes::Bytes;
 use futures::StreamExt;
@@ -263,12 +263,15 @@ struct FixedFactory {
 }
 
 impl TransportFactory for FixedFactory {
-    fn connect(&mut self) -> Result<Box<dyn Transport>, SessionError> {
-        self.transport
-            .take()
-            .ok_or_else(|| SessionError::MissingDependency {
+    /// 异步建链：这个夹具的连接是**现成**的，
+    /// 所以第一次问就能给出结果。
+    fn start_connect(&mut self) -> Box<dyn PendingTransport> {
+        match self.transport.take() {
+            Some(t) => Box::new(ScriptedPending::ok(t)),
+            None => Box::new(ScriptedPending::err(SessionError::MissingDependency {
                 what: "transport".to_string(),
-            })
+            })),
+        }
     }
 }
 

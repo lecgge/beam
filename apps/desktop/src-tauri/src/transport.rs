@@ -61,7 +61,7 @@ pub struct ListenRequest {
 }
 
 /// 由解析后的配置组装网络参数(§3.14 → §3.2)。
-fn net_config(resolved: &ResolvedConfig, identity: &Identity) -> NetConfig {
+pub(crate) fn net_config(resolved: &ResolvedConfig, identity: &Identity) -> NetConfig {
     NetConfig {
         fec_ratio: resolved.network.fec_ratio,
         max_datagram: resolved.network.max_datagram,

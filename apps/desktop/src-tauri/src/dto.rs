@@ -386,3 +386,13 @@ pub struct PerfExportResult {
     pub bytes: u64,
     pub rows: u32,
 }
+
+/// §3.11 `session://waiting-approval` 的载荷(§3.3)。
+///
+/// 客户端等待主机人工确认配对时发出：会话**还活着**，
+/// 只是还没拿到主机的「同意」。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WaitingApprovalInfo {
+    /// 会话 id。
+    pub session_id: String,
+}

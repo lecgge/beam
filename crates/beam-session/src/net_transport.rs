@@ -132,9 +132,12 @@ pub struct FrameChannelStats {
 ///
 /// 会话层把传输装箱成 `dyn Transport` 后上层拿不到具体类型，
 /// 上层（如桌面端）持有本句柄即可读到 E2004 计数。
+///
+/// 它是**可复用**的：重建连接（§4.1「新连接/迁移」）时新传输
+/// 复用同一个句柄，上层的统计句柄不会因重连而失效。
 #[derive(Debug, Clone, Default)]
 pub struct FrameStatsHandle {
-    inner: Arc<Mutex<FrameChannelStats>>,
+    pub(crate) inner: Arc<Mutex<FrameChannelStats>>,
 }
 
 impl FrameStatsHandle {
@@ -184,6 +187,17 @@ impl std::fmt::Debug for NetTransport {
 impl NetTransport {
     /// 客户端侧：打开控制双向流（§5 控制 stream 0）与输入单向流（§5 输入 stream）。
     pub async fn connect(conn: beam_net::Conn) -> Result<Self, SessionError> {
+        Self::connect_with_stats(conn, FrameStatsHandle::default()).await
+    }
+
+    /// 客户端侧：打开控制流与输入流，**复用**给定的帧统计句柄。
+    ///
+    /// 为什么要复用：重建连接（§4.1「新连接/迁移」）会换一条
+    /// 新的 `NetTransport`，若每条都自己新建统计，上层手里的句柄就会失效。
+    pub async fn connect_with_stats(
+        conn: beam_net::Conn,
+        stats: FrameStatsHandle,
+    ) -> Result<Self, SessionError> {
         let (send, recv) = conn
             .open_bi()
             .await
@@ -207,7 +221,7 @@ impl NetTransport {
             input: Some(Box::new(input)),
             input_out: OutBuf::default(),
             video,
-            stats: Arc::new(Mutex::new(FrameChannelStats::default())),
+            stats: Arc::clone(&stats.inner),
             init_error: None,
         })
     }

@@ -39,6 +39,12 @@ pub struct TransportOutcome {
     pub host_name: String,
 }
 
+/// §3.3「还没配对好」的码（会话层 `beam_session::PAIRING_PENDING_CODE`）。
+///
+/// 事件层不依赖 `beam-session`（关掉 `beam-crates` feature 也要能编译），
+/// 所以这里留一份；`service_crates.rs` 里有编译期断言保证两者一致。
+pub const PAIRING_PENDING_CODE: u16 = 3008;
+
 /// 真实客户端会话产生的事件(§3.9)。
 ///
 /// `crates/` 适配器把 `beam-session` 的事件翻译成这一层,
@@ -56,6 +62,11 @@ pub enum SessionEventInfo {
         /// 协商出的编码格式。
         codec: String,
     },
+    /// 等待主机人工确认配对(§3.3)。
+    ///
+    /// 客户端收到「还没配对好」（E3008）时会持续重试；
+    /// 这个事件只用来提醒用户「在主机上点同意」，**不**等于断开。
+    WaitingApproval,
     /// 配对完成(§3.3)。
     Paired {
         /// 对端证书指纹。
@@ -420,13 +431,9 @@ impl BeamService for LocalService {
         }
         // §3.3:PIN 准入(格式校验 + 尝试预算)。未信任的主机必须给 PIN。
         let now = Instant::now();
-        if let Err(err) = crate::pin::check_connect_pin(
-            &inner.pin_budget,
-            host_id,
-            host.trusted,
-            pin,
-            now,
-        ) {
+        if let Err(err) =
+            crate::pin::check_connect_pin(&inner.pin_budget, host_id, host.trusted, pin, now)
+        {
             // 格式错误算一次尝试(§3.3 `max_attempts=3`),锁定则如实报 E3002。
             if err.code == E_PIN_INVALID {
                 if let Err(locked) = inner.pin_budget.record_failure(host_id, now) {

@@ -276,12 +276,20 @@ impl HostRunner {
 
     /// 把处理结果落到状态机上。
     fn apply_outcome(&mut self, outcome: ControlOutcome) {
+        // 先把回复发出去：「配对待确认」的答案**就在回复里**（E3008），
+        // 若先判错误再 return，回复就被丢掉了 —— 客户端会等到天地而不知道该等。
+        for reply in outcome.replies {
+            self.send_control(reply);
+        }
+        if outcome.pairing_pending {
+            // §3.3：对端还没配对好 → 主机**不能死**：
+            // 用户点「同意」之后客户端会重建连接再来（§4.1）。
+            tracing::info!("对端尚未完成配对,等待用户在主机上确认");
+            return;
+        }
         if let Some(err) = outcome.error {
             self.fail(&err);
             return;
-        }
-        for reply in outcome.replies {
-            self.send_control(reply);
         }
         if let Some(agreed) = outcome.negotiated {
             // 主机按**协商结果**出流：分辨率 / 帧率取双方交集（§3.1），

@@ -268,10 +268,80 @@ pub trait Transport: ControlChannel {
     }
 }
 
+/// 一次**异步**建链的句柄（§4.1「新连接/迁移」）。
+///
+/// ## 为什么需要它
+///
+/// 会话层是**同步**的（`pump()` 由调用方在自己的任务里推进），
+/// 而建 QUIC 连接是**异步**的（`quinn` 的握手必须 `await`）。
+///
+/// 旧的同步接口 `connect() -> Result<Box<dyn Transport>>` 只能靠 `block_on` 等：
+/// 在 tokio 工作线程上它会**卡住运行时**（QUIC 的 IO 驱动就在同一个
+/// 运行时里，而驱动它的工作线程正被 `block_on` 占着）——
+/// 这正是 §4.1 的「新连接/迁移」重连在真实链路上**残废**的原因：
+/// 状态机跑得再对，也换不出一条新连接。
+///
+/// 因此工厂只**发起**建链（**不阻塞**），会话层用
+/// [`PendingTransport::poll_result`] **非阻塞**地问结果：
+/// 还没建好就返回 `None`，建好了就把传输交出来。
+pub trait PendingTransport: Send {
+    /// 非阻塞地问一次：连接建好了吗？
+    ///
+    /// - `None`：还在建（会话层继续做别的事，下一拍再问）；
+    /// - `Some(Ok(t))`：建好了，`t` 就是这条连接；
+    /// - `Some(Err(e))`：建链失败（会话层据此重试或报错）。
+    fn poll_result(&mut self) -> Option<Result<Box<dyn Transport>, SessionError>>;
+}
+
+/// 「立刻就有结果」的建链句柄。
+///
+/// 包住**已经知道**的结果：首次问就把结果交出来。
+///
+/// 用途：测试夹具、上层已经握在手里的连接。
+pub struct ScriptedPending {
+    result: Option<Result<Box<dyn Transport>, SessionError>>,
+}
+
+impl std::fmt::Debug for ScriptedPending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScriptedPending")
+            .field("has_result", &self.result.is_some())
+            .finish()
+    }
+}
+
+impl ScriptedPending {
+    /// 建链已成功（传输已经在手里）。
+    pub fn ok(transport: Box<dyn Transport>) -> Self {
+        Self {
+            result: Some(Ok(transport)),
+        }
+    }
+
+    /// 建链当场失败。
+    pub fn err(err: SessionError) -> Self {
+        Self {
+            result: Some(Err(err)),
+        }
+    }
+}
+
+impl PendingTransport for ScriptedPending {
+    fn poll_result(&mut self) -> Option<Result<Box<dyn Transport>, SessionError>> {
+        self.result.take()
+    }
+}
+
 /// 传输工厂（由 host / client 层注入 beam-net 的连接逻辑）。
+///
+/// ## 契约：**只发起，不阻塞**
+///
+/// `start_connect()` 必须**立刻返回**：建链在后台（tokio 运行时里）进行，
+/// 会话层在 [`crate::handle::SessionHandle::pump`] 里用
+/// [`PendingTransport::poll_result`] 取结果。
 pub trait TransportFactory: Send {
-    /// 建立传输。
-    fn connect(&mut self) -> Result<Box<dyn Transport>, SessionError>;
+    /// 发起一次**异步**建链（**绝不阻塞**）。
+    fn start_connect(&mut self) -> Box<dyn PendingTransport>;
 }
 
 #[cfg(test)]

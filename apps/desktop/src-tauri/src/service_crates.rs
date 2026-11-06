@@ -26,9 +26,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use beam_client::{
-    ClientConfig, ClientRuntime, FrameStatsHandle, NetTransport, ReadyTransportFactory,
-};
+use beam_client::{ClientConfig, ClientRuntime, FrameStatsHandle};
 use beam_config::{
     default_config_path, default_trust_path, load_file_layer, merge, save_file_layer, validate,
     AudioMode, ConfigLayers, ResolvedConfig, TomlFileStore,
@@ -40,10 +38,15 @@ use beam_pair::{
     PeerPerms, PeerVerifier, TrustStore, TrustedPeer,
 };
 use beam_proto::CodecKind;
-use beam_session::{PeerAddr, SessionEvent, SessionHandle, SessionState, StateMachine, Transport};
+use beam_session::{PeerAddr, SessionEvent, SessionHandle, SessionState, StateMachine};
 use futures::{FutureExt, StreamExt};
 use serde::{Deserialize, Serialize};
 
+/// §3.3：桌面端留了一份「还没配对好」的码（事件层不依赖 `beam-session`）。
+///
+/// 这里用**编译期断言**保证它与会话层的真值一致 —— 改了一边忘了另一边，
+/// 编译就过不去。
+const _: () = assert!(beam_session::PAIRING_PENDING_CODE == crate::service::PAIRING_PENDING_CODE);
 use crate::dto::*;
 use crate::error::*;
 use crate::service::{BeamService, SessionEventInfo, TransportOutcome};
@@ -193,6 +196,11 @@ struct CrateInner {
     ///
     /// 「取走即清空」的语义靠它实现：重连期间不重复报，离开重连态后重新武装。
     reconnect_notice_sent: bool,
+    /// §3.11 `session://waiting-approval` 是否已经报过（只报一次）。
+    ///
+    /// 客户端在等主机点「同意」时会**每秒重试一次**（§4.1），
+    /// 不去重的话提示会刷屏。
+    waiting_approval_notice: bool,
     /// PIN 尝试预算(§3.3 `max_attempts=3`):按主机 id 记账。
     pin_budget: crate::pin::AttemptBudget,
 }
@@ -317,6 +325,7 @@ impl CrateService {
                 host_gate: None,
                 host_session: None,
                 reconnect_notice_sent: false,
+                waiting_approval_notice: false,
                 pin_budget: crate::pin::AttemptBudget::new(),
             })),
             discovery,
@@ -669,13 +678,9 @@ impl BeamService for CrateService {
         // 已在信任库里的主机(有完整指纹)不需要再输 PIN。
         let trusted = trusted_fingerprint.is_some();
         let now = Instant::now();
-        if let Err(err) = crate::pin::check_connect_pin(
-            &inner.pin_budget,
-            host_id,
-            trusted,
-            pin,
-            now,
-        ) {
+        if let Err(err) =
+            crate::pin::check_connect_pin(&inner.pin_budget, host_id, trusted, pin, now)
+        {
             // 格式错误算一次尝试(§3.3 `max_attempts=3`),锁定则如实报 E3002。
             if err.code == E_PIN_INVALID {
                 if let Err(locked) = inner.pin_budget.record_failure(host_id, now) {
@@ -1199,7 +1204,7 @@ impl BeamService for CrateService {
     }
 
     fn take_session_events(&self) -> Vec<SessionEventInfo> {
-        let events: Vec<SessionEventInfo> = self
+        let mut events: Vec<SessionEventInfo> = self
             .session_events
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1211,6 +1216,8 @@ impl BeamService for CrateService {
         // 会话状态同步到桌面端状态机(§3.9)。
         {
             let mut inner = self.lock();
+            // 「等待主机确认」只提示一次（客户端每秒重试一次,不能每次都弹）。
+            let mut waiting_notice = false;
             for event in &events {
                 match event {
                     SessionEventInfo::Negotiated {
@@ -1227,17 +1234,33 @@ impl BeamService for CrateService {
                             session.codec = codec.clone();
                         }
                     }
+                    // §3.3「还没配对好」（E3008）：**不是**错误 ——
+                    // 用户在主机那边点「同意」之前，客户端会一直重试（§4.1）。
+                    // 这里把它写成「等待确认」，**不**把会话判死。
+                    SessionEventInfo::Error { code, .. }
+                        if *code == crate::service::PAIRING_PENDING_CODE =>
+                    {
+                        if let Some(session) = inner.session.as_mut() {
+                            session.state = "waiting_approval".to_string();
+                        }
+                        waiting_notice = true;
+                    }
                     SessionEventInfo::Error { .. } | SessionEventInfo::Closed => {
                         let _ = inner.state.transition(SessionState::Error);
                         if let Some(session) = inner.session.as_mut() {
                             session.state = "error".to_string();
                         }
                     }
+                    SessionEventInfo::WaitingApproval => {}
                     SessionEventInfo::Paired { .. } | SessionEventInfo::Stats { .. } => {}
                 }
             }
             inner.host.revision += 1;
             inner.host.updated_at_ms = now_ms();
+            if waiting_notice && !inner.waiting_approval_notice {
+                inner.waiting_approval_notice = true;
+                events.push(SessionEventInfo::WaitingApproval);
+            }
         }
         events
     }
@@ -1308,40 +1331,17 @@ impl CrateService {
             // §3.3：本机指纹（放进挑战载荷，让主机知道客户端是谁）。
             // 先取出来 —— `identity` 下面要移交给连接请求。
             let client_fingerprint = identity.fingerprint();
-            let request = crate::transport::TransportRequest {
-                addr,
-                resolved: resolved.clone(),
-                identity,
-                trust,
-            };
-            let conn = match crate::transport::connect_peer(request).await {
-                Ok(conn) => conn,
-                Err(err) => {
-                    report_transport_failure(&inner, &outcome_slot, &err, &host_name);
-                    return;
-                }
-            };
-
-            // §5 客户端传输:开控制双向流 + 输入单向流。
-            let transport = match NetTransport::connect(conn.clone()).await {
-                Ok(t) => t,
-                Err(e) => {
-                    // 透传会话层的真实码(`SessionError::TransportFailed` = E9005),
-                    // 不要一律记成连接超时(E2001):两者对用户的建议动作不同。
-                    let err = BeamError::new(
-                        &e.code_str(),
-                        format!("建立会话失败 {}: {e}", e.code_str()),
-                        e.retryable(),
-                    );
-                    report_transport_failure(&inner, &outcome_slot, &err, &host_name);
-                    return;
-                }
-            };
-            // 帧通道统计句柄:上层据此知道有多少帧被丢弃(E2004)。
-            let frame_stats = transport.frame_stats_handle();
-            // §3.7 音频:数据报读点按帧头 `type` 分流 —— 音频走「Opus 解码 +
-            // WASAPI 输出」,画面走画面重组器。**用 beam-client 的分流传输器**,
-            // 桌面端不需要直接依赖 beam-audio(§4 分层)。
+            // §4.1「新连接/迁移」：把**可重建**的传输工厂交给会话层。
+            //
+            // 旧做法是「连接在工厂之外先建好」+ 一次性工厂 ⇒ 断线后换不了连接，
+            // 「用户在主机上点同意后自动连上」在产品里也就不会发生。
+            // 现在工厂自己知道**怎么建**连接：地址、网络参数、校验器、运行时。
+            let net_cfg = crate::transport::net_config(&resolved, &identity);
+            // §3.3：证书校验交给信任库（网络层不理解配对语义）。
+            let verifier: Arc<dyn beam_pair::PeerVerifier> = Arc::new(trust);
+            // §3.7 音频：数据报读点按帧头 `type` 分流 —— 音频走「Opus 解码 +
+            // WASAPI 输出」，画面走画面重组器。**用 beam-client 的分流传输器**，
+            // 桌面端不需要直接依赖 beam-audio（§4 分层）。
             let audio_cfg = beam_client::AudioConfig {
                 mode: match resolved.audio.mode {
                     beam_config::AudioMode::HostAndStream => beam_client::AudioMode::HostAndStream,
@@ -1352,18 +1352,12 @@ impl CrateService {
                 sample_rate: beam_client::AudioConfig::default().sample_rate,
                 channels: beam_client::AudioConfig::default().channels,
             };
-            let audio_stats = beam_client::AudioReceiveStatsHandle::default();
-            let audio_sink = beam_client::default_audio_sink(audio_cfg);
-            if audio_sink.is_none() {
-                tracing::info!("音频通路不可用(无输出设备或 Opus 后端未启用),本次会话只走画面");
-            }
-            let demux = beam_client::DemuxTransport::new(
-                transport,
-                conn.clone(),
-                audio_sink,
-                Some(audio_stats),
-            );
-            let factory = ReadyTransportFactory::new(Box::new(demux) as Box<dyn Transport>);
+            let factory =
+                beam_client::DemuxTransportFactory::with_audio(addr, net_cfg, verifier, audio_cfg)
+                    // 建链在**当前运行时**里异步进行（§4.1）：会话层只发起、不阻塞。
+                    .with_runtime(tokio::runtime::Handle::current());
+            // 帧通道统计句柄：上层据此知道有多少帧被丢弃（E2004）；跨重连有效。
+            let frame_stats = factory.frame_stats_handle();
 
             let runtime = ClientRuntime::new({
                 // §3.3：把用户输入的 PIN 与**本机**指纹交给客户端运行时 ——
@@ -1454,11 +1448,43 @@ impl CrateService {
             loop {
                 let _ = handle.pump();
                 while let Some(Some(event)) = events.next().now_or_never() {
-                    if let Some(info) = translate_session_event(event) {
-                        events_slot
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .push(info);
+                    match event {
+                        // §3.3「还没配对好」（E3008）**不是断开**：
+                        // 用户在主机那边点「同意」之前，客户端会按 §4.1 持续重试。
+                        // 事件层看到这个码不会发「断开」（只记日志）。
+                        SessionEvent::Error { code, retryable }
+                            if code == crate::service::PAIRING_PENDING_CODE =>
+                        {
+                            events_slot
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .push(SessionEventInfo::Error { code, retryable });
+                        }
+                        // 致命错误:交给「传输结果」通道上报（事件层只发一次断开事件）。
+                        SessionEvent::Error { code, .. } => {
+                            *outcome_slot.lock().unwrap_or_else(|e| e.into_inner()) =
+                                Some(TransportOutcome {
+                                    ok: false,
+                                    code: Some(format!("E{code}")),
+                                    message: format!("客户端会话出错(E{code})"),
+                                    host_name: host_name.clone(),
+                                });
+                            {
+                                let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
+                                let _ = guard.state.transition(SessionState::Error);
+                                if let Some(session) = guard.session.as_mut() {
+                                    session.state = "error".to_string();
+                                }
+                            }
+                        }
+                        other => {
+                            if let Some(info) = translate_session_event(other) {
+                                events_slot
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .push(info);
+                            }
+                        }
                     }
                 }
                 if handle.is_stopped() {
@@ -1558,12 +1584,8 @@ impl CrateService {
                                 Some(g.identity.fingerprint()),
                             )
                         };
-                        let pairing = beam_host::HostPairing::for_verdict(
-                            verdict,
-                            pin,
-                            token,
-                            host_fp,
-                        );
+                        let pairing =
+                            beam_host::HostPairing::for_verdict(verdict, pin, token, host_fp);
                         tracing::info!(
                             require_pairing = pairing.require_pairing,
                             "客户端已通过信任校验,建立主机会话"

@@ -9,6 +9,7 @@
 //! | `session://stats` | [`SessionStats`] | 500 ms |
 //! | `session://reconnecting` | [`ReconnectingInfo`] | 进入重连时 |
 //! | `session://disconnected` | [`DisconnectedInfo`] | 会话结束时 |
+//! | `session://waiting-approval` | [`WaitingApprovalInfo`] | 等待主机确认配对时(§3.3) |
 //! | `perf://tick` | [`PerfTick`] | 250 ms,仅 Debug(§3.13) |
 
 use std::sync::Arc;
@@ -17,7 +18,7 @@ use std::time::Duration;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
-use crate::dto::DisconnectedInfo;
+use crate::dto::{DisconnectedInfo, WaitingApprovalInfo};
 use crate::service::{BeamService, SessionEventInfo};
 
 // ---- 事件名常量 ----
@@ -28,6 +29,8 @@ pub const DISCOVERY_UPDATED: &str = "discovery://updated";
 pub const SESSION_STATS: &str = "session://stats";
 pub const SESSION_RECONNECTING: &str = "session://reconnecting";
 pub const SESSION_DISCONNECTED: &str = "session://disconnected";
+/// §3.11 新增：等待主机人工确认配对(§3.3)。
+pub const SESSION_WAITING_APPROVAL: &str = "session://waiting-approval";
 pub const PERF_TICK: &str = "perf://tick";
 
 /// §3.11:`session://stats` 500 ms 一拍。
@@ -84,6 +87,14 @@ pub fn start_background_timers(app: AppHandle, service: Arc<dyn BeamService>) {
                             emit(&app, HOST_STATE_CHANGED, service.host_status());
                         }
                         SessionEventInfo::Error { code, retryable } => {
+                            // §3.3「还没配对好」（E3008）**不是断开**：
+                            // 用户在主机上点「同意」之前，客户端会按 §4.1 持续重试。
+                            // 若这里也发 `session://disconnected`，前端会把会话卡片关掉 ——
+                            // 用户就看不到「同意后自动连上」了。
+                            if code == crate::service::PAIRING_PENDING_CODE {
+                                tracing::info!("等待主机确认配对中,客户端会自动重试");
+                                continue;
+                            }
                             let session_id =
                                 service.session().map(|s| s.session_id).unwrap_or_default();
                             emit(
@@ -100,6 +111,15 @@ pub fn start_background_timers(app: AppHandle, service: Arc<dyn BeamService>) {
                             } else {
                                 tracing::error!(code, "客户端会话出错");
                             }
+                        }
+                        SessionEventInfo::WaitingApproval => {
+                            let session_id =
+                                service.session().map(|s| s.session_id).unwrap_or_default();
+                            emit(
+                                &app,
+                                SESSION_WAITING_APPROVAL,
+                                WaitingApprovalInfo { session_id },
+                            );
                         }
                         SessionEventInfo::Closed => {
                             let session_id =

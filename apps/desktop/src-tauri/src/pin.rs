@@ -157,7 +157,10 @@ mod tests {
         assert!(validate_format("123").is_err());
         assert!(validate_format("12345").is_err());
         assert!(validate_format("12a4").is_err());
-        assert!(validate_format("１２３４").is_err(), "全角数字不算 ASCII 数字");
+        assert!(
+            validate_format("１２３４").is_err(),
+            "全角数字不算 ASCII 数字"
+        );
     }
 
     #[test]
@@ -168,7 +171,9 @@ mod tests {
         assert!(budget.record_failure("h1", now).is_ok());
         assert!(budget.record_failure("h1", now).is_ok());
         assert_eq!(budget.remaining("h1"), 1);
-        let err = budget.record_failure("h1", now).expect_err("第三次必须锁定");
+        let err = budget
+            .record_failure("h1", now)
+            .expect_err("第三次必须锁定");
         assert!(err.contains("锁定"));
         assert!(budget.is_locked("h1", now));
         assert!(budget.check("h1", now).is_err());

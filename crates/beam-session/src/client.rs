@@ -50,8 +50,8 @@ use crate::control::{
 };
 use crate::error::SessionError;
 use crate::event::{
-    FrameConsumer, InputSource, RateControl, ReconnectingInfo, SessionEvent, SessionInput,
-    Transport, TransportFactory,
+    FrameConsumer, InputSource, PendingTransport, RateControl, ReconnectingInfo, SessionEvent,
+    SessionInput, Transport, TransportFactory,
 };
 use crate::handle::{SessionHandle, SessionInner, SessionRunner, SessionTimeouts};
 use crate::state::{SessionState, StateMachine};
@@ -172,6 +172,11 @@ pub(crate) struct ClientRunner {
     ///
     /// 没有工厂就重建不出传输——此时只能等 `reconnect_timeout` 超时回到列表。
     factory: Option<Box<dyn TransportFactory>>,
+    /// 正在进行的**异步**建链（§4.1「新连接/迁移」）。
+    ///
+    /// 建链在后台进行，会话层在 `pump` 里**非阻塞**地问结果；
+    /// `None` = 当前没有在建链。
+    pending: Option<PendingConnect>,
     inner: Weak<SessionInner>,
     ctrl: ControlContext,
     /// 会话号（§5 `Resume{session_id}`）。
@@ -214,6 +219,25 @@ pub(crate) struct ClientRunner {
     frames_received: u64,
     /// 累计丢帧数。
     dropped_total: u64,
+}
+
+/// 一次异步建链的用途：连接建好后该做什么。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingKind {
+    /// 首次连接（§4.1 `Idle → Connecting → Negotiating`）。
+    Initial,
+    /// 断线重连（§4.1「新连接/迁移 + Resume{session_id}」）。
+    Reconnect,
+    /// 等主机人工确认后重新发起配对（§3.3 / E3006）。
+    Pairing,
+}
+
+/// 一次进行中的异步建链。
+struct PendingConnect {
+    /// 建链的用途。
+    kind: PendingKind,
+    /// 建链句柄（**非阻塞**地问结果）。
+    handle: Box<dyn PendingTransport>,
 }
 
 impl ClientRunner {
@@ -328,6 +352,95 @@ impl ClientRunner {
         }
     }
 
+    /// 取回异步建链的结果（**非阻塞**）。
+    ///
+    /// 会话层是同步的：每次 `pump` 问一次「连接好了吗」。
+    /// 还没好就什么都不做（连接在后台继续建），好了就装上并推进。
+    fn poll_pending_connect(&mut self) {
+        let Some(pending) = self.pending.as_mut() else {
+            return;
+        };
+        let Some(result) = pending.handle.poll_result() else {
+            // 还在建：这一拍先做别的事。
+            return;
+        };
+        let kind = pending.kind;
+        self.pending = None;
+        match result {
+            Ok(transport) => {
+                self.transport = Some(transport);
+                match kind {
+                    PendingKind::Initial => self.on_transport_ready(),
+                    PendingKind::Reconnect => self.on_reconnect_ready(),
+                    PendingKind::Pairing => self.on_pairing_retry_ready(),
+                }
+            }
+            Err(e) => self.on_connect_failed(kind, e),
+        }
+    }
+
+    /// 首次连接建好：进入协商（§4.1 时序）。
+    fn on_transport_ready(&mut self) {
+        // §4.1：连接建立后先配对、再 `Hello` → 能力协商。
+        self.start_handshake();
+        let _ = self.goto(SessionState::Negotiating);
+    }
+
+    /// 重连建好：重新协商 + `Resume`（§4.1「新连接/迁移」）。
+    fn on_reconnect_ready(&mut self) {
+        self.reconnect_attempts += 1;
+        self.last_rebuild_ms = self.now_ms();
+        // 新的一轮串流：首帧策略重新生效（§4.1「首帧 IDR」）。
+        self.first_frame_seen = false;
+        self.idr_requested = false;
+        // 新连接上重新做一次能力协商（`Hello` → `HelloAck`）。
+        self.hello_sent = false;
+        self.send_hello();
+        // §4.1：`Resume{session_id}` 让主机恢复同一个会话（不重新配对）。
+        if let Err(e) = self.try_send_control(ControlMsg::Resume {
+            session_id: self.session_id,
+        }) {
+            tracing::warn!(reason = %e, "发送 Resume 失败");
+            return;
+        }
+        tracing::info!(
+            session_id = self.session_id,
+            attempts = self.reconnect_attempts,
+            "已重建传输并请求恢复会话"
+        );
+    }
+
+    /// 等确认时重建连接成功：重新发起配对（§3.3）。
+    fn on_pairing_retry_ready(&mut self) {
+        self.reconnect_attempts += 1;
+        self.last_rebuild_ms = self.now_ms();
+        // 重新发起配对（上一次的 SPAKE2 状态已被消费）。
+        self.ctrl.reset_pairing();
+        self.hello_sent = false;
+        self.handshake_started = false;
+        self.start_handshake();
+        tracing::info!("等主机人工确认中,已重新发起配对");
+    }
+
+    /// 建链失败：按用途分别处理。
+    fn on_connect_failed(&mut self, kind: PendingKind, err: SessionError) {
+        match kind {
+            PendingKind::Initial => {
+                // 首连就失败：会话没意义了，进错误态（§3.9）。
+                tracing::warn!(reason = %err, "首次建链失败");
+                self.fail(&err);
+            }
+            PendingKind::Reconnect => {
+                // 重建失败不判死：等下一次重试（§4.1「30 s 内自动重连」）。
+                tracing::warn!(session_id = self.session_id, reason = %err, "重建传输失败,稍后重试");
+            }
+            PendingKind::Pairing => {
+                // 等确认时建链失败：继续等（主机可能还没上线）。
+                tracing::debug!(reason = %err, "等确认时建链失败,继续等待");
+            }
+        }
+    }
+
     /// 转到 `Streaming`；已经在串流态时**不重复转移**。
     ///
     /// §3.9 的转移表里没有 `Streaming → Streaming`，
@@ -395,34 +508,14 @@ impl ClientRunner {
             // 没有工厂就重建不出传输：只能等重连超时。
             return;
         };
-        match factory.connect() {
-            Ok(transport) => {
-                self.transport = Some(transport);
-                self.reconnect_attempts += 1;
-                self.last_rebuild_ms = now;
-                // 新的一轮串流：首帧策略重新生效（§4.1「首帧 IDR」）。
-                self.first_frame_seen = false;
-                self.idr_requested = false;
-                // 新连接上重新做一次能力协商（`Hello` → `HelloAck`）。
-                self.hello_sent = false;
-                self.send_hello();
-                // §4.1：`Resume{session_id}` 让主机恢复同一个会话（不重新配对）。
-                if let Err(e) = self.try_send_control(ControlMsg::Resume {
-                    session_id: self.session_id,
-                }) {
-                    tracing::warn!(reason = %e, "发送 Resume 失败");
-                    return;
-                }
-                tracing::info!(
-                    session_id = self.session_id,
-                    attempts = self.reconnect_attempts,
-                    "已重建传输并请求恢复会话"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(session_id = self.session_id, reason = %e, "重建传输失败,稍后重试");
-            }
-        }
+        // §4.1「新连接/迁移」：**异步**建一条新连接（不阻塞会话）。
+        self.pending = Some(PendingConnect {
+            kind: PendingKind::Reconnect,
+            handle: factory.start_connect(),
+        });
+        tracing::info!(session_id = self.session_id, "已发起重连建链");
+        // 工厂可能是「立刻就好」的（例如测试夹具）：当场取回。
+        self.poll_pending_connect();
     }
 
     /// 收到任何数据（帧或控制消息）时调用：刷新时间戳、必要时从重连恢复。
@@ -492,22 +585,13 @@ impl ClientRunner {
         let Some(factory) = self.factory.as_mut() else {
             return;
         };
-        match factory.connect() {
-            Ok(transport) => {
-                self.transport = Some(transport);
-                self.reconnect_attempts += 1;
-                self.last_rebuild_ms = now;
-                // 重新发起配对（上一次的 SPAKE2 状态已被消费）。
-                self.ctrl.reset_pairing();
-                self.hello_sent = false;
-                self.handshake_started = false;
-                self.start_handshake();
-                tracing::info!("等主机人工确认中,已重新发起配对");
-            }
-            Err(e) => {
-                tracing::debug!(reason = %e, "等确认时重建连接失败,继续等待");
-            }
-        }
+        // **异步**重建连接：用户点「同意」后，下一次握手就是已信任的。
+        self.pending = Some(PendingConnect {
+            kind: PendingKind::Pairing,
+            handle: factory.start_connect(),
+        });
+        // 工厂可能是「立刻就好」的：当场取回。
+        self.poll_pending_connect();
     }
 
     /// 发 `Hello{ver,caps}`（§5）。
@@ -574,6 +658,10 @@ impl ClientRunner {
 
     /// 把处理结果落到状态机上。
     fn apply_outcome(&mut self, outcome: ControlOutcome) {
+        // 先把回复发出去：回复本身就是答案，不能因为早退而丢掉。
+        for reply in outcome.replies {
+            self.send_control(reply);
+        }
         if outcome.pairing_pending {
             // 主机还没得到人工确认（客户端输入的 PIN 本身可能对，
             // 但主机屋里的用户还没点「同意」）。
@@ -588,9 +676,6 @@ impl ClientRunner {
         if let Some(err) = outcome.error {
             self.fail(&err);
             return;
-        }
-        for reply in outcome.replies {
-            self.send_control(reply);
         }
         if let Some(agreed) = outcome.negotiated {
             let config = config_from_agreed(&agreed, &self.config());
@@ -844,8 +929,7 @@ impl SessionRunner for ClientRunner {
             }
             SessionInput::Connected => {
                 // §4.1：连接建立后先配对、再 `Hello` → 能力协商。
-                self.start_handshake();
-                let _ = self.goto(SessionState::Negotiating);
+                self.on_transport_ready();
             }
             SessionInput::Negotiated(config) => {
                 if self.goto(SessionState::Streaming).is_ok() {
@@ -879,6 +963,8 @@ impl SessionRunner for ClientRunner {
     }
 
     fn pump(&mut self) {
+        // 先把后台建链的结果取回来（§4.1）。
+        self.poll_pending_connect();
         if self.pairing_pending {
             self.retry_pairing();
         }
@@ -1005,10 +1091,20 @@ impl ClientSession {
         let mut factory = deps.transport.or(cfg.transport);
         let mut transport = None;
         let mut transport_error = None;
+        // 首次建链也是**异步**的（§4.1）：工厂只发起，不阻塞。
+        let mut pending: Option<PendingConnect> = None;
         if let Some(f) = factory.as_mut() {
-            match f.connect() {
-                Ok(t) => transport = Some(t),
-                Err(e) => transport_error = Some(e),
+            let mut handle = f.start_connect();
+            match handle.poll_result() {
+                Some(Ok(t)) => transport = Some(t),
+                Some(Err(e)) => transport_error = Some(e),
+                // 还在建：会话进 `Connecting`，等 `pump` 把连接取回来。
+                None => {
+                    pending = Some(PendingConnect {
+                        kind: PendingKind::Initial,
+                        handle,
+                    })
+                }
             }
         }
 
@@ -1021,6 +1117,8 @@ impl ClientSession {
         );
         let now = handle.now_ms();
         let connected = transport.is_some();
+        // 首次建链是不是还在进行中（异步工厂）：决定会话要不要先进 `Connecting`。
+        let connecting_async = pending.is_some();
         let runner = ClientRunner {
             machine: StateMachine::new(),
             peer,
@@ -1028,6 +1126,7 @@ impl ClientSession {
             input: deps.input,
             transport,
             factory,
+            pending,
             inner: Arc::downgrade(handle.inner()),
             ctrl,
             session_id: next_session_id(),
@@ -1059,6 +1158,10 @@ impl ClientSession {
             if handle.state() == SessionState::Connecting {
                 let _ = handle.apply(SessionInput::Connected);
             }
+        } else if connecting_async {
+            // 异步建链中：先进入 `Connecting`，
+            // 连接建好后由 `pump` 推进到 `Negotiating`（§4.1 时序）。
+            let _ = handle.apply(SessionInput::Connecting);
         } else {
             // 没有传输就无从连接：明确报 `E9002`，而不是静默停在 Idle。
             let err = transport_error.unwrap_or(SessionError::MissingDependency {
@@ -1144,11 +1247,12 @@ mod tests {
     }
 
     impl TransportFactory for FakeFactory {
-        fn connect(&mut self) -> Result<Box<dyn Transport>, SessionError> {
-            Ok(self
+        fn start_connect(&mut self) -> Box<dyn crate::event::PendingTransport> {
+            let transport = self
                 .transport
                 .take()
-                .unwrap_or_else(|| Box::new(FakeTransport::new())))
+                .unwrap_or_else(|| Box::new(FakeTransport::new()));
+            Box::new(crate::event::ScriptedPending::ok(transport))
         }
     }
 

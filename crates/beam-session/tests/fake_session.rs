@@ -23,8 +23,9 @@ use beam_proto::{ControlMsg, EncodedFrame, InputEvent, StreamConfig};
 use beam_session::{
     ClientControlDeps, ClientDeps, ClientSession, ClientSessionConfig, Clock, ControlChannel,
     FrameConsumer, FramePipeline, HostControlDeps, HostDeps, HostSession, HostSessionConfig,
-    ManualClock, PairingConfig, PeerAddr, SessionError, SessionEvent, SessionEventStream,
-    SessionHandle, SessionInput, SessionState, Transport, TransportFactory, VideoSender,
+    ManualClock, PairingConfig, PeerAddr, PendingTransport, ScriptedPending, SessionError,
+    SessionEvent, SessionEventStream, SessionHandle, SessionInput, SessionState, Transport,
+    TransportFactory, VideoSender,
 };
 use bytes::Bytes;
 use futures::{FutureExt, StreamExt};
@@ -170,18 +171,18 @@ impl Transport for FakeClientTransport {
     }
 }
 
-/// 假传输工厂：每次 `connect()` 都返回一条**新**的假连接。
+/// 假传输工厂：每次建链都返回一条**新**的假连接。
 struct FakeFactory {
     wire: Wire,
     connects: Arc<AtomicUsize>,
 }
 
 impl TransportFactory for FakeFactory {
-    fn connect(&mut self) -> Result<Box<dyn Transport>, SessionError> {
+    fn start_connect(&mut self) -> Box<dyn PendingTransport> {
         self.connects.fetch_add(1, Ordering::SeqCst);
-        Ok(Box::new(FakeClientTransport {
+        Box::new(ScriptedPending::ok(Box::new(FakeClientTransport {
             wire: self.wire.clone(),
-        }))
+        })))
     }
 }
 
@@ -192,16 +193,16 @@ struct FlakyFactory {
 }
 
 impl TransportFactory for FlakyFactory {
-    fn connect(&mut self) -> Result<Box<dyn Transport>, SessionError> {
+    fn start_connect(&mut self) -> Box<dyn PendingTransport> {
         let n = self.connects.fetch_add(1, Ordering::SeqCst);
         if n == 0 {
-            return Ok(Box::new(FakeClientTransport {
+            return Box::new(ScriptedPending::ok(Box::new(FakeClientTransport {
                 wire: self.wire.clone(),
-            }));
+            })));
         }
-        Err(SessionError::TransportFailed {
+        Box::new(ScriptedPending::err(SessionError::TransportFailed {
             reason: "主机不可达".to_string(),
-        })
+        }))
     }
 }
 

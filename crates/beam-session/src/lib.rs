@@ -113,6 +113,7 @@ pub mod clock;
 pub mod control;
 pub mod error;
 pub mod event;
+pub mod factory;
 pub mod handle;
 pub mod host;
 pub mod net_transport;
@@ -126,14 +127,15 @@ pub use client::{
 pub use clock::{estimate_offset, Clock, ClockSyncState, ManualClock, SystemClock};
 pub use control::{
     caps_from_config, config_from_agreed, next_session_id, ControlContext, ControlOutcome,
-    ControlRole, PairingConfig, STATS_INTERVAL, STATS_INTERVAL_MS,
+    ControlRole, PairingConfig, PAIRING_PENDING_CODE, STATS_INTERVAL, STATS_INTERVAL_MS,
 };
 pub use error::{message, SessionError};
 pub use event::{
-    ControlChannel, FrameConsumer, FramePipeline, InputSink, InputSource, RateControl,
-    ReconnectingInfo, SessionEvent, SessionInput, Transport, TransportFactory, VideoSender,
-    FRAME_EXPIRED_CODE,
+    ControlChannel, FrameConsumer, FramePipeline, InputSink, InputSource, PendingTransport,
+    RateControl, ReconnectingInfo, ScriptedPending, SessionEvent, SessionInput, Transport,
+    TransportFactory, VideoSender, FRAME_EXPIRED_CODE,
 };
+pub use factory::{current_handle, spawn_transport};
 pub use handle::{SessionEventStream, SessionHandle, SessionTimeouts};
 pub use host::{HostControlDeps, HostDeps, HostSession, HostSessionConfig};
 pub use net_transport::{FrameChannelStats, FrameStatsHandle, NetTransport};

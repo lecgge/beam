@@ -28,13 +28,13 @@
 //!
 //! ```ignore
 //! let factory = DemuxTransportFactory::with_audio(addr, net_cfg, verifier, audio_cfg);
-//! let transport = factory.connect()?;   // `TransportFactory` 的同步接口
+//! let transport = factory.start_connect();   // `TransportFactory` 的异步接口
 //! ```
 //!
 //! 音频不可用（没有输出设备、Opus 后端未启用）时**只关音频**，画面照旧。
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use beam_audio::{AudioConfig, AudioError, AudioMode};
 use beam_net::DemuxStream;
@@ -211,7 +211,10 @@ impl Transport for DemuxTransport {
     }
 }
 
-/// 传输工厂：建立 QUIC 连接，并（可选）接上音频。
+/// 传输工厂：**异步**建立 QUIC 连接，并（可选）接上音频。
+///
+/// §4.1「新连接/迁移」：这个工厂**能重建**连接 ——
+/// 每次 `start_connect()` 都会真的建一条新连接。
 #[derive(Debug)]
 pub struct DemuxTransportFactory {
     addr: SocketAddr,
@@ -219,8 +222,14 @@ pub struct DemuxTransportFactory {
     verifier: Arc<dyn beam_net::PeerVerifier>,
     /// 音频配置（`None` = 本次会话不接音频）。
     audio: Option<AudioConfig>,
-    /// 音频统计（`connect()` 之后才有值）。
-    audio_stats: Option<AudioReceiveStatsHandle>,
+    /// 建链用的 tokio 运行时句柄。
+    ///
+    /// `None` = 用 `start_connect` 那一刻**当前线程**的运行时上下文。
+    runtime: Option<tokio::runtime::Handle>,
+    /// 帧通道统计句柄（跨重连复用）。
+    stats: beam_session::FrameStatsHandle,
+    /// 音频统计（建链**之后**才有值；跨重连保留最后一次的）。
+    audio_stats: Arc<Mutex<Option<AudioReceiveStatsHandle>>>,
 }
 
 impl DemuxTransportFactory {
@@ -235,7 +244,9 @@ impl DemuxTransportFactory {
             cfg,
             verifier,
             audio: None,
-            audio_stats: None,
+            runtime: None,
+            stats: beam_session::FrameStatsHandle::default(),
+            audio_stats: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -251,47 +262,85 @@ impl DemuxTransportFactory {
             cfg,
             verifier,
             audio: Some(audio),
-            audio_stats: None,
+            runtime: None,
+            stats: beam_session::FrameStatsHandle::default(),
+            audio_stats: Arc::new(Mutex::new(None)),
         }
     }
 
-    /// 音频统计句柄（`connect()` 之后才有值）。
-    pub fn audio_stats(&self) -> Option<&AudioReceiveStatsHandle> {
-        self.audio_stats.as_ref()
+    /// 指定建链用的 tokio 运行时（推荐）。
+    ///
+    /// 不指定时，工厂会用 `start_connect` 那一刻**当前线程**的运行时上下文；
+    /// 若那时也不在 tokio 里，建链会**如实失败**（而不是偷偷 `block_on` 卡住）。
+    pub fn with_runtime(mut self, handle: tokio::runtime::Handle) -> Self {
+        self.runtime = Some(handle);
+        self
+    }
+
+    /// 帧通道统计句柄（§3.2 **E2004**）；跨重连有效。
+    pub fn frame_stats_handle(&self) -> beam_session::FrameStatsHandle {
+        self.stats.clone()
+    }
+
+    /// 音频统计句柄（建链之后才有值）。
+    pub fn audio_stats(&self) -> Option<AudioReceiveStatsHandle> {
+        self.audio_stats
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
 
 impl TransportFactory for DemuxTransportFactory {
-    fn connect(&mut self) -> Result<Box<dyn Transport>, SessionError> {
-        let conn = futures::executor::block_on(async {
-            beam_net::NetEndpoint::connect(self.addr, self.cfg.clone(), self.verifier.clone())
+    fn start_connect(&mut self) -> Box<dyn beam_session::PendingTransport> {
+        let Some(handle) = self.runtime.clone().or_else(beam_session::current_handle) else {
+            return Box::new(beam_session::ScriptedPending::err(
+                SessionError::TransportFailed {
+                    reason: "没有可用的 tokio 运行时,无法异步建链".to_string(),
+                },
+            ));
+        };
+        let addr = self.addr;
+        let cfg = self.cfg.clone();
+        let verifier = self.verifier.clone();
+        let audio_cfg = self.audio.clone();
+        let stats = self.stats.clone();
+        let audio_stats = Arc::clone(&self.audio_stats);
+        // §4.1：建链（含开流）全部在运行时里异步完成。
+        beam_session::spawn_transport(&handle, async move {
+            let conn = beam_net::NetEndpoint::connect(addr, cfg, verifier)
                 .await
                 .map_err(|e| SessionError::TransportFailed {
                     reason: format!("连接失败 {}: {e}", e.code_str()),
-                })
-        })?;
-        // 控制流 / 输入流仍然由会话层那份传输负责（分帧格式只有一份实现）。
-        let inner = futures::executor::block_on(NetTransport::connect(conn.clone()))?;
+                })?;
+            // 控制流 / 输入流仍然由会话层那份传输负责（分帧格式只有一份实现）。
+            let inner = NetTransport::connect_with_stats(conn.clone(), stats).await?;
 
-        // 音频（可选）：设备或 Opus 后端不可用时**只关音频**，画面照旧。
-        let (audio, stats) = match self.audio.clone() {
-            // §3.7 `audio_mode=off`：客户端明确不要音频。
-            Some(cfg) if cfg.mode != AudioMode::Off => match build_audio_sink(cfg) {
-                Ok((sink, handle)) => (Some(sink), Some(handle)),
-                Err(e) => {
-                    tracing::warn!(
-                        code = %e.code_str(),
-                        reason = %e,
-                        "客户端音频不可用,降级为只有画面"
-                    );
-                    (None, None)
-                }
-            },
-            _ => (None, None),
-        };
-        self.audio_stats = stats.clone();
+            // 音频（可选）：设备或 Opus 后端不可用时**只关音频**，画面照旧。
+            let (audio, stats_handle) = match audio_cfg {
+                // §3.7 `audio_mode=off`：客户端明确不要音频。
+                Some(cfg) if cfg.mode != AudioMode::Off => match build_audio_sink(cfg) {
+                    Ok((sink, handle)) => (Some(sink), Some(handle)),
+                    Err(e) => {
+                        tracing::warn!(
+                            code = %e.code_str(),
+                            reason = %e,
+                            "客户端音频不可用,降级为只有画面"
+                        );
+                        (None, None)
+                    }
+                },
+                _ => (None, None),
+            };
+            if let Some(handle) = &stats_handle {
+                *audio_stats.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle.clone());
+            }
 
-        Ok(Box::new(DemuxTransport::new(inner, conn, audio, stats)))
+            Ok(
+                Box::new(DemuxTransport::new(inner, conn, audio, stats_handle))
+                    as Box<dyn Transport>,
+            )
+        })
     }
 }
 

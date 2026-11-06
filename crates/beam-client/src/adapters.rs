@@ -37,7 +37,8 @@ use beam_session::Clock;
 use std::sync::Arc;
 
 use beam_session::{
-    FrameConsumer, RateControl, SessionError, SystemClock, Transport, TransportFactory,
+    FrameConsumer, PendingTransport, RateControl, ScriptedPending, SessionError, SystemClock,
+    Transport, TransportFactory,
 };
 
 /// 客户端侧的 QUIC 会话传输（实现住在 `beam-session`，此处原样重导出）。
@@ -174,12 +175,31 @@ where
     }
 }
 
-/// 传输工厂适配器：建立一次 QUIC 连接并包装成 [`NetTransport`]。
+/// 传输工厂适配器：**异步**建立 QUIC 连接并包装成 [`NetTransport`]（§4.1「新连接/迁移」）。
+///
+/// ## 为什么是异步的
+///
+/// 建链必须 `await`（QUIC 握手），而会话层的 `pump()` 是**同步**的
+/// ⇒ 工厂只**发起**建链（[`TransportFactory::start_connect`]），
+/// 会话层在 `pump` 里**非阻塞**地问结果。
+///
+/// 旧接口是同步的 `connect()`，调用方只能 `block_on` ——
+/// 在 tokio 工作线程上那会**卡住运行时**（QUIC 的 IO 驱动就在那个运行时里），
+/// 于是 §4.1 的「新连接/迁移」重连在真实链路上根本换不了连接。
 #[derive(Debug)]
 pub struct NetTransportFactory {
     addr: std::net::SocketAddr,
     cfg: beam_net::NetConfig,
     verifier: std::sync::Arc<dyn beam_net::PeerVerifier>,
+    /// 建链用的 tokio 运行时句柄（§6「tokio 只用于网络与控制」）。
+    ///
+    /// `None` = 用 `start_connect` 那一刻**当前线程**的运行时上下文
+    /// （上层本来就在 tokio 里时最省事）。
+    runtime: Option<tokio::runtime::Handle>,
+    /// 帧通道统计句柄（§3.2 **E2004**）。
+    ///
+    /// **跨重连复用**：重建连接（§4.1）后上层拿到的统计句柄不会失效。
+    stats: FrameStatsHandle,
 }
 
 impl NetTransportFactory {
@@ -193,33 +213,60 @@ impl NetTransportFactory {
             addr,
             cfg,
             verifier,
+            runtime: None,
+            stats: FrameStatsHandle::default(),
         }
+    }
+
+    /// 指定建链用的 tokio 运行时（推荐）。
+    ///
+    /// 不指定时，工厂会用 `start_connect` 那一刻**当前线程**的运行时上下文；
+    /// 若那时也不在 tokio 里，建链会**如实失败**（而不是偷偷 `block_on` 卡住）。
+    pub fn with_runtime(mut self, handle: tokio::runtime::Handle) -> Self {
+        self.runtime = Some(handle);
+        self
+    }
+
+    /// 帧通道统计句柄（§3.2 **E2004**）；跨重连有效。
+    pub fn frame_stats_handle(&self) -> FrameStatsHandle {
+        self.stats.clone()
     }
 }
 
 // beam-client 不直接依赖 beam-pair 时用到的类型由调用方注入；
 // 这里通过泛型避免额外的 crate 依赖。
 impl TransportFactory for NetTransportFactory {
-    fn connect(&mut self) -> Result<Box<dyn Transport>, SessionError> {
-        let transport = futures::executor::block_on(async {
-            let conn =
-                beam_net::NetEndpoint::connect(self.addr, self.cfg.clone(), self.verifier.clone())
-                    .await
-                    .map_err(|e| SessionError::TransportFailed {
-                        reason: format!("连接失败 {}: {e}", e.code_str()),
-                    })?;
-            NetTransport::connect(conn).await
-        })?;
-        Ok(Box::new(transport))
+    fn start_connect(&mut self) -> Box<dyn PendingTransport> {
+        let Some(handle) = self.runtime.clone().or_else(beam_session::current_handle) else {
+            return Box::new(ScriptedPending::err(SessionError::TransportFailed {
+                reason: "没有可用的 tokio 运行时,无法异步建链".to_string(),
+            }));
+        };
+        let addr = self.addr;
+        let cfg = self.cfg.clone();
+        let verifier = self.verifier.clone();
+        let stats = self.stats.clone();
+        // §4.1：建链在运行时里异步进行，会话层**非阻塞**地问结果。
+        beam_session::spawn_transport(&handle, async move {
+            let conn = beam_net::NetEndpoint::connect(addr, cfg, verifier)
+                .await
+                .map_err(|e| SessionError::TransportFailed {
+                    reason: format!("连接失败 {}: {e}", e.code_str()),
+                })?;
+            let transport = NetTransport::connect_with_stats(conn, stats).await?;
+            Ok(Box::new(transport) as Box<dyn Transport>)
+        })
     }
 }
 
 /// 已就绪的传输工厂：把**已经建立好**的传输直接交给会话层。
 ///
-/// 会话层的 [`TransportFactory::connect`] 是同步接口，而 QUIC 建链必须 `await`；
-/// 调用方（例如桌面端）先在自己的异步任务里建好 [`NetTransport`]，
-/// 再用本工厂注入 [`beam_session::ClientSession`]，
-/// 避免在 tokio 运行时里用 `block_on` 阻塞工作线程。
+/// ## 它只能交出**同一条**连接
+///
+/// 这个工厂**不能重建**连接：交出一次之后就没有了
+/// ⇒ 断线重连（§4.1「新连接/迁移」）在用它时**换不了连接**。
+/// 需要重建请用 [`NetTransportFactory`] 或
+/// [`crate::transport::DemuxTransportFactory`]。
 pub struct ReadyTransportFactory {
     transport: Option<Box<dyn Transport>>,
 }
@@ -242,12 +289,13 @@ impl ReadyTransportFactory {
 }
 
 impl TransportFactory for ReadyTransportFactory {
-    fn connect(&mut self) -> Result<Box<dyn Transport>, SessionError> {
-        self.transport
-            .take()
-            .ok_or_else(|| SessionError::MissingDependency {
+    fn start_connect(&mut self) -> Box<dyn PendingTransport> {
+        match self.transport.take() {
+            Some(t) => Box::new(ScriptedPending::ok(t)),
+            None => Box::new(ScriptedPending::err(SessionError::MissingDependency {
                 what: "transport".to_string(),
-            })
+            })),
+        }
     }
 }
 

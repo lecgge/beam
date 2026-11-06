@@ -11,8 +11,9 @@ import {
   onSessionDisconnected,
   onSessionReconnecting,
   onSessionStats,
+  onSessionWaitingApproval,
 } from './ipc/events'
-import { I18nProvider, type Language } from './i18n'
+import { I18nProvider, useI18n, type Language } from './i18n'
 import { ConnectPage } from './pages/ConnectPage'
 import { DevicesPage } from './pages/DevicesPage'
 import { HomePage } from './pages/HomePage'
@@ -24,6 +25,7 @@ import {
   usePerfStore,
   useSessionStore,
   useSettingsStore,
+  useToastStore,
 } from './stores'
 
 /**
@@ -52,6 +54,8 @@ export default function App() {
 
 function AppShell() {
   const [page, setPage] = useState<PageKey>('home')
+  const { t } = useI18n()
+  const pushToast = useToastStore((state) => state.push)
 
   const loadHostStatus = useHostStore((state) => state.load)
   const loadSettings = useSettingsStore((state) => state.load)
@@ -89,6 +93,8 @@ function AppShell() {
       onSessionStats((stats) => useSessionStore.getState().applyStats(stats)),
       onSessionReconnecting((info) => useSessionStore.getState().applyReconnecting(info)),
       onSessionDisconnected(() => useSessionStore.getState().clearSession()),
+      // §3.3：等主机点「同意」——会话**还活着**，只是还没拿到确认。
+      onSessionWaitingApproval(() => pushToast('info', t('connect.waitingApproval'))),
       onPerfTick((tick) => usePerfStore.getState().applyTick(tick)),
     ]
     return () => {
@@ -96,7 +102,7 @@ function AppShell() {
         void pending.then((unlisten) => unlisten()).catch(() => undefined)
       })
     }
-  }, [])
+  }, [pushToast, t])
 
   return (
     <div className="app">

@@ -89,7 +89,13 @@ pub struct PairingConfig {
 /// 客户端收到的就是这个码 —— 它不是「PIN 错了」，而是「还没点同意」。
 ///
 /// 客户端据此进入「等待确认」而不是直接失败（客户端重连一次就能进）。
-pub const PAIRING_PENDING_CODE: u16 = 3006;
+///
+/// ## 为什么是 **3008** 而不是 3006
+///
+/// `beam-pair` 已经占用了 `E3001`–`E3007`（其中 `E3006` = 身份材料读写失败）。
+/// 若本码也用 3006，前端就会把「等待主机确认」当成「证书读写失败」展示 ——
+/// 两个完全不同的事被同一个码表达。因此这里取**尚未占用的 3008**（E3xxx 段内扩展）。
+pub const PAIRING_PENDING_CODE: u16 = 3008;
 
 /// 控制消息处理的结果（会话层内部使用）。
 ///
@@ -351,11 +357,12 @@ impl ControlContext {
                 code: PAIRING_PENDING_CODE,
                 reason: "尚未完成配对,等待用户在主机上确认".to_string(),
             });
-            out.error = Some(SessionError::TransportFailed {
-                reason: format!(
-                    "配对待确认(E{PAIRING_PENDING_CODE}): 尚未完成配对,等待用户在主机上确认"
-                ),
-            });
+            // §3.3：这**不是致命错误** —— 主机还要活着等用户点「同意」：
+            // 用户点完之后客户端会重建连接再来一次（§4.1）。
+            //
+            // 主机这边若当成错误，会话会立刻打死，回复也会被丢掉
+            // —— 客户端就等不到「还没配对好」这个信息。
+            out.pairing_pending = true;
             return;
         }
         if let Err(e) = negotiate_version(&ProtocolVersion::CURRENT, &hello.ver) {
@@ -707,10 +714,17 @@ mod tests {
             ver: ProtocolVersion::CURRENT,
             caps: caps(),
         }));
-        assert!(out.error.is_some(), "未配对的主机不得接受 Hello");
+        assert!(
+            out.pairing_pending,
+            "未配对的主机应当回「等确认」，而不是致命错误"
+        );
+        assert!(
+            out.error.is_none(),
+            "「等确认」不能把主机会话打死（客户端还要等它重建连接）"
+        );
         assert!(out.negotiated.is_none(), "未配对时不得完成能力协商");
         match &out.replies[0] {
-            // 「还没配对好」不是「PIN 错了」，要用一个能区分的码（E3006）。
+            // 「还没配对好」不是「PIN 错了」，要用一个能区分的码（E3008）。
             ControlMsg::PairFail { code, .. } => assert_eq!(*code, PAIRING_PENDING_CODE),
             other => panic!("期望 PairFail,实际 {other:?}"),
         }

@@ -33,6 +33,8 @@ export const EVENTS = {
   sessionReconnecting: 'session://reconnecting',
   /** 会话结束。 */
   sessionDisconnected: 'session://disconnected',
+  /** 等待主机人工确认配对(§3.3)。 */
+  sessionWaitingApproval: 'session://waiting-approval',
   /** 性能单拍,250 ms 一拍,仅 Debug。 */
   perfTick: 'perf://tick',
 } as const
@@ -81,6 +83,16 @@ export function onSessionDisconnected(
 ): Promise<UnlistenFn> {
   return listen<{ sessionId: string; reason: string; code: string | null }>(
     EVENTS.sessionDisconnected,
+    (event) => handler(event.payload),
+  )
+}
+
+/** §3.11 `session://waiting-approval`(§3.3 等主机点「同意」) */
+export function onSessionWaitingApproval(
+  handler: (payload: { sessionId: string }) => void,
+): Promise<UnlistenFn> {
+  return listen<{ sessionId: string }>(
+    EVENTS.sessionWaitingApproval,
     (event) => handler(event.payload),
   )
 }

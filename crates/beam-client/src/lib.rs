@@ -60,7 +60,7 @@ pub mod transport;
 
 pub use adapters::{
     DecodeRenderConsumer, FrameChannelStats, FrameStatsHandle, NetRateController, NetTransport,
-    ReadyTransportFactory,
+    NetTransportFactory, ReadyTransportFactory,
 };
 pub use audio::{
     default_audio_sink, AudioDatagramSink, AudioReceiveStats, AudioReceiveStatsHandle,

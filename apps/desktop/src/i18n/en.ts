@@ -125,6 +125,7 @@ export const en: Dictionary = {
     connected: 'Connected to {name}',
     disconnect: 'Disconnect',
     reconnecting: 'Connection lost, reconnecting… (keeping the last frame)',
+    waitingApproval: 'Waiting for the host to approve the pairing… it will connect automatically once you allow it there',
     disconnected: 'Disconnected',
     showStats: 'Show stats',
     hideStats: 'Hide stats',
@@ -238,6 +239,7 @@ export const en: Dictionary = {
     E3005: 'The pairing handshake message is malformed (version mismatch or corrupted data); scan the code again',
     E3006: 'The local certificate and private key could not be read or written; check disk permissions and free space',
     E3007: 'The scanned code is not a valid Beam pairing payload; scan it again',
+    E3008: 'The pairing is not approved yet; wait for the user on the host to confirm it',
     // E4xxx discovery (beam-discovery §3.4)
     E4001: 'LAN discovery failed; check the firewall and network adapter settings',
     E4002: 'This PC could not register its LAN service, so other devices may not see it; check the firewall settings',
