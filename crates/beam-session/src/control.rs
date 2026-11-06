@@ -82,6 +82,15 @@ pub struct PairingConfig {
     pub require_pairing: bool,
 }
 
+/// §3.3：“尚未完成配对（等待用户人工确认）”的错误码。
+///
+/// 主机在信任闸门的「配对模式」下会放行未受信任对端的握手（不然 PIN 送不到主机），
+/// 但控制面会要求完成配对才能进串流。用户在主机弹窗里点「同意」之前，
+/// 客户端收到的就是这个码 —— 它不是「PIN 错了」，而是「还没点同意」。
+///
+/// 客户端据此进入「等待确认」而不是直接失败（客户端重连一次就能进）。
+pub const PAIRING_PENDING_CODE: u16 = 3006;
+
 /// 控制消息处理的结果（会话层内部使用）。
 ///
 /// 处理器本身不改状态机，只把「应当做什么」交回给运行体。
@@ -107,6 +116,10 @@ pub struct ControlOutcome {
     pub bitrate_bps: Option<u32>,
     /// 处理失败。
     pub error: Option<SessionError>,
+    /// 对端说「还没配对好，等用户在主机上点同意」。
+    ///
+    /// 这不是错误，是「等一下」—— 客户端应该等待并重连。
+    pub pairing_pending: bool,
 }
 
 /// 控制消息处理器（§4.1 时序）。
@@ -178,6 +191,15 @@ impl ControlContext {
     /// 当前角色。
     pub fn role(&self) -> ControlRole {
         self.role
+    }
+
+    /// 重置配对状态，让下一次 `start_pairing` 能再次发起配对。
+    ///
+    /// 用在「等主机人工确认」的重连路径：主机上一轮已经拒绝过，
+    /// 客户端重连后必须能**重新**u53d1起一次 SPAKE2 交换（上一次的状态已被消费）。
+    pub fn reset_pairing(&mut self) {
+        self.client_pairing = None;
+        self.pairing_started = false;
     }
 
     /// 已完成配对的对端指纹（`None` = 还没配对）。
@@ -266,9 +288,14 @@ impl ControlContext {
                 }
             }
             ControlMsg::PairFail { code, reason } => {
-                out.error = Some(SessionError::TransportFailed {
-                    reason: format!("配对失败(E{code}): {reason}"),
-                });
+                if code == PAIRING_PENDING_CODE {
+                    // 主机还没得到人工确认 → 这不是错误，是「等一下」。
+                    out.pairing_pending = true;
+                } else {
+                    out.error = Some(SessionError::TransportFailed {
+                        reason: format!("配对失败(E{code}): {reason}"),
+                    });
+                }
             }
             ControlMsg::StreamConfig(cfg) => {
                 out.peer_config = Some(cfg);
@@ -321,11 +348,13 @@ impl ControlContext {
         // 因此**控制面**必须自己把关：配对没成功之前一律不接受 `Hello`。
         if self.role == ControlRole::Host && self.pairing.require_pairing && self.paired.is_none() {
             out.replies.push(ControlMsg::PairFail {
-                code: 3001,
-                reason: "尚未完成配对,请先完成 PIN 校验".to_string(),
+                code: PAIRING_PENDING_CODE,
+                reason: "尚未完成配对,等待用户在主机上确认".to_string(),
             });
             out.error = Some(SessionError::TransportFailed {
-                reason: "配对失败(E3001): 尚未完成配对,请先完成 PIN 校验".to_string(),
+                reason: format!(
+                    "配对待确认(E{PAIRING_PENDING_CODE}): 尚未完成配对,等待用户在主机上确认"
+                ),
             });
             return;
         }
@@ -681,7 +710,8 @@ mod tests {
         assert!(out.error.is_some(), "未配对的主机不得接受 Hello");
         assert!(out.negotiated.is_none(), "未配对时不得完成能力协商");
         match &out.replies[0] {
-            ControlMsg::PairFail { code, .. } => assert_eq!(*code, 3001),
+            // 「还没配对好」不是「PIN 错了」，要用一个能区分的码（E3006）。
+            ControlMsg::PairFail { code, .. } => assert_eq!(*code, PAIRING_PENDING_CODE),
             other => panic!("期望 PairFail,实际 {other:?}"),
         }
     }

@@ -46,7 +46,7 @@ use beam_proto::{ControlMsg, EncodedFrame, Feedback, ProtocolVersion, StatsRepor
 use crate::clock::duration_ms;
 use crate::control::{
     caps_from_config, config_from_agreed, next_session_id, ControlContext, ControlOutcome,
-    ControlRole, PairingConfig, CLOCK_SYNC_INTERVAL_US, STATS_INTERVAL_MS,
+    ControlRole, PairingConfig, CLOCK_SYNC_INTERVAL_US, PAIRING_PENDING_CODE, STATS_INTERVAL_MS,
 };
 use crate::error::SessionError;
 use crate::event::{
@@ -198,6 +198,8 @@ pub(crate) struct ClientRunner {
     stats: StatsReport,
     /// 是否仍需（重新）建立传输：进入 `Reconnecting` 置位，恢复串流才清掉。
     reconnect_pending: bool,
+    /// 主机还没人工确认（等重连）。
+    pairing_pending: bool,
     /// 已尝试重连次数（统计用）。
     reconnect_attempts: u32,
     /// 进入 `Reconnecting` 的次数（统计用）。
@@ -478,6 +480,36 @@ impl ClientRunner {
         }
     }
 
+    /// 「等主机人工确认」时的重连：重建传输 → 重新发起配对。
+    ///
+    /// 用户在主机弹窗里点了「同意」之后，下一次握手就是已信任的 → 直接进串流。
+    fn retry_pairing(&mut self) {
+        let now = self.now_ms();
+        if now < self.next_retry_ms {
+            return;
+        }
+        self.next_retry_ms = now + RECONNECT_RETRY_INTERVAL_MS;
+        let Some(factory) = self.factory.as_mut() else {
+            return;
+        };
+        match factory.connect() {
+            Ok(transport) => {
+                self.transport = Some(transport);
+                self.reconnect_attempts += 1;
+                self.last_rebuild_ms = now;
+                // 重新发起配对（上一次的 SPAKE2 状态已被消费）。
+                self.ctrl.reset_pairing();
+                self.hello_sent = false;
+                self.handshake_started = false;
+                self.start_handshake();
+                tracing::info!("等主机人工确认中,已重新发起配对");
+            }
+            Err(e) => {
+                tracing::debug!(reason = %e, "等确认时重建连接失败,继续等待");
+            }
+        }
+    }
+
     /// 发 `Hello{ver,caps}`（§5）。
     fn send_hello(&mut self) {
         if self.hello_sent {
@@ -542,6 +574,17 @@ impl ClientRunner {
 
     /// 把处理结果落到状态机上。
     fn apply_outcome(&mut self, outcome: ControlOutcome) {
+        if outcome.pairing_pending {
+            // 主机还没得到人工确认（客户端输入的 PIN 本身可能对，
+            // 但主机屋里的用户还没点「同意」）。
+            // 这不是错误：等一下，重建连接再试一次。
+            self.emit(SessionEvent::Error {
+                code: PAIRING_PENDING_CODE,
+                retryable: true,
+            });
+            self.pairing_pending = true;
+            return;
+        }
         if let Some(err) = outcome.error {
             self.fail(&err);
             return;
@@ -836,6 +879,9 @@ impl SessionRunner for ClientRunner {
     }
 
     fn pump(&mut self) {
+        if self.pairing_pending {
+            self.retry_pairing();
+        }
         self.check_deadlines();
         self.maybe_reconnect();
         self.drain_control();
@@ -996,6 +1042,7 @@ impl ClientSession {
             clock_sync: None,
             stats: StatsReport::default(),
             reconnect_pending: false,
+            pairing_pending: false,
             reconnect_attempts: 0,
             reconnects: 0,
             next_retry_ms: now,
