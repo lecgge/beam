@@ -103,8 +103,8 @@ pub struct RateController { pub fn on_feedback(&mut self, fb: &Feedback) -> Bitr
 - 数据:`Fingerprint([u8;32])`、`TrustedPeer{fp,name,platform,paired_at,perms}`。
 - 线程:同步 API,在调用方任务内执行。 错误码:`E3xxx`(3001 PIN 错误,3002 次数超限锁定 60 s,3003 token 过期,3004 指纹不匹配)。
 - 配置:`pin_len=4`、`pin_ttl=120s`、`max_attempts=3`。 性能:不在热路径。 测试:中间人模拟、错误 PIN、过期 token。 里程碑:MVP。
-- **「还没配对好」与「PIN 错了」要分开(B24)**:主机在配对模式下对未配对的对端回 `PairFail{code: 3006}`（**E3006**，段内扩展）—— 用户在主机弹窗里点「同意」**之前**，这**不是** PIN 错误（PIN 可能完全正确，只是还没点确认）。客户端收到 3006 时**不判死**：它进入「等确认」状态，按 1 s 间隔重建连接、**重新发起**一次配对（§4.1）⇒ 用户点一次「同意」就能连上，不必再点一次「连接」。
-- **一个更底层的问题(B24 实测)**:会话层的 `TransportFactory::connect()` 是**同步**接口，而建 QUIC 连接是**异步**的 ⇒ 想「重建一条连接」的调用方只能在同步上下文里 `block_on` 它，而在 tokio 运行时的工作线程里 `block_on` 一个需要反应堆推进的连接 ⇒ **会卡住**。桌面端现在用的是一次性的 `ReadyTransportFactory`（只交出**同一条**已建好的连接）⇒ **§4.1 的「新连接/迁移」重连在真实链路上是残废的**（会话状态机跑得再对也换不了连接）。这需要把传输工厂改成能异步重建（B25）。
+- **「还没配对好」与「PIN 错了」要分开(B24/B25)**:主机在配对模式下对未配对的对端回 `PairFail{code: 3008}`（**E3008**，段内扩展）—— 用户在主机弹窗里点「同意」**之前**，这**不是** PIN 错误（PIN 可能完全正确，只是还没点确认）。客户端收到 3008 时**不判死**：它进入「等确认」状态，按 1 s 间隔**重建连接**、重新发起一次握手（§4.1）⇒ 用户点一次「同意」就能连上，不必再点一次「连接」。**码位从 B24 的 3006 改成 3008**：`beam-pair` 已经占用了 `E3006`（身份材料读写失败），两个完全不同的事共用一个码 ⇒ 前端会把「等确认」展示成「证书读写失败」。**主机侧收到未配对的 `Hello` 时不能把会话打死**（回复本身就是答案），否则 `PairFail` 会被丢掉、客户端等不到「等确认」。
+- **传输工厂异步化(B25,上面那个问题已解)**:会话层的 `TransportFactory` 改成**只发起、不阻塞**的 `start_connect() -> Box<dyn PendingTransport>`：工厂在 tokio 运行时里**异步**建链，会话层在 `pump()` 里**非阻塞**地问结果（`poll_result()`）。首连、重连（§4.1「新连接/迁移」）、以及「等确认」的重建，全部走这一条路 ⇒ 以后不再有 `block_on` 卡运行时的写法。`beam-client` 的 `NetTransportFactory` / `DemuxTransportFactory` 与 `beam-ffi` 的 `ClientTransportFactory` 都能**真的重建**一条连接（每次 `start_connect()` 都是一条新连接）；一次性工厂 `ReadyTransportFactory` 保留，但**只能交出同一条连接**（文档里写明它不能用于重连）。
 - **PIN 密码学校验已接线并真机验证(B21)**:此前 PIN 只到「格式校验 + 尝试预算」（桌面端 `pin.rs`），**密码学验证从未真正发生** —— 主机侧没把 PIN 配进 `PairingConfig`，信任闸门又在 TLS 层就把未信任对端拒了，客户端连控制通道都到不了。现在补齐了三段接线:① `beam-client` 的 `ClientConfig.pin` → 会话层 `PairingConfig` ⇒ 客户端在控制通道上发起 SPAKE2，**配对成功之后才发 `Hello`**;② `beam-host` 的信任闸门增加**配对模式**（未信任对端的握手放行，但**控制面**必须先完成配对才准进串流）—— 安全兜底从 TLS 层移到控制面（会话层在 `require_pairing` 为真时**拒绝**未配对对端的 `Hello`）;③ 配对成功后主机把对端指纹**写进信任库**（`beam-host` 的 `HostSessionHandle::spawn_trust_writer`，桌面端与验证入口共用同一份实现）。验证入口 `crates/beam-client/examples/pairing_loopback.rs`，三个阶段全过:**错 PIN ⇒ 被拒且信任库保持为空**、**对 PIN ⇒ 配对成功并写库 ⇒ 进串流**、**已配对 ⇒ 不传 PIN 也免配对直接放行**。
 - **SPAKE2 的密码学证明在客户端那一步才成立(B21 实测)**:主机收到客户端的首条挑战时，**只能**记下对端指纹，**不能**坐实配对 —— 因为密码学证明是客户端拿自己的 PIN 去校验主机应答时得出的，对不上它会回 `PairFail`。若主机在「收到挑战」时就坐实配对并写信任库，那么一个**输错 PIN** 的客户端也会被当成已配对设备（实测：修复前错 PIN 也会写进信任库）。所以主机的顺序是:收到挑战 ⇒ 记住对端指纹 ⇒ 等客户端回 `PairOk`（= 它真的过了 PIN 校验）⇒ 才坐实。（token 路径不同:一次性 token 本身就是客户端「知道口令」的证明，当场即可坐实。）
 
@@ -163,6 +163,7 @@ pub struct CapturedFrame { pub tex: ID3D11Texture2D, pub ts_us: u64, pub dirty: 
 - 接口:`HostSession::start(cfg, deps) -> SessionHandle`;`ClientSession::connect(peer, cfg) -> SessionHandle`;`SessionHandle::{events()->Stream<SessionEvent>, update(StreamConfig), stop()}`。
 - 边界:不直接调用平台 API,通过 trait(CaptureSource/VideoEncoder/VideoSender/…)注入,便于测试。被 host/client/ffi 依赖。
 - 错误码 `E9xxx`。配置:`reconnect_timeout=30s`、`stall_threshold=3s`。测试:状态机表驱动测试 + 假实现集成测试。里程碑:MVP(无重连)/v1。
+- **传输重建是异步的(B25)**:会话层是同步的（`pump()` 由调用方在自己的任务里推进），而建 QUIC 连接是异步的 ⇒ 工厂只**发起**建链（`TransportFactory::start_connect`），会话层用 `PendingTransport::poll_result()` **非阻塞**地问结果：还没好就 `None`，好了就装上传输并推进状态机（首连 → `Connecting→Negotiating`；重连 → `Hello` + `Resume{session_id}`；等确认 → 重新握手）。这让 §4.1 的「新连接/迁移」重连在真实链路上**真的换一条连接**（真机实测：客户端在等确认期间换了 5 条连接，掉线后又换了第 6 条并恢复串流）。
 
 ### 3.10 beam-decode / beam-render(Windows 客户端)
 - 职责:ffmpeg D3D11VA 硬解 HEVC/H.264(/AV1 v2);解码纹理直接交给 D3D11 flip-model 交换链,支持可变刷新率;叠加层由 Tauri 窗口负责。
@@ -176,8 +177,8 @@ pub struct CapturedFrame { pub tex: ID3D11Texture2D, pub ts_us: u64, pub dirty: 
 ### 3.11 host-app / client(Tauri,apps/desktop)
 - 职责:UI、托盘、通知;只通过 commands/events 与 Rust 交互;视频帧不经 IPC。
 - Commands:`get_host_status`、`start_hosting(opts)`、`stop_hosting`、`get_pairing_code`、`approve_pair(id)`、`reject_pair(id)`、`remove_device(id)`、`list_hosts`、`connect(host_id, pin)`、`disconnect`、`get_settings`、`set_settings(patch)`;debug 下另有 `perf_snapshot`、`perf_export(format)`。
-  `pin` 是客户端输入的 4 位 PIN(§3.3 `pin_len=4`);**已配对的主机可传空串**(信任库里已有它的证书指纹,§3.3「证书指纹固定」)。外壳侧对 PIN 做**格式校验**与**尝试预算**(§3.3 `max_attempts=3`,超限锁定 60 s 并报 `E3002`);**SPAKE2 的密码学校验在主机侧**(§3.3),当前尚未接线 —— 外壳只保证「PIN 参与连接流程且被计量」,不让 UI 假装已完成密码学认证。
-- Events:`host://state-changed`、`pair://request`、`pair://code-rotated`、`discovery://updated`、`session://stats`(500 ms)、`session://reconnecting`、`session://disconnected`、`perf://tick`(debug,250 ms)。
+  `pin` 是客户端输入的 4 位 PIN(§3.3 `pin_len=4`);**已配对的主机可传空串**(信任库里已有它的证书指纹,§3.3「证书指纹固定」)。外壳侧对 PIN 做**格式校验**与**尝试预算**(§3.3 `max_attempts=3`,超限锁定 60 s 并报 `E3002`);**SPAKE2 的密码学校验在主机侧**(§3.3)已接线（B21）—— PIN 真的进会话层的 `PairingConfig`，对方验证过才能进串流。未配对的主机回 `E3008`（「还没配对好」）时，桌面端**不报错、不断开**：会话继续按 1 s 间隔重建连接，用户在主机上点「同意」后自动连上。
+- Events:`host://state-changed`、`pair://request`、`pair://code-rotated`、`discovery://updated`、`session://stats`(500 ms)、`session://reconnecting`、`session://disconnected`、`session://waiting-approval`(§3.3：客户端等主机点「同意」，**会话还活着**，不得发「断开」)、`perf://tick`(debug,250 ms)。
 - 错误:command 返回 `{code:"E2001", message, retryable}`,前端按 code 显示中文文案。**应用外壳自有错误段为 `E12xxx`**(`12001` 未知命令、`12002` 设置项不合法、`12003` 本地文件读写失败、`12004` perf-stats 不可用);`E11xxx` **只**归 `beam-config`(§3.14),`E13xxx`/`E14xxx`/`E15xxx`/`E16xxx` 分别归 perf / ffi / gamestream / log —— 一个码只对应一种含义。里程碑:MVP。
 
 ### 3.12 Android 模块
