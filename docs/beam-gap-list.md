@@ -524,6 +524,18 @@
 | Android 侧还没有真机 | beam-ffi 的工厂已改成同样的异步可重建通道（`ClientTransportFactory`），但没有 Android 真机可跑 ⇒ Android 上的「重连」目前仍是纸面能力 | 需后续批次（无 Android 真机） |
 | 音画同步偏差 <30 ms 未测 / Android 侧输入采集未接 / 注入延迟 ≤1 ms 未核对 | 同 B22/B23 的遗留；Android 侧需要 core-input 经 uniffi 送上来 | 需后续批次 |
 
+| B26 | 2026-11-09 | 第二十六批：桌面端客户端的**信任引导** —— 第一次真的连上一台「还没配过对」的主机 | apps/desktop（客户端侧信任引导 + 方向化的配对请求 + 状态机复位 + 前端文案）/ crates/beam-client（信任边界的回归测试）/ docs（设计文档 §3.3/§3.11） | 已完成 | cargo fmt --all --check exit 0（仓库 + 桌面端）；cargo clippy --workspace --all-targets -- -D warnings exit 0 / 0 warning；cargo test --workspace exit 0（49 套件 / 487 passed / 0 failed / 10 ignored）；cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings exit 0；npm --prefix apps/desktop run build exit 0（含 tsc）；**真机实测**：`cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --bin beam-desktop -- --ignored` exit 0 —— 桌面端**产品路径**：主机开播 → 客户端用 mDNS 发现它 → 客户端连接（该主机还没进客户端的信任库）→ 状态进「waiting_approval」→ 后台探测完整指纹并交生**客户端侧**待确认请求 → 用户点「允许并配对」 → **客户端自动重连** → 主机配对成功（日志：「配对成功,已把对端写入信任库」）→ 客户端进「streaming」（全程 1.41 s）。同时补上了两个真问题：① 探测到的指纹与 mDNS 广播的短前缀**不一致**时不生成请求（防中间人）；② 会话结束后状态机停在 `Closed` 导致「断开后再连」直接报 E_SESSION_INVALID_STATE ⇒ 现在重置状态机 |
+
+- **B26（主会话自办）** — 写入范围：`apps/desktop/src-tauri/src/{service,service_crates,dto}.rs`、`apps/desktop/src/{ipc/types.ts,components/DeviceRows.tsx,i18n/*.ts}`、`crates/beam-client/tests/untrusted_host.rs`、`docs/**`；覆盖条目 CM-09, T-15
+
+**B26 追加项（审计中顺带发现，不在原 551 条内）**
+
+| 项 | 说明 | 归属 |
+|---|---|---|
+| 桌面端的视频路径还没在桌面端上真机跑通 | 本次产品路径验证跑的是默认 feature（无 `client-video`）⇒ 解码/上屏后端不可用（日志里如实写“本次会话不会有画面”）。真画面需要 ffmpeg 开发库（本机工具链已因 bindgen 的 libclang.dll 缺失而不完整，见 B25 的追加项） | 需后续批次（环境） |
+| Android 侧的客户端信任引导没有 | Android 走扫码（§3.3 载荷里带**完整指纹**）⇒ 它的信任引导在扫码时就完成了，不需要探测；但 Android 侧没有真机，这条路径仍是纸面能力 | 需后续批次（无 Android 真机） |
+| 音画同步偏差 <30 ms 未测 / Android 侧输入采集未接 / 注入延迟 ≤1 ms 未核对 | 同 B22/B23/B25 的遗留；Android 侧需要 core-input 经 uniffi 送上来 | 需后续批次 |
+
 ### 已裁决事项
 
 | # | 议题 | 裁决 | 裁决日期 | 说明 | 解锁范围 |
@@ -597,6 +609,7 @@
 | 2026-11-05 | 客户端键鼠采集变成**桌面端里能开的开关**，并修掉 HID 表的左右修饰键映射错误 | B22 把采集后端做出来了，但没有出口 —— 桌面端没人装它。B23 加了设置项「把本机键鼠回传给主机」（**默认关**：把自己的键盘发给远端主机是敏感操作），打开时 `connect` 装上采集源并交给客户端运行时；采集装不上只影响输入回传，不影响连接。接线过程中挖出三个真问题：① `thread_local!` 写在两个不同的函数里就是**两个不同的变量** —— 钩子回调读到的那个永远是默认值，于是注入事件全被「跳过注入事件」挡掉，一个都采不到；② `start()` 在钩子装好之前就返回，调用方拿到的是「还在装」的中间状态，会误判成失败 ⇒ 改成等就绪信号；③ HID↔VK 表里**左右修饰键**映射错了（右 Ctrl/Shift/Menu 用的是左边的常量）⇒ 右侧修饰键既采不到也注不准 | 真机实测（**真实低级钩子**，不是脚本源）：注入一个测试键 ⇒ 钩子采到 2 个事件 ⇒ 主机注入器统计 **submitted = 2 / injected = 2 / denied = 0** ⇒ 「低级钩子 → 会话 → §5 输入流 → 主机 SendInput → 桌面真的动了」全链打通。设计文档 §3.8 已补上桌面端接线与这三个坑 |
 | 2026-11-06 | 把「还没配对好」与「PIN 错了」分成两个码；并挖出一个更底层的问题：客户端的**重连在真实链路上是残废的** | B21 引入配对模式后，主机对未配对的对端回的是「配对失败 E3001」—— 但 E3001 的语义是**PIN 错了**。实际情形常常是「PIN 没错，只是用户在主机那边还没点同意」⇒ B24 用段内扩展 **E3006** 表达「尚未完成配对，等待人工确认」，客户端收到它**不判死**，而是进「等确认」状态、按 1 s 间隔重建连接并重新发起配对。接线时做真机验证（新增第 4 阶段）却发现客户端停在 Idle ⇒ 根因是：会话层的 `TransportFactory::connect()` 是**同步**接口，而建 QUIC 连接是**异步**的 ⇒ 调用方只能在同步上下文里 `block_on` 它，在 tokio 工作线程上这会卡住。而桌面端现在用的 `ReadyTransportFactory` 只能交出**同一条**已建好的连接 ⇒ **§4.1 的「新连接/迁移」重连在真实链路上根本换不了连接**（会话状态机跑得再对也没用） | 会话层机制已落地（clippy 0 warning、485 单测全绿）；真机验证的前 3 个阶段仍全过，第 4 阶段**未通过**，该阶段已从仓库里撤下（不留失败的验证入口）。「传输工厂异步化」登记为 B25 的主题 |
 | 2026-11-06 | 传输工厂异步化：客户端的**重连**第一次真的换了一条**新**连接 | B24 挖出的问题落地：会话层的 `TransportFactory` 从同步的 `connect()` 改成**只发起、不阻塞**的 `start_connect() -> Box<dyn PendingTransport>`（工厂在 tokio 运行时里异步建链，会话层在 `pump()` 里非阻塞地问结果）⇒ 首连、重连（§4.1「新连接/迁移」）、以及「等确认」的重建全部走同一条路，不再有 `block_on` 卡运行时的写法。`beam-client` 的 `NetTransportFactory` / `DemuxTransportFactory` 与 `beam-ffi` 的 `ClientTransportFactory` 都能真的重建连接；桌面端换成可重建工厂 ⇒ 「用户在主机上点同意后自动连上」在产品里第一次真的会发生。接线时又挖出**两个真 bug**：① 主机的 `apply_outcome` 先 `fail()` 再 `return`，把 `PairFail(E3008)` **回复丢掉了** ⇒ 客户端永远等不到「等确认」；现在改成**先发回复再判错误**，且主机侧「等确认」不再把会话打死。② B24 用的 `E3006` 与 `beam-pair` 的「身份材料读写失败」**码位撞车**（前端会把「等确认」显示成「证书读写失败」）⇒ 改用未被占用的 `E3008`（桌面端留了一份副本，并有编译期断言保证与会话层一致） | 真机实测通过（`cargo run -p beam-client --example reconnect_loopback --release`）：阶段 A 客户端在等确认期间**换了 5 条连接**、用户点「同意」后自动进串流；阶段 B 主机掐断连接后客户端换第 6 条连接并恢复串流。默认特性全量矩阵绿：fmt ✓ / workspace clippy 0 warning ✓ / 48 套件 485 passed 0 failed ✓ / 桌面端 clippy ✓ / npm build（含 tsc）✓。ffmpeg 特性的 clippy 因本机 bindgen 工具链缺失未能复跑（如实记录） |
+| 2026-11-09 | 桌面端客户端第一次真的连上一台「还没配过对」的主机（并补上两个真问题） | 客户端的 TLS 校验器就是**信任库**（§3.3 证书指纹固定），而 §3.4 的 mDNS 只广播指纹**前 8 位** ⇒ 「发现了这台主机」不等于「能连上它」：未配对的主机会在 TLS 层被拒（E2002），控制通道开不了，PIN/SPAKE2 也送不过去 ⇒ 桌面端客户端实际上**连不上任何新主机**（旧的测试以为「已配对主机传空串」覆盖了这个位缺）。B26 补上了**客户端侧的信任引导**：先探测主机的**完整指纹**（探测必然握手失败，但能从证书里拿到指纹），**与 mDNS 广播的短前缀交叉校验**（不一致就放弃，防中间人），交给用户确认；用户点「允许并配对」后写进信任库并**自动重连**（靠 B25 的异步工厂）。主机侧的「客户端要连我」与客户端侧的「我要连这台主机」是**同一张待确认列表**（§3.11 `pair://request`），只是方向不同。探测与批准还带出两个真问题：① 前缀不一致时不生成请求；② 会话结束后状态机停在 `Closed` ⇒ 「断开后再连接」直接报 E_SESSION_INVALID_STATE ⇒ 现在重置状态机 | 真机实测通过（桌面端产品路径：主机开播 → mDNS 发现 → 客户端进「等待确认」 → 用户批准 → 客户端自动重连 → 主机配对成功 → 客户端进「streaming」，全程 1.41 s）。另外在 `crates/beam-client/tests/untrusted_host.rs` 里把「未信任主机在 TLS 层被拒（E2002）」钉成了可执行的断言，避免以后误以为「发现了就能连」。默认特性全量矩阵绿：fmt ✓ / workspace clippy 0 warning ✓ / 49 套件 487 passed 0 failed ✓ / 桌面端 clippy ✓ / npm build（含 tsc）✓ |
 
 ---
 
