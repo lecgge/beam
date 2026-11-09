@@ -103,6 +103,7 @@ export const en: Dictionary = {
     streaming: 'Streaming',
     discovery: 'LAN discovery',
     requestPair: 'Pairing requested',
+    requestTrust: 'To connect to this host, trust its certificate first',
     allow: 'Allow & pair',
     deny: 'Deny',
     pairedAt: 'Paired on {date}',

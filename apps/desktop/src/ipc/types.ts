@@ -47,6 +47,14 @@ export interface PairingCode {
   rotatedAtMs: number
 }
 
+/**
+ * 待确认请求的方向(§3.3)。
+ *
+ * - `host`：有客户端要连**本机**(本机是主机)。
+ * - `client`：我们要连的那台主机还没进过本机的信任库。
+ */
+export type PairDirection = 'host' | 'client'
+
 export interface PairRequest {
   id: string
   name: string
@@ -54,6 +62,7 @@ export interface PairRequest {
   address: string
   fingerprint: string
   requestedAtMs: number
+  direction: PairDirection
 }
 
 export interface DevicePerms {

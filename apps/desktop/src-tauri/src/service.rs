@@ -973,6 +973,7 @@ fn seed_pair_requests(now: u64) -> Vec<PairRequest> {
         platform: "Android 15".into(),
         address: "192.168.1.57".into(),
         fingerprint: "9F:2A:1C:4D:…:C1".into(),
+        direction: PairDirection::Host,
         requested_at_ms: now,
     }]
 }

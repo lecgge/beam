@@ -107,6 +107,7 @@ export const zhCN = {
     streaming: '串流中',
     discovery: '局域网发现',
     requestPair: '请求配对',
+    requestTrust: '要连这台主机,需先信任它的证书',
     allow: '允许并配对',
     deny: '拒绝',
     pairedAt: '配对于 {date}',

@@ -88,7 +88,11 @@ export function PairRequestRow({
       <div className="device-main">
         <div className="device-title">
           <span className="device-name">{request.name}</span>
-          <span className="badge warn">{t('devices.requestPair')}</span>
+          <span className="badge warn">
+            {request.direction === 'client'
+              ? t('devices.requestTrust')
+              : t('devices.requestPair')}
+          </span>
         </div>
         <div className="sub device-meta">
           {request.platform} · {request.address} · {t('devices.fingerprint', { fp: request.fingerprint })}

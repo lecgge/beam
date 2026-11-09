@@ -99,6 +99,16 @@ pub struct PairingCode {
     pub rotated_at_ms: u64,
 }
 
+/// 待确认请求的**方向**(§3.3 人工确认)。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum PairDirection {
+    /// 主机侧:有客户端要连**本机**(本机是主机)。
+    Host,
+    /// 客户端侧:我们要连的那台主机**还没进过本机的信任库**。
+    Client,
+}
+
 /// `pair://request` 事件负载:一条待确认的配对请求(§3.11)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -110,6 +120,8 @@ pub struct PairRequest {
     /// 证书指纹(§3.3 `Fingerprint([u8;32])`)。
     pub fingerprint: String,
     pub requested_at_ms: u64,
+    /// 请求的方向(§3.3)：主机侧还是客户端侧。
+    pub direction: PairDirection,
 }
 
 // ---------------------------------------------------------------------------

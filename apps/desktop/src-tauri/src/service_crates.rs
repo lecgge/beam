@@ -110,6 +110,21 @@ struct ClientSessionOptions {
     share_input: bool,
 }
 
+/// 等待用户确认的「客户端要连这台主机」(§3.3)。
+///
+/// 为什么需要这个:客户端的 TLS 校验器就是**信任库**(§3.3 证书指纹固定),
+/// 而 §3.4 的 mDNS 只广播指纹**前 8 位** ⇒ 「发现了它」不等于「能连上它」。
+/// 第一次连一台新主机时，必须先把它的**完整指纹**探出来、交给用户确认。
+#[derive(Debug, Clone)]
+struct PendingClientConnect {
+    /// 要连的主机。
+    peer: PeerAddr,
+    /// 用户输入的 PIN(空串 = 不配对)。
+    pin: Option<String>,
+    /// 主机名(用于日志 / 事件)。
+    host_name: String,
+}
+
 /// mDNS 浏览结果(由独立线程维护)。
 #[derive(Debug, Default)]
 struct DiscoveryState {
@@ -166,6 +181,11 @@ struct CrateInner {
     rejected_pairs: Vec<String>,
     /// 正在采集完整指纹的主机 id(避免重复发起探测)。
     probing: Vec<String>,
+    /// 等待用户确认的「客户端要连这台主机」(§3.3 客户端侧信任引导)。
+    ///
+    /// 用户点「允许并配对」之后，我们把主机的完整指纹写进信任库，
+    /// 并自动重连——用户不需要再点一次「连接」。
+    pending_client_connect: Option<PendingClientConnect>,
     /// 当前配对码(含真实二维码载荷与轮换时间,§3.3)。
     pairing: PairingCode,
     /// 当前二维码载荷里的**一次性 token**（§3.3 `pin_ttl=120s`）。
@@ -316,6 +336,7 @@ impl CrateService {
                 new_pairs: Vec::new(),
                 rejected_pairs: Vec::new(),
                 probing: Vec::new(),
+                pending_client_connect: None,
                 pairing,
                 host_pairing_token: Some(pairing_token),
                 config_path,
@@ -548,6 +569,19 @@ impl BeamService for CrateService {
         inner.pending_pairs.retain(|r| r.id != id);
         inner.new_pairs.retain(|r| r.id != id);
         self.save_trust(&inner)?;
+
+        // §3.3：若用户批准的正是「我们正在等待的那台主机」 ⇒ 自动重连。
+        //
+        // 主机的完整指纹现在已经在信任库里 ⇒ 下一次握手不会被「证书拒绝」。
+        // 对质语句：`peer.fingerprint` 是 mDNS 广播的**短前缀**，
+        // `id` 是证书的**完整指纹** ⇒ 完整指纹以短前缀**开头**。
+        let pending = inner.pending_client_connect.clone().filter(|p| {
+            p.peer
+                .fingerprint
+                .as_deref()
+                .is_some_and(|fp| id.to_lowercase().starts_with(&fp.to_lowercase()))
+        });
+        inner.pending_client_connect = None;
         let peer = inner
             .trust
             .lock()
@@ -555,7 +589,43 @@ impl BeamService for CrateService {
             .peers()
             .last()
             .cloned();
-        Ok(device_from_peer(&peer.expect("刚刚 upsert 过")))
+        let device = device_from_peer(&peer.expect("刚刚 upsert 过"));
+        if let Some(pending) = pending {
+            let resolved = inner.resolved.clone();
+            let identity = inner.identity.clone();
+            let trust = inner
+                .trust
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let share_input = inner.ui.share_input;
+            // 等待确认时建过一个占位会话 ⇒ 换成新的「协商中」会话。
+            let cfg = ClientConfig::from_resolved(&resolved);
+            let now = now_ms();
+            inner.session = Some(SessionInfo {
+                session_id: format!("s-{:x}", now),
+                host_id: pending.peer.host.clone(),
+                host_name: pending.host_name.clone(),
+                state: "negotiating".to_string(),
+                resolution: resolution_label(cfg.stream.width, cfg.stream.height),
+                fps: cfg.stream.fps,
+                codec: codec_name(cfg.stream.codec),
+                started_at_ms: now,
+            });
+            drop(inner);
+            self.spawn_client_session(
+                resolved,
+                pending.peer,
+                pending.host_name,
+                identity,
+                trust,
+                ClientSessionOptions {
+                    pin: pending.pin.clone(),
+                    share_input,
+                },
+            );
+        }
+        Ok(device)
     }
 
     fn reject_pair(&self, id: &str) -> Result<(), BeamError> {
@@ -570,6 +640,15 @@ impl BeamService for CrateService {
             ));
         }
         // 记住被拒绝的主机,发现列表不再把它当成待确认请求。
+        // 客户端侧：拒绝了「要连的那台主机」 ⇒ 不再等它的批准。
+        if inner
+            .pending_client_connect
+            .as_ref()
+            .and_then(|p| p.peer.fingerprint.as_deref())
+            .is_some_and(|fp| id.to_lowercase().starts_with(&fp.to_lowercase()))
+        {
+            inner.pending_client_connect = None;
+        }
         let prefix: String = id.chars().take(8).collect();
         if !prefix.is_empty() && !inner.rejected_pairs.contains(&prefix) {
             inner.rejected_pairs.push(prefix);
@@ -695,6 +774,62 @@ impl BeamService for CrateService {
             fingerprint: Some(trusted_fingerprint.unwrap_or(host.fingerprint.clone())),
         };
         let _ = client_cfg.peer.clone();
+
+        // §3.9：状态机是「一次会话一条」。
+        //
+        // 上一条会话结束后（`disconnect` 把它推进到 `Closed`），状态机要能
+        // **重新开始**一次会话 —— 否则「断开后再连接」会直接报
+        // E_SESSION_INVALID_STATE（`Closed` 的后继状态是空的）。
+        if inner.state.state() == SessionState::Closed {
+            inner.state = StateMachine::new();
+        }
+
+        // §3.3：客户端侧的**信任引导**。
+        //
+        // 这台主机还没进过我们的信任库 ⇒ 先把它的**完整指纹**探出来，
+        // 交给用户确认；用户点了「允许并配对」之后写进信任库并**自动重连**。
+        if !trusted {
+            let pin_for_pairing = if pin.is_empty() {
+                None
+            } else {
+                Some(pin.to_string())
+            };
+            inner.pending_client_connect = Some(PendingClientConnect {
+                peer: peer.clone(),
+                pin: pin_for_pairing,
+                host_name: host.name.clone(),
+            });
+            // 状态机只走到 Pairing：我们还在等用户确认这台主机。
+            for next in [SessionState::Discovering, SessionState::Pairing] {
+                inner
+                    .state
+                    .transition(next)
+                    .map_err(|err| BeamError::invalid(E_SESSION_INVALID_STATE, err.text()))?;
+            }
+            // 指纹探测放后台（探测必然握手失败，但能拿到证书里的指纹）。
+            let resolved = inner.resolved.clone();
+            let identity = inner.identity.clone();
+            self.spawn_fingerprint_probe(
+                host.clone(),
+                discovered_prefix.clone(),
+                resolved,
+                identity,
+                PairDirection::Client,
+            );
+            let now = now_ms();
+            let session = SessionInfo {
+                session_id: format!("s-{:x}", now),
+                host_id: host.id.clone(),
+                host_name: host.name.clone(),
+                state: "waiting_approval".to_string(),
+                resolution: resolution_label(client_cfg.stream.width, client_cfg.stream.height),
+                fps: client_cfg.stream.fps,
+                codec: codec_name(client_cfg.stream.codec),
+                started_at_ms: now,
+            };
+            inner.session = Some(session.clone());
+            return Ok(session);
+        }
 
         // §3.9:真实状态机推进。
         for next in [
@@ -1653,7 +1788,13 @@ impl CrateService {
             }
             // 标记为正在采集,避免重复发起。
             self.lock().probing.push(host.id.clone());
-            self.spawn_fingerprint_probe(host, prefix, resolved.clone(), identity.clone());
+            self.spawn_fingerprint_probe(
+                host,
+                prefix,
+                resolved.clone(),
+                identity.clone(),
+                PairDirection::Host,
+            );
         }
     }
 
@@ -1664,6 +1805,7 @@ impl CrateService {
         expected_prefix: String,
         resolved: ResolvedConfig,
         identity: Identity,
+        direction: PairDirection,
     ) {
         let inner = self.inner.clone();
         tauri::async_runtime::spawn(async move {
@@ -1704,6 +1846,7 @@ impl CrateService {
                 address: host.address.to_string(),
                 fingerprint: fp.to_hex(),
                 requested_at_ms: now_ms(),
+                direction,
             };
             let mut guard = inner.lock().unwrap_or_else(|e| e.into_inner());
             guard.probing.retain(|id| id != &host.id);
@@ -1866,6 +2009,8 @@ fn collect_host_pair_requests(inner: &Arc<Mutex<CrateInner>>, gate: &Arc<HostTru
             address: String::new(),
             fingerprint: id,
             requested_at_ms: now_ms(),
+            // 主机侧：有一台客户端要连**本机**。
+            direction: PairDirection::Host,
         };
         guard.pending_pairs.push(request.clone());
         guard.new_pairs.push(request);
@@ -2103,4 +2248,143 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+#[cfg(test)]
+mod product_tests {
+    //! 桌面端**产品路径**的真机验证（§3.11）。
+    //!
+    //! 这些测试真的起 mDNS 广播、真的走 QUIC 握手、真的写信任库 ⇒
+    //! 需要网络，因此默认忽略（用 `cargo test -- --ignored` 跑）。
+    use super::*;
+
+    /// 隔离：不能把测试写进用户真实的信任库（%APPDATA%/Beam）。
+    /// 把日志打出来（验证时要看到探测的诊断）。
+    fn init_tracing() {
+        use std::sync::Once;
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            let _ = tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::INFO)
+                .with_test_writer()
+                .try_init();
+        });
+    }
+
+    fn isolate_appdata(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("beam-desktop-test-{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("应能创建临时目录");
+        std::env::set_var("APPDATA", &dir);
+        dir
+    }
+
+    /// §3.11：桌面端**产品路径** —— 主机开播 → 客户端连一台**还没配过对**的主机
+    /// → 用户点「允许并配对」 → **客户端自动连上**并进串流。
+    ///
+    /// 这条路径覆盖了三件事：§3.3 的客户端侧**信任引导**（探测完整指纹 →
+    /// 交用户确认）、§4.1 的**自动重连**（B25 的异步工厂）、以及
+    /// §3.9 的状态机在「断开后重连」时能重新开始（之前状态机停在 `Closed` 就连不上了）。
+    #[test]
+    #[ignore = "需要真实网络（mDNS + QUIC）"]
+    fn client_connects_after_the_user_approves_the_host() {
+        init_tracing();
+        isolate_appdata("product");
+        let host = CrateService::new();
+        host.start_hosting(crate::dto::StartHostingOptions::default())
+            .expect("应能开播");
+        let host_pin = host.pairing_code().code;
+        println!("主机 PIN = {host_pin}");
+
+        let client = CrateService::new();
+        // 等 mDNS 发现主机（§3.4）。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut entry = None;
+        while std::time::Instant::now() < deadline {
+            if let Some(h) = client.list_hosts().into_iter().next() {
+                entry = Some(h);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        let entry = entry.expect("客户端应能发现主机");
+        println!("客户端发现 = {}", entry.name);
+
+        // 第一次连接：这台主机还没进过客户端的信任库 ⇒ 应进「等待确认」。
+        let session = client
+            .connect(&entry.id, &host_pin)
+            .expect("connect 不应报错");
+        assert_eq!(session.state, "waiting_approval", "应该等待用户确认主机");
+
+        // 等客户端侧的指纹探测结果（待确认请求）。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut request = None;
+        while std::time::Instant::now() < deadline {
+            let reqs = client.pair_requests();
+            if let Some(r) = reqs
+                .iter()
+                .find(|r| r.direction == PairDirection::Client)
+                .cloned()
+            {
+                request = Some(r);
+                break;
+            }
+            if !reqs.is_empty() {
+                println!("待确认请求（方向不对）= {reqs:?}");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        let request = request.expect("应当生成客户端侧的待确认请求");
+        println!("待确认请求 = {} ({})", request.name, request.id);
+
+        // 用户点「允许并配对」 ⇒ 客户端自动重连。
+        client.approve_pair(&request.id).expect("批准应成功");
+
+        // 等客户端进串流（无需用户再点一次「连接」）。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut state = String::new();
+        while std::time::Instant::now() < deadline {
+            client.take_session_events();
+            if let Some(s) = client.session() {
+                state = s.state.clone();
+                if state == "streaming" {
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        assert_eq!(
+            state, "streaming",
+            "客户端应当自动连上并进串流（实际状态 = {state}）"
+        );
+    }
+
+    /// §3.11：主机开播 ⇒ 客户端能在 mDNS 里发现它（§3.4）。
+    #[test]
+    #[ignore = "需要真实网络（mDNS 广播）"]
+    fn host_is_discoverable_by_mdns() {
+        isolate_appdata("mdns");
+        let host = CrateService::new();
+        let status = host
+            .start_hosting(crate::dto::StartHostingOptions::default())
+            .expect("应能开播");
+        println!(
+            "主机状态 = {:?}，地址 = {:?}",
+            status.state, status.local_ip
+        );
+
+        let client = CrateService::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut found = false;
+        while std::time::Instant::now() < deadline {
+            let hosts = client.list_hosts();
+            if !hosts.is_empty() {
+                println!("客户端发现到主机 = {hosts:?}");
+                found = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        assert!(found, "客户端应能在 20 s 内发现主机");
+    }
 }
