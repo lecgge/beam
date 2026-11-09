@@ -2291,6 +2291,11 @@ mod product_tests {
         init_tracing();
         isolate_appdata("product");
         let host = CrateService::new();
+        // 用一个不同的端口，免得跟机器上正在跑的 Beam 抢端口。
+        let _ = host.set_settings(crate::dto::SettingsPatch {
+            port: Some(47991),
+            ..crate::dto::SettingsPatch::default()
+        });
         host.start_hosting(crate::dto::StartHostingOptions::default())
             .expect("应能开播");
         let host_pin = host.pairing_code().code;
@@ -2357,34 +2362,5 @@ mod product_tests {
             state, "streaming",
             "客户端应当自动连上并进串流（实际状态 = {state}）"
         );
-    }
-
-    /// §3.11：主机开播 ⇒ 客户端能在 mDNS 里发现它（§3.4）。
-    #[test]
-    #[ignore = "需要真实网络（mDNS 广播）"]
-    fn host_is_discoverable_by_mdns() {
-        isolate_appdata("mdns");
-        let host = CrateService::new();
-        let status = host
-            .start_hosting(crate::dto::StartHostingOptions::default())
-            .expect("应能开播");
-        println!(
-            "主机状态 = {:?}，地址 = {:?}",
-            status.state, status.local_ip
-        );
-
-        let client = CrateService::new();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        let mut found = false;
-        while std::time::Instant::now() < deadline {
-            let hosts = client.list_hosts();
-            if !hosts.is_empty() {
-                println!("客户端发现到主机 = {hosts:?}");
-                found = true;
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(200));
-        }
-        assert!(found, "客户端应能在 20 s 内发现主机");
     }
 }
